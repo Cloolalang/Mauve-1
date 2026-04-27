@@ -1,0 +1,3393 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import re
+import tempfile
+import time
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
+from serial.tools import list_ports
+
+from app.kpi_service import KpiRuntime, kpi_poll_loop
+from app.serial_engine import SerialEngine
+
+
+def _serial_state_file_path() -> str:
+    # Keep per-project state under backend/.state
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".state", "serial_last.json"))
+
+
+def _load_last_serial_state() -> dict | None:
+    path = _serial_state_file_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def _save_last_serial_state(port: str, baudrate: int) -> None:
+    path = _serial_state_file_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    payload = {"port": str(port), "baudrate": int(baudrate)}
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f)
+    except Exception:
+        # Non-fatal: app should continue even if state persistence fails.
+        pass
+
+
+_last_serial = _load_last_serial_state() or {}
+DEFAULT_PORT = os.getenv("MD_SERIAL_PORT", str(_last_serial.get("port") or "COM49"))
+DEFAULT_BAUD = int(os.getenv("MD_BAUDRATE", str(_last_serial.get("baudrate") or "115200")))
+
+engine = SerialEngine(port=DEFAULT_PORT, baudrate=DEFAULT_BAUD)
+kpi_runtime = KpiRuntime(poll_hz=float(os.getenv("MD_KPI_POLL_HZ", "1.0")))
+_kpi_task: asyncio.Task[None] | None = None
+_ws_push_task: asyncio.Task[None] | None = None
+_lock_guard_task: asyncio.Task[None] | None = None
+ws_clients: list[WebSocket] = []
+_instance_lock_file = None
+_desired_locks: dict[str, str] = {}
+_desired_locks_lock = asyncio.Lock()
+
+
+def _lock_file_path() -> str:
+    return os.path.join(tempfile.gettempdir(), "mobiledriver_backend.lock")
+
+
+def _acquire_instance_lock() -> None:
+    global _instance_lock_file
+    path = _lock_file_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    f = open(path, "a+", encoding="utf-8")
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            f.seek(0)
+            # Lock a single byte for process-wide singleton behavior.
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        f.close()
+        raise RuntimeError(
+            "Another MobileDriver backend instance is already running. "
+            "Stop the other instance before starting a new one."
+        ) from exc
+    _instance_lock_file = f
+
+
+def _release_instance_lock() -> None:
+    global _instance_lock_file
+    if not _instance_lock_file:
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            _instance_lock_file.seek(0)
+            msvcrt.locking(_instance_lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(_instance_lock_file.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        _instance_lock_file.close()
+    except Exception:
+        pass
+    _instance_lock_file = None
+
+
+class SendAtBody(BaseModel):
+    command: str = Field(min_length=1, description="AT command without CRLF")
+    timeout_sec: float = Field(default=2.0, ge=0.2, le=30.0)
+
+
+class ReopenBody(BaseModel):
+    port: str = Field(min_length=1)
+    baudrate: int = Field(default=115200, ge=300, le=4000000)
+
+
+class KpiPollBody(BaseModel):
+    poll_hz: float = Field(default=1.0, ge=0.1, le=5.0)
+
+
+class CopsSetBody(BaseModel):
+    mode: int = Field(description="AT+COPS mode (0=auto register, 2=deregister)")
+
+
+class MnoSelectBody(BaseModel):
+    profile: str = Field(description="One of: vodafone, vmo2, ee, h3g, auto")
+
+
+class DataGateBody(BaseModel):
+    inhibit: bool = Field(description="True=inhibit packet data, False=allow packet data")
+    password: str | None = Field(default=None, description="Required when inhibit=false")
+
+
+class LockSetBody(BaseModel):
+    rat_mode: str | None = Field(default=None, description='QNWPREFCFG mode_pref, e.g. AUTO/LTE/NR5G')
+    lte_band: str | None = Field(default=None, description='QNWPREFCFG lte_band string')
+    nr5g_band: str | None = Field(default=None, description='QNWPREFCFG nr5g_band or nsa_nr5g_band string')
+    nrdc_mode: int | None = Field(default=None, description='QNWPREFCFG nrdc_mode (0=off,1=on)')
+
+
+class PciLockSetBody(BaseModel):
+    lock: bool = Field(description="True=lock, False=unlock")
+    earfcn: int | None = Field(default=None, ge=0)
+    pci: int | None = Field(default=None, ge=0)
+
+
+class PingTestBody(BaseModel):
+    host: str = Field(default="8.8.8.8")
+    count: int = Field(default=10, ge=1, le=20)
+    cid: int = Field(default=1, ge=1, le=16)
+
+
+class VolteTestBody(BaseModel):
+    number: str = Field(min_length=3, max_length=40, description="Dial number, e.g. +447700900123")
+    hold_sec: int = Field(default=10, ge=3, le=120, description="Call hold duration before hangup")
+    password: str | None = Field(default=None, description="Unlock password (same as data allow password)")
+
+
+def _parse_cops_lines(lines: list[str]) -> dict:
+    # Expected: +COPS: <mode>[,<format>[,<oper>[,<AcT>]]]
+    for raw in lines:
+        if not raw.startswith("+COPS:"):
+            continue
+        payload = raw.split(":", 1)[1].strip()
+        if not payload:
+            return {}
+        parts = [p.strip().strip('"') for p in payload.split(",")]
+
+        def _to_int(s: str) -> int | None:
+            try:
+                return int(s)
+            except Exception:  # noqa: BLE001
+                return None
+
+        out = {"mode": _to_int(parts[0])}
+        if len(parts) > 1:
+            out["format"] = _to_int(parts[1])
+        if len(parts) > 2:
+            out["operator"] = parts[2] or None
+        if len(parts) > 3:
+            out["act"] = _to_int(parts[3])
+        return out
+    return {}
+
+
+def _sanitize_dial_number(raw: str) -> str:
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    keep = "+#*0123456789"
+    s = "".join(ch for ch in s if ch in keep)
+    if s.count("+") > 1:
+        return ""
+    if "+" in s and not s.startswith("+"):
+        return ""
+    return s
+
+
+def _parse_clcc_lines(lines: list[str]) -> list[dict]:
+    out: list[dict] = []
+
+    def _to_int(v: str) -> int | None:
+        try:
+            return int(v)
+        except Exception:  # noqa: BLE001
+            return None
+
+    for raw in lines:
+        if not raw.startswith("+CLCC:"):
+            continue
+        payload = raw.split(":", 1)[1].strip()
+        parts = [p.strip().strip('"') for p in payload.split(",")]
+        if len(parts) < 5:
+            continue
+        out.append(
+            {
+                "idx": _to_int(parts[0]),
+                "dir": _to_int(parts[1]),
+                "stat": _to_int(parts[2]),
+                "mode": _to_int(parts[3]),
+                "mpty": _to_int(parts[4]),
+                "number": parts[5] if len(parts) > 5 and parts[5] else None,
+                "type": _to_int(parts[6]) if len(parts) > 6 else None,
+            }
+        )
+    return out
+
+
+def _clcc_stat_label(stat: int | None) -> str:
+    m = {
+        0: "active",
+        1: "held",
+        2: "dialing",
+        3: "alerting",
+        4: "incoming",
+        5: "waiting",
+        6: "disconnect",
+    }
+    if stat is None:
+        return "unknown"
+    return m.get(stat, f"stat_{stat}")
+
+
+def _parse_ceer(lines: list[str]) -> str | None:
+    for raw in lines:
+        if not raw.startswith("+CEER:"):
+            continue
+        payload = raw.split(":", 1)[1].strip()
+        return payload or None
+    return None
+
+
+def _parse_qnwinfo_line(lines: list[str]) -> dict:
+    for raw in lines:
+        if not raw.startswith("+QNWINFO:"):
+            continue
+        m = re.findall(r'"([^"]*)"', raw)
+        if len(m) >= 4:
+            return {"act": m[0], "operator": m[1], "band": m[2], "channel": m[3]}
+    return {}
+
+
+def _parse_cops_scan_lines(lines: list[str]) -> list[dict]:
+    out: list[dict] = []
+    seen: set[tuple[str, str | None]] = set()
+    status_map = {
+        0: "unknown",
+        1: "available",
+        2: "current",
+        3: "forbidden",
+    }
+    # Typical tuple inside +COPS=?:
+    # (2,"Vodafone UK","voda UK","23415",7)
+    # (1,"EE","EE","23430",0)
+    rx = re.compile(r'\((\d+),"([^"]*)","([^"]*)","([^"]*)"(?:,(\d+))?\)')
+    for raw in lines:
+        if "+COPS:" not in raw:
+            continue
+        for m in rx.finditer(raw):
+            stat_i = int(m.group(1))
+            long_name = m.group(2) or None
+            short_name = m.group(3) or None
+            plmn = m.group(4) or None
+            act = int(m.group(5)) if m.group(5) is not None else None
+            key = (plmn or "", long_name or short_name or "")
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(
+                {
+                    "status": stat_i,
+                    "status_label": status_map.get(stat_i, f"status_{stat_i}"),
+                    "long_name": long_name,
+                    "short_name": short_name,
+                    "plmn": plmn,
+                    "act": act,
+                }
+            )
+    return out
+
+
+def _parse_qnwprefcfg_value(lines: list[str], key: str) -> str | None:
+    key_l = key.lower()
+    for raw in lines:
+        if not raw.startswith("+QNWPREFCFG:"):
+            continue
+        payload = raw.split(":", 1)[1].strip()
+        parts = [p.strip().strip('"') for p in payload.split(",")]
+        if len(parts) < 2:
+            continue
+        if parts[0].lower() != key_l:
+            continue
+        return ",".join(parts[1:]).strip() or None
+    return None
+
+
+async def _read_lock_status() -> dict:
+    keys = ["mode_pref", "lte_band", "nr5g_band", "nsa_nr5g_band", "nrdc_mode"]
+    raw_map: dict[str, dict] = {}
+    out: dict[str, str | None] = {}
+    for k in keys:
+        res = await engine.send_command(f'AT+QNWPREFCFG="{k}"', timeout_sec=4.0)
+        raw_map[k] = res
+        out[k] = _parse_qnwprefcfg_value(res.get("lines", []), k)
+    return {"values": out, "raw": raw_map}
+
+
+def _normalize_band_pref(value: str | None) -> str:
+    if value is None:
+        return ""
+    s = str(value).strip().strip('"')
+    if not s:
+        return ""
+    if s == "0":
+        return "0"
+    parts = [p.strip() for p in s.replace(",", ":").split(":") if p.strip()]
+    nums: list[str] = []
+    for p in parts:
+        if p.isdigit():
+            nums.append(str(int(p)))
+        else:
+            nums.append(p)
+    # Keep deterministic ordering when numeric.
+    if nums and all(x.isdigit() for x in nums):
+        uniq_sorted = sorted({int(x) for x in nums})
+        return ":".join(str(x) for x in uniq_sorted)
+    return ":".join(nums)
+
+
+def _normalize_lock_value(key: str, value: str | None) -> str:
+    if value is None:
+        return ""
+    s = str(value).strip().strip('"')
+    if key == "mode_pref":
+        return s.upper()
+    if key in {"lte_band", "nr5g_band", "nsa_nr5g_band"}:
+        return _normalize_band_pref(s)
+    if key == "nrdc_mode":
+        if not s:
+            return ""
+        if s in {"true", "TRUE", "on", "ON"}:
+            return "1"
+        try:
+            return "1" if int(s) else "0"
+        except ValueError:
+            return s
+    return s
+
+
+def _lock_value_matches(key: str, want: str, current: dict[str, str | None]) -> bool:
+    if key == "nr5g_band":
+        got_nr = _normalize_lock_value("nr5g_band", current.get("nr5g_band"))
+        got_nsa = _normalize_lock_value("nsa_nr5g_band", current.get("nsa_nr5g_band"))
+        return want == got_nr or want == got_nsa
+    got = _normalize_lock_value(key, current.get(key))
+    return want == got
+
+
+async def _apply_lock_requests(requested: dict[str, str]) -> dict[str, dict]:
+    set_results: dict[str, dict] = {}
+    if "mode_pref" in requested:
+        rat = requested["mode_pref"]
+        set_results["mode_pref"] = await engine.send_command(f'AT+QNWPREFCFG="mode_pref",{rat}', timeout_sec=8.0)
+    if "lte_band" in requested:
+        band = requested["lte_band"]
+        set_results["lte_band"] = await engine.send_command(f'AT+QNWPREFCFG="lte_band",{band}', timeout_sec=8.0)
+    if "nr5g_band" in requested:
+        band = requested["nr5g_band"]
+        set_results["nr5g_band"] = await engine.send_command(f'AT+QNWPREFCFG="nr5g_band",{band}', timeout_sec=8.0)
+        final_nr = str(set_results["nr5g_band"].get("final", "")).upper()
+        if final_nr == "OK":
+            set_results["nsa_nr5g_band"] = await engine.send_command(
+                f'AT+QNWPREFCFG="nsa_nr5g_band",{band}', timeout_sec=8.0
+            )
+    if "nrdc_mode" in requested:
+        mode = requested["nrdc_mode"]
+        set_results["nrdc_mode"] = await engine.send_command(f'AT+QNWPREFCFG="nrdc_mode",{mode}', timeout_sec=8.0)
+    return set_results
+
+
+async def _lock_guard_loop() -> None:
+    while True:
+        await asyncio.sleep(12.0)
+        async with _desired_locks_lock:
+            wanted = dict(_desired_locks)
+        if not wanted:
+            continue
+        try:
+            lock_status = await _read_lock_status()
+            current = lock_status["values"]
+            drift: dict[str, str] = {}
+            for key, want in wanted.items():
+                if not _lock_value_matches(key, want, current):
+                    drift[key] = want
+            if drift:
+                await _apply_lock_requests(drift)
+        except Exception:
+            # Non-fatal: guard should keep trying.
+            continue
+
+
+def _parse_qnwlock_common4g(lines: list[str]) -> dict | None:
+    for raw in lines:
+        if not raw.startswith("+QNWLOCK:"):
+            continue
+        payload = raw.split(":", 1)[1].strip()
+        parts = [p.strip().strip('"') for p in payload.split(",")]
+        if len(parts) < 4:
+            continue
+        if parts[0].lower() != "common/4g":
+            continue
+        try:
+            mode = int(parts[1])
+        except Exception:  # noqa: BLE001
+            mode = None
+        try:
+            earfcn = int(parts[2])
+        except Exception:  # noqa: BLE001
+            earfcn = None
+        try:
+            pci = int(parts[3])
+        except Exception:  # noqa: BLE001
+            pci = None
+        return {
+            "mode": mode,
+            "earfcn": earfcn,
+            "pci": pci,
+            "locked": mode == 1,
+        }
+    return None
+
+
+def _parse_ping_avg_ms(text: str) -> float | None:
+    # Windows ping summary: "Minimum = 29ms, Maximum = 57ms, Average = 43ms"
+    m_win = re.search(r"Average\s*=\s*(\d+)\s*ms", text, flags=re.IGNORECASE)
+    if m_win:
+        return float(m_win.group(1))
+
+    # Linux/macOS ping summary: "rtt min/avg/max/mdev = 8.121/11.451/14.330/2.116 ms"
+    m_unix = re.search(r"=\s*[\d.]+/([\d.]+)/[\d.]+/[\d.]+\s*ms", text, flags=re.IGNORECASE)
+    if m_unix:
+        try:
+            return float(m_unix.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_qping_urcs(lines: list[str]) -> dict:
+    # Quectel forms seen in the field:
+    # 1) +QPING: <cid>,"<ip>",<bytes>,<time_ms>,<ttl>
+    # 2) +QPING: <cid>,<sent>,<recv>,<lost>,<min_ms>,<max_ms>,<avg_ms>
+    # 3) +QPING: <code> (status/error style URC)
+    packet_times_ms: list[float] = []
+    summary: dict | None = None
+    status_codes: list[int] = []
+
+    for raw in lines:
+        if "+QPING:" not in raw:
+            continue
+        payload = raw.split(":", 1)[1].strip()
+
+        m_packet = re.fullmatch(r'(\d+)\s*,\s*"[^"]+"\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)', payload)
+        if m_packet:
+            packet_times_ms.append(float(m_packet.group(3)))
+            continue
+
+        m_summary = re.fullmatch(r"(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", payload)
+        if m_summary:
+            summary = {
+                "cid": int(m_summary.group(1)),
+                "sent": int(m_summary.group(2)),
+                "received": int(m_summary.group(3)),
+                "lost": int(m_summary.group(4)),
+                "min_ms": float(m_summary.group(5)),
+                "max_ms": float(m_summary.group(6)),
+                "avg_ms": float(m_summary.group(7)),
+            }
+            continue
+
+        m_code = re.fullmatch(r"(\d+)", payload)
+        if m_code:
+            status_codes.append(int(m_code.group(1)))
+
+    return {
+        "packet_times_ms": packet_times_ms,
+        "summary": summary,
+        "status_codes": status_codes,
+    }
+
+
+def _parse_cgatt_attached(lines: list[str]) -> bool | None:
+    for raw in lines:
+        if not raw.startswith("+CGATT:"):
+            continue
+        payload = raw.split(":", 1)[1].strip()
+        m = re.search(r"-?\d+", payload)
+        if not m:
+            continue
+        return int(m.group(0)) == 1
+    return None
+
+
+def _parse_cereg_stat(lines: list[str]) -> int | None:
+    for raw in lines:
+        if not raw.startswith("+CEREG:"):
+            continue
+        payload = raw.split(":", 1)[1].strip()
+        nums = [int(x) for x in re.findall(r"-?\d+", payload)]
+        if not nums:
+            continue
+        # +CEREG: <stat> or +CEREG: <n>,<stat>[,...]
+        return nums[0] if len(nums) == 1 else nums[1]
+    return None
+
+
+def _parse_qiact_contexts(lines: list[str]) -> list[dict]:
+    out: list[dict] = []
+    for raw in lines:
+        if not raw.startswith("+QIACT:"):
+            continue
+        payload = raw.split(":", 1)[1].strip()
+        m = re.match(r'(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*"([^"]*)"', payload)
+        if not m:
+            continue
+        out.append(
+            {
+                "cid": int(m.group(1)),
+                "active": int(m.group(3)) == 1,
+                "ip": m.group(4) or None,
+            }
+        )
+    return out
+
+
+MNO_PROFILES: dict[str, dict[str, str | None]] = {
+    # UK profiles requested by user; values are numeric PLMN for COPS format 2.
+    "vodafone": {"label": "Vodafone", "plmn": "23415"},
+    "vmo2": {"label": "VMO2", "plmn": "23410"},
+    "ee": {"label": "EE", "plmn": "23430"},
+    "h3g": {"label": "H3G", "plmn": "23420"},
+    "auto": {"label": "Auto", "plmn": None},
+}
+DATA_GATE_UNLOCK_PASSWORD = "nacelle"
+UK_LTE_SCAN_BANDS = "1:3:7:8:20:28:32:38"
+UK_NR_SCAN_BANDS = "1:3:8:28:78"
+MNO_OPERATOR_ALIASES: dict[str, set[str]] = {
+    # Common long/short names seen from AT+COPS? format 0 responses.
+    "vodafone": {"VODAFONE", "VODAFONE UK", "VODA UK"},
+    "vmo2": {"O2", "O2-UK", "TELEFONICA UK", "VMO2"},
+    "ee": {"EE", "EE LIMITED", "EE LTD", "TMOBILE UK", "T-MOBILE UK", "ORANGE"},
+    "h3g": {"3", "3 UK", "H3G", "THREE", "THREE UK", "HUTCHISON 3G"},
+}
+
+
+def _first_payload_line(lines: list[str]) -> str | None:
+    for raw in lines:
+        s = str(raw or "").strip()
+        if not s:
+            continue
+        up = s.upper()
+        if up in {"OK", "ERROR"}:
+            continue
+        if up.startswith("AT+"):
+            continue
+        return s
+    return None
+
+
+def _normalize_operator_token(raw: str | None) -> str:
+    return re.sub(r"[^A-Z0-9]+", " ", str(raw or "").strip().upper()).strip()
+
+
+def _profile_key_from_cops_operator(operator: str | None) -> str | None:
+    op = str(operator or "").strip()
+    if not op:
+        return None
+    for key, cfg in MNO_PROFILES.items():
+        plmn = str(cfg.get("plmn") or "").strip()
+        if plmn and op == plmn:
+            return key
+    op_norm = _normalize_operator_token(op)
+    if not op_norm:
+        return None
+    for key, aliases in MNO_OPERATOR_ALIASES.items():
+        if op_norm in {_normalize_operator_token(a) for a in aliases}:
+            return key
+    return None
+
+
+def _parse_qspn(lines: list[str]) -> str | None:
+    for raw in lines:
+        if not raw.startswith("+QSPN:"):
+            continue
+        m = re.findall(r'"([^"]*)"', raw)
+        # Common shape: +QSPN: "<disp_cond>","<spn_disp_cond>","<spn>",...
+        if len(m) >= 3:
+            return m[2] or None
+        for item in m:
+            if item and not item.isdigit():
+                return item
+    return None
+
+
+def _parse_cpol(lines: list[str]) -> list[dict]:
+    out: list[dict] = []
+    for raw in lines:
+        if not raw.startswith("+CPOL:"):
+            continue
+        payload = raw.split(":", 1)[1].strip()
+        parts = [p.strip().strip('"') for p in payload.split(",")]
+        if len(parts) < 3:
+            continue
+        try:
+            idx = int(parts[0])
+        except Exception:  # noqa: BLE001
+            idx = None
+        try:
+            fmt = int(parts[1])
+        except Exception:  # noqa: BLE001
+            fmt = None
+        oper = parts[2] or None
+        out.append({"index": idx, "format": fmt, "operator": oper, "raw": payload})
+    return out
+
+
+def _parse_crsm_hex(lines: list[str]) -> dict:
+    for raw in lines:
+        if not raw.startswith("+CRSM:"):
+            continue
+        payload = raw.split(":", 1)[1].strip()
+        nums = re.findall(r"-?\d+", payload)
+        sw1 = int(nums[0]) if len(nums) >= 1 else None
+        sw2 = int(nums[1]) if len(nums) >= 2 else None
+        m_hex = re.search(r'"([0-9A-Fa-f]*)"', payload)
+        hex_data = m_hex.group(1).upper() if m_hex else ""
+        return {"sw1": sw1, "sw2": sw2, "hex": hex_data}
+    return {"sw1": None, "sw2": None, "hex": ""}
+
+
+def _decode_plmn_bcd(raw6: str) -> dict | None:
+    try:
+        b = bytes.fromhex(raw6)
+    except Exception:  # noqa: BLE001
+        return None
+    if len(b) != 3:
+        return None
+    d = [
+        b[0] & 0x0F,  # mcc1
+        (b[0] >> 4) & 0x0F,  # mcc2
+        b[1] & 0x0F,  # mcc3
+        b[2] & 0x0F,  # mnc1
+        (b[2] >> 4) & 0x0F,  # mnc2
+        (b[1] >> 4) & 0x0F,  # mnc3 (or F filler)
+    ]
+    if all(x == 0xF for x in d):
+        return None
+    if any(x > 9 for x in d[:5]):
+        return None
+    mcc = f"{d[0]}{d[1]}{d[2]}"
+    if d[5] == 0xF:
+        mnc = f"{d[3]}{d[4]}"
+    elif d[5] <= 9:
+        mnc = f"{d[3]}{d[4]}{d[5]}"
+    else:
+        return None
+    return {"mcc": mcc, "mnc": mnc, "plmn": f"{mcc}-{mnc}"}
+
+
+def _decode_plmn_file(hex_data: str, with_act: bool) -> list[dict]:
+    s = re.sub(r"[^0-9A-Fa-f]", "", hex_data or "").upper()
+    rec_len = 10 if with_act else 6
+    out: list[dict] = []
+    if rec_len <= 0:
+        return out
+    n = len(s) // rec_len
+    for i in range(n):
+        rec = s[i * rec_len : (i + 1) * rec_len]
+        if not rec or all(ch == "F" for ch in rec):
+            continue
+        core = _decode_plmn_bcd(rec[:6])
+        if not core:
+            continue
+        if with_act and len(rec) >= 10:
+            core["act_hex"] = rec[6:10]
+        out.append(core)
+    return out
+
+
+def _decode_mnc_len_from_ad(hex_data: str) -> int | None:
+    s = re.sub(r"[^0-9A-Fa-f]", "", hex_data or "").upper()
+    if len(s) < 8:
+        return None
+    # For many USIM profiles, byte 4 lower nibble stores MNC length (2 or 3).
+    b4 = int(s[6:8], 16)
+    mnc_len = b4 & 0x0F
+    return mnc_len if mnc_len in (2, 3) else None
+
+
+def _decode_hplmn_timer_minutes(hex_data: str) -> int | None:
+    s = re.sub(r"[^0-9A-Fa-f]", "", hex_data or "").upper()
+    if len(s) < 2:
+        return None
+    raw = int(s[:2], 16)
+    if raw in (0x00, 0xFF):
+        return None
+    # 3GPP: value in units of 6 minutes.
+    return raw * 6
+
+
+def _decode_ust_enabled_services(hex_data: str) -> list[int]:
+    s = re.sub(r"[^0-9A-Fa-f]", "", hex_data or "").upper()
+    out: list[int] = []
+    if len(s) < 2:
+        return out
+    data = bytes.fromhex(s)
+    for i, b in enumerate(data):
+        for bit in range(8):
+            if b & (1 << bit):
+                out.append(i * 8 + bit + 1)
+    return out
+
+
+async def _broadcast_kpi_loop() -> None:
+    while True:
+        await asyncio.sleep(0.5)
+        if not ws_clients:
+            continue
+        async with kpi_runtime.lock:
+            payload = json.dumps(
+                {
+                    "sample": kpi_runtime.snapshot,
+                    "poll_running": kpi_runtime.poll_running,
+                    "poll_hz": kpi_runtime.poll_hz,
+                    "last_error": kpi_runtime.last_error,
+                }
+            )
+        dead: list[WebSocket] = []
+        for ws in ws_clients:
+            try:
+                await ws.send_text(payload)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            if ws in ws_clients:
+                ws_clients.remove(ws)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    global _kpi_task, _ws_push_task, _lock_guard_task
+    _acquire_instance_lock()
+    try:
+        await engine.start()
+        st = await engine.status()
+        if st.get("serial_open"):
+            _save_last_serial_state(str(st.get("port") or engine.port), int(st.get("baudrate") or engine.baudrate))
+        _kpi_task = asyncio.create_task(kpi_poll_loop(engine, kpi_runtime))
+        _ws_push_task = asyncio.create_task(_broadcast_kpi_loop())
+        _lock_guard_task = asyncio.create_task(_lock_guard_loop())
+        yield
+        kpi_runtime.poll_running = False
+        if _kpi_task:
+            _kpi_task.cancel()
+        if _ws_push_task:
+            _ws_push_task.cancel()
+        if _lock_guard_task:
+            _lock_guard_task.cancel()
+        await engine.stop()
+    finally:
+        _release_instance_lock()
+
+
+app = FastAPI(
+    title="MobileDriver Serial + KPI Engine",
+    version="0.2.0",
+    lifespan=lifespan,
+)
+
+
+@app.get("/", response_class=HTMLResponse)
+async def home() -> HTMLResponse:
+    html = """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MobileDriver KPI</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; background: #111; color: #f3f3f3; }
+    h1 { margin: 0 0 12px 0; font-size: 22px; }
+    .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+    .card { border: 1px solid #333; border-radius: 10px; padding: 12px; background: #1b1b1b; }
+    .label { color: #9aa0a6; font-size: 12px; }
+    .value { font-size: 20px; font-weight: 700; margin-top: 4px; }
+    .row { display: flex; justify-content: space-between; margin-top: 8px; }
+    .mono { font-family: Consolas, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+    .ok { color: #39d353; }
+    .warn { color: #ffcc66; }
+    .err { color: #ff7070; }
+  </style>
+</head>
+<body>
+  <h1>MobileDriver KPI</h1>
+  <div class="label">Live modem snapshot from COM AT engine</div>
+  <div id="status" class="label" style="margin-top:8px;">Connecting...</div>
+  <div style="margin-top:10px; display:flex; gap:14px; align-items:center; flex-wrap:wrap;">
+    <button id="btn-clear-charts">Clear All Charts</button>
+    <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6;">
+      <input id="rf-smooth-toggle" type="checkbox" />
+      RF smoothing (rolling avg, last 10 samples)
+    </label>
+  </div>
+
+  <div class="grid" style="margin-top:12px;">
+    <div class="card">
+      <div class="label">Serial Port</div>
+      <div class="row"><span class="label">Current</span><span id="serial-current">-</span></div>
+      <div class="row"><span class="label">Open</span><span id="serial-open">-</span></div>
+      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+        <select id="serial-port-select" style="min-width:180px; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:4px 6px;"></select>
+        <button id="btn-serial-refresh">Refresh Ports</button>
+        <button id="btn-serial-autopick">Auto-select AT Port</button>
+        <button id="btn-serial-reconnect">Reconnect</button>
+        <button id="btn-modem-reset">Reset Modem</button>
+      </div>
+      <div id="serialmsg" class="label" style="margin-top:8px;">-</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Access / Operator</div>
+      <div class="row"><span class="label">Operator</span><span id="operator">-</span></div>
+      <div class="row"><span class="label">Modem FW</span><span id="modemfw">-</span></div>
+      <div class="row"><span class="label">Updated</span><span id="updated">-</span></div>
+    </div>
+
+    <div class="card">
+      <div class="label">Data Service KPI</div>
+      <div class="row"><span class="label">APN</span><span id="ds-apn">-</span></div>
+      <div class="row"><span class="label">PDP Contexts (active/total)</span><span id="ds-pdp">-</span></div>
+      <div class="row"><span class="label">CID1</span><span id="ds-cid1">-</span></div>
+      <div class="row"><span class="label">CID1 IP</span><span id="ds-ip">-</span></div>
+      <div class="row"><span class="label">Packet Attach</span><span id="ds-attach">-</span></div>
+      <div class="row"><span class="label">EPS Registration</span><span id="ds-reg">-</span></div>
+      <div class="row"><span class="label">USB data stack</span><span id="ds-usbnet">-</span></div>
+      <div class="row"><span class="label">Netdev status</span><span id="ds-netdev">-</span></div>
+      <div class="row"><span class="label">EPS DL throughput</span><span id="ds-dl">-</span></div>
+      <div class="row"><span class="label">EPS UL throughput</span><span id="ds-ul">-</span></div>
+      <div class="row"><span class="label">EPS data counters (RX/TX)</span><span id="ds-counters">-</span></div>
+      <div id="ds-warn" class="label" style="margin-top:8px;">-</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Primary Cell</div>
+      <div class="row"><span class="label">RAT</span><span id="rat">-</span></div>
+      <div class="row"><span class="label">State</span><span id="state">-</span></div>
+      <div class="row"><span class="label">Band</span><span id="band">-</span></div>
+      <div class="row"><span class="label">DL/UL BW</span><span id="bwpair">-</span></div>
+      <div class="row"><span class="label">EARFCN/PCI</span><span id="earfcnpci">-</span></div>
+      <div class="row"><span class="label">Cell ID</span><span id="cellid">-</span></div>
+    </div>
+
+    <div class="card">
+      <div class="label">Primary Cell RF KPI</div>
+      <div class="row"><span class="label">RSRP</span><span id="rsrp">-</span></div>
+      <div class="row"><span class="label">RSRQ</span><span id="rsrq">-</span></div>
+      <div class="row"><span class="label">SINR (QSINR PRX)</span><span id="sinr">-</span></div>
+      <div class="row"><span class="label">RSSI</span><span id="rssi">-</span></div>
+      <div class="row"><span class="label">TX Power</span><span id="txpwr">-</span></div>
+      <div class="row"><span class="label">Primary cell intra-cell dominance</span><span id="dominance">-</span></div>
+    </div>
+
+    <div class="card">
+      <div class="label">Neighbour Cells RF KPI</div>
+      <div class="row"><span class="label">1st strongest neighbour RSRP</span><span id="nrsrp1">-</span></div>
+      <div class="row"><span class="label">1st strongest neighbour PCI</span><span id="npci1">-</span></div>
+      <div class="row"><span class="label">1st strongest neighbour EARFCN (intra)</span><span id="nearfcn1">-</span></div>
+    </div>
+
+    <div class="card">
+      <div class="label">RSRP Trend (dBm)</div>
+      <canvas id="rsrpchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+    </div>
+
+    <div class="card">
+      <div class="label">RSRQ Trend (dB)</div>
+      <canvas id="rsrqchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+    </div>
+
+    <div class="card">
+      <div class="label">SINR Trend (QSINR PRX)</div>
+      <canvas id="sinrchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+    </div>
+
+    <div class="card">
+      <div class="label">RSSI Trend (dBm)</div>
+      <canvas id="rssichart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Intra-cell Dominance Trend (dB)</div>
+      <canvas id="dominancechart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Bandwidth Trend (DL BW)</div>
+      <canvas id="bwchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+    </div>
+
+    <div class="card">
+      <div class="label">State Trend</div>
+      <canvas id="statechart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Band Trend</div>
+      <canvas id="bandchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+    </div>
+
+    <div class="card">
+      <div class="label">PCI Trend</div>
+      <canvas id="pcichart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Neighbour RSRP Trend (dBm)</div>
+      <canvas id="nbrsrpchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Neighbour PCI Trend</div>
+      <canvas id="nbpcichart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Per-Chain Metrics</div>
+      <div id="chains" class="mono">-</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Registration Control (COPS)</div>
+      <div class="row"><span class="label">Mode</span><span id="copsmode">-</span></div>
+      <div class="row"><span class="label">Operator</span><span id="copsoperator">-</span></div>
+      <div class="row"><span class="label">AcT</span><span id="copsact">-</span></div>
+      <div style="margin-top:8px;">
+        <label style="display:flex; align-items:center; gap:8px;">
+          <input id="cops-scan-uk-only" type="checkbox" checked />
+          <span>UK-only scan bands (LTE+NR)</span>
+        </label>
+      </div>
+      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+        <button id="btn-cops-read">Read COPS</button>
+        <button id="btn-cops-scan">Scan Operators</button>
+        <button id="btn-cops-auto">Auto Register</button>
+        <button id="btn-cops-dereg">Deregister</button>
+      </div>
+      <div class="label" style="margin-top:8px;">Scan result</div>
+      <div id="copsscan" class="mono">-</div>
+      <div id="copsmsg" class="label" style="margin-top:8px;">-</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Roaming MNO + Data Gate</div>
+      <div class="row"><span class="label">Selected profile</span><span id="mno-selected">-</span></div>
+      <div class="row"><span class="label">Current PLMN</span><span id="mno-current-plmn">-</span></div>
+      <div style="margin-top:8px;">
+        <div class="label">MNO profile:</div>
+        <select id="mno-select" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;">
+          <option value="vodafone">Vodafone</option>
+          <option value="vmo2">VMO2</option>
+          <option value="ee">EE</option>
+          <option value="h3g">H3G</option>
+          <option value="auto">Auto</option>
+        </select>
+      </div>
+      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+        <button id="btn-mno-read">Read MNO</button>
+        <button id="btn-mno-apply">Apply MNO</button>
+      </div>
+      <div class="row" style="margin-top:10px;"><span class="label">Data gate</span><span id="data-gate-state">-</span></div>
+      <div class="row"><span class="label">Active PDP contexts</span><span id="data-gate-active">-</span></div>
+      <div style="margin-top:8px;">
+        <div class="label">Unlock password (Allow Data):</div>
+        <input id="data-gate-password" type="password" placeholder="Enter password" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+      </div>
+      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+        <button id="btn-data-inhibit">Inhibit Data</button>
+        <button id="btn-data-allow">Allow Data</button>
+      </div>
+      <div id="mnomsg" class="label" style="margin-top:8px;">-</div>
+    </div>
+
+    <div class="card">
+      <div class="label">RAT / Band Lock (QNWPREFCFG)</div>
+      <div class="row"><span class="label">RAT mode</span><span id="lock-ratmode">-</span></div>
+      <div class="row"><span class="label">LTE bands</span><span id="lock-lteband">-</span></div>
+      <div class="row"><span class="label">CA policy</span><span id="lock-ca">-</span></div>
+      <div class="row"><span class="label">NR bands</span><span id="lock-nrband">-</span></div>
+      <div class="row"><span class="label">NRDC</span><span id="lock-nrdc">-</span></div>
+      <div style="margin-top:10px;">
+        <div class="label">Set RAT mode (AUTO/LTE/NR5G):</div>
+        <select id="input-ratmode" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;">
+          <option value="">(no change)</option>
+          <option value="AUTO">AUTO</option>
+          <option value="LTE">LTE</option>
+          <option value="NR5G">NR5G</option>
+          <option value="LTE:NR5G">LTE:NR5G</option>
+          <option value="NR5G:LTE">NR5G:LTE</option>
+        </select>
+      </div>
+      <div style="margin-top:8px;">
+        <div class="label">CA switch (LTE):</div>
+        <label style="display:flex; align-items:center; gap:8px; margin-top:4px;">
+          <input id="input-ca-enable" type="checkbox" checked />
+          <span>CA ON (multi/all LTE bands)</span>
+        </label>
+      </div>
+      <div style="margin-top:8px;">
+        <div class="label">CA ON bands (use 0 for all):</div>
+        <input id="input-ca-on-bands" placeholder="optional (e.g. 3:20 or 0)" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+      </div>
+      <div style="margin-top:8px;">
+        <div class="label">CA OFF single LTE band (example: 8):</div>
+        <input id="input-ca-single-band" placeholder="8" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+      </div>
+      <div style="margin-top:8px;">
+        <div class="label">Set LTE bands (example: 1:3:7:20 or 0 for all):</div>
+        <input id="input-lteband" placeholder="optional override" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+      </div>
+      <div style="margin-top:8px;">
+        <div class="label">Set NR bands (example: 78:77 or 0 for all):</div>
+        <input id="input-nrband" placeholder="0" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+      </div>
+      <div style="margin-top:8px;">
+        <div class="label">NRDC switch:</div>
+        <label style="display:flex; align-items:center; gap:8px; margin-top:4px;">
+          <input id="input-nrdc-enable" type="checkbox" />
+          <span>NRDC ON</span>
+        </label>
+      </div>
+      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+        <button id="btn-lock-read">Read Locks</button>
+        <button id="btn-lock-set">Apply Locks</button>
+      </div>
+      <div id="lockmsg" class="label" style="margin-top:8px;">-</div>
+    </div>
+
+    <div class="card">
+      <div class="label">PCI Lock (QNWLOCK common/4g)</div>
+      <div class="row"><span class="label">Lock state</span><span id="pcilock-state">-</span></div>
+      <div class="row"><span class="label">Locked EARFCN/PCI</span><span id="pcilock-pair">-</span></div>
+      <div style="margin-top:8px;">
+        <div class="label">EARFCN:</div>
+        <input id="input-pcilock-earfcn" placeholder="6300" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+      </div>
+      <div style="margin-top:8px;">
+        <div class="label">PCI:</div>
+        <input id="input-pcilock-pci" placeholder="106" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+      </div>
+      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+        <button id="btn-pcilock-read">Read PCI Lock</button>
+        <button id="btn-pcilock-lock-current">Lock Current Cell</button>
+        <button id="btn-pcilock-lock-input">Lock Input</button>
+        <button id="btn-pcilock-unlock">Unlock</button>
+      </div>
+      <div id="pcilock-msg" class="label" style="margin-top:8px;">-</div>
+    </div>
+
+    <div class="card">
+      <div class="label">SIM High-Level + PLMN Inspector</div>
+      <div class="row"><span class="label">IMEI</span><span id="sim-imei">-</span></div>
+      <div class="row"><span class="label">IMSI</span><span id="sim-imsi">-</span></div>
+      <div class="row"><span class="label">SPN</span><span id="sim-spn">-</span></div>
+      <div class="row"><span class="label">Current COPS</span><span id="sim-cops">-</span></div>
+      <div class="row"><span class="label">Preferred PLMN entries</span><span id="sim-cpol-count">-</span></div>
+      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+        <button id="btn-sim-high-read">Read SIM High-Level</button>
+        <button id="btn-sim-inspect-read">Read SIM Inspector</button>
+      </div>
+      <div id="simmsg" class="label" style="margin-top:8px;">-</div>
+      <pre id="siminspect" class="mono" style="max-height:180px; overflow:auto; margin-top:8px;">-</pre>
+    </div>
+
+    <div class="card">
+      <div class="label">Ping Test</div>
+      <div class="row"><span class="label">Target</span><span>8.8.8.8</span></div>
+      <div class="row"><span class="label">Type</span><span>AT+QPING</span></div>
+      <div class="row"><span class="label">Count</span><span>10</span></div>
+      <div class="row">
+        <span class="label">Auto ping every 10s</span>
+        <label style="display:flex; align-items:center; gap:6px;">
+          <input id="auto-ping-toggle" type="checkbox" />
+          <span id="auto-ping-state">OFF</span>
+        </label>
+      </div>
+      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+        <button id="btn-ping-test">Run AT Ping Test</button>
+      </div>
+      <div id="pingmsg" class="label" style="margin-top:8px;">-</div>
+      <pre id="pingtrace" class="mono" style="max-height:120px; overflow:auto; margin-top:8px;">-</pre>
+    </div>
+
+    <div class="card">
+      <div class="label">VoLTE Call Test</div>
+      <div class="row"><span class="label">Hold time</span><span>10 seconds</span></div>
+      <div style="margin-top:8px;">
+        <div class="label">Dial number:</div>
+        <input id="volte-number" placeholder="+447700900123" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+      </div>
+      <div style="margin-top:8px;">
+        <div class="label">Unlock password:</div>
+        <input id="volte-password" type="password" placeholder="Enter password" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+      </div>
+      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+        <button id="btn-volte-test">Run VoLTE Call Test</button>
+      </div>
+      <div id="volte-msg" class="label" style="margin-top:8px;">-</div>
+      <pre id="volte-trace" class="mono" style="max-height:140px; overflow:auto; margin-top:8px;">-</pre>
+    </div>
+
+    <div class="card">
+      <div class="label">Ping Trend (ms)</div>
+      <canvas id="pingchart" width="420" height="180" style="width:100%; height:180px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label" style="margin-top:6px;">Last 30 ping samples</div>
+    </div>
+
+    <div class="card" style="grid-column: 1 / -1;">
+      <div class="label">AT Console</div>
+      <pre id="atlog" class="mono" style="max-height:220px; overflow:auto; margin-top:8px;">-</pre>
+    </div>
+  </div>
+
+  <script>
+    const el = (id) => document.getElementById(id);
+    const fmt = (v, unit = "") => (v === null || v === undefined ? "-" : `${v}${unit}`);
+    const fmtTs = (s) => (!s ? "-" : new Date(s * 1000).toLocaleTimeString());
+    const fmtKbps = (v) => {
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 0) return "-";
+      if (n < 1000) return `${n.toFixed(1)} kbps`;
+      return `${(n / 1000).toFixed(2)} Mbps`;
+    };
+    const fmtTxPower = (v) => {
+      if (v === null || v === undefined) return "-";
+      const n = Number(v);
+      if (!Number.isFinite(n)) return "-";
+      // Some firmware reports TX power in deci-dBm (e.g. 230 -> 23.0 dBm).
+      const dbm = Math.abs(n) > 70 ? n / 10 : n;
+      const shown = Math.abs(dbm % 1) < 0.05 ? dbm.toFixed(0) : dbm.toFixed(1);
+      return `${shown} dBm`;
+    };
+    let autoPingTimer = null;
+    let pingBusy = false;
+    let serialBaud = 115200;
+    let serialPorts = [];
+    let currentServingEarfcn = null;
+    let currentServingPci = null;
+    let lastDataService = {};
+    const pingHistory = [];
+    const rfHistory = { rsrp: [], rsrq: [], sinr: [], rssi: [], dominance: [] };
+    const bwHistory = [];
+    const pciHistory = [];
+    const neighbourHistory = { rsrp: [], pci: [] };
+    const categoryHistory = { state: [], band: [] };
+    const CHART_WINDOW_MS = 60 * 1000;
+    const RF_SMOOTH_WINDOW = 10;
+    let rfSmoothingEnabled = false;
+    let lastTrendSampleTs = null;
+    const copsModeName = (m) => {
+      if (m === 0) return "0 (Auto)";
+      if (m === 1) return "1 (Manual)";
+      if (m === 2) return "2 (Deregistered)";
+      if (m === 3) return "3 (Format only)";
+      if (m === 4) return "4 (Manual/auto)";
+      return m === null || m === undefined ? "-" : String(m);
+    };
+    const UK_MNO_BY_PLMN = {
+      "23415": "Vodafone",
+      "23410": "VMO2",
+      "23430": "EE",
+      "23420": "H3G"
+    };
+
+    function formatOperatorName(raw) {
+      const s = String(raw || "").trim();
+      if (!s) return "-";
+      const mno = UK_MNO_BY_PLMN[s];
+      if (mno) return `${mno} (${s})`;
+      return s;
+    }
+
+    function pruneHistoryByAge(history, nowMs = Date.now()) {
+      if (!Array.isArray(history) || history.length === 0) return;
+      const cutoff = nowMs - CHART_WINDOW_MS;
+      while (history.length && Number(history[0]?.t || 0) < cutoff) history.shift();
+    }
+
+    function smoothSeries(samples, windowSize) {
+      if (!Array.isArray(samples) || !samples.length) return [];
+      const out = [];
+      let rollingSum = 0;
+      for (let i = 0; i < samples.length; i++) {
+        const v = Number(samples[i].v);
+        if (!Number.isFinite(v)) continue;
+        rollingSum += v;
+        if (i >= windowSize) rollingSum -= Number(samples[i - windowSize].v) || 0;
+        const count = Math.min(i + 1, windowSize);
+        out.push({ t: samples[i].t, v: rollingSum / count });
+      }
+      return out;
+    }
+
+    function applySnap(payload) {
+      const sample = payload?.sample || {};
+      const net = sample.network || {};
+      const modem = sample.modem || {};
+      const ds = sample.data_service || {};
+      lastDataService = ds;
+      const srv = sample.servingcell || {};
+      const lte = srv.lte || {};
+      const qrsrp = sample.qrsrp || {};
+      const qrsrq = sample.qrsrq || {};
+      const qsinr = sample.qsinr || {};
+      const nb = sample.neighbour || {};
+      const inService =
+        String(net.service || "").toUpperCase() !== "NO SERVICE" &&
+        !!net.act &&
+        String(net.act).toUpperCase() !== "NONE";
+
+      el("operator").textContent = formatOperatorName(net.operator);
+      el("band").textContent = net.band || "-";
+      el("modemfw").textContent = modem.firmware || "-";
+      el("ds-apn").textContent = ds.apn || "-";
+      if (ds.active_pdp_contexts === null || ds.active_pdp_contexts === undefined || ds.pdp_contexts === null || ds.pdp_contexts === undefined) {
+        el("ds-pdp").textContent = "-";
+      } else {
+        el("ds-pdp").textContent = `${ds.active_pdp_contexts}/${ds.pdp_contexts}`;
+      }
+
+      const cid1State = ds.cid1_active === true ? "UP" : ds.cid1_active === false ? "DOWN" : "-";
+      el("ds-cid1").textContent = cid1State;
+      el("ds-cid1").className = ds.cid1_active === true ? "ok" : ds.cid1_active === false ? "warn" : "";
+      el("ds-ip").textContent = ds.cid1_ip || "-";
+
+      const attachText =
+        ds.packet_attached === true ? "Attached" : ds.packet_attached === false ? "Detached" : "-";
+      el("ds-attach").textContent = attachText;
+      el("ds-attach").className = ds.packet_attached === true ? "ok" : ds.packet_attached === false ? "warn" : "";
+
+      const regStat = ds.eps_reg_stat === null || ds.eps_reg_stat === undefined ? "-" : ` (${ds.eps_reg_stat})`;
+      const regText =
+        ds.eps_registered === true
+          ? `Registered${regStat}`
+          : ds.eps_registered === false
+            ? `Not registered${regStat}`
+            : "-";
+      el("ds-reg").textContent = regText;
+      el("ds-reg").className = ds.eps_registered === true ? "ok" : ds.eps_registered === false ? "warn" : "";
+      el("ds-usbnet").textContent =
+        ds.usbnet_mode_label || (ds.usbnet_mode === null || ds.usbnet_mode === undefined ? "-" : `mode ${ds.usbnet_mode}`);
+      el("ds-netdev").textContent = ds.qnetdev_status || "-";
+      el("ds-dl").textContent = fmtKbps(ds.eps_dl_kbps);
+      el("ds-ul").textContent = fmtKbps(ds.eps_ul_kbps);
+      const rxKb = Number(ds.qgdcnt_rx_kb);
+      const txKb = Number(ds.qgdcnt_tx_kb);
+      if (Number.isFinite(rxKb) && Number.isFinite(txKb) && rxKb >= 0 && txKb >= 0) {
+        el("ds-counters").textContent = `${rxKb} kB / ${txKb} kB`;
+      } else {
+        el("ds-counters").textContent = "-";
+      }
+      if (ds.usbnet_mode_label && /RNDIS|NDIS|QMI/i.test(String(ds.usbnet_mode_label))) {
+        el("ds-warn").textContent = "Note: USB data stack active (NDIS/QMI-like mode). QPING may timeout when host WAN session is busy.";
+        el("ds-warn").className = "label warn";
+      } else {
+        el("ds-warn").textContent = "-";
+        el("ds-warn").className = "label";
+      }
+
+      const ratVal = inService ? (lte.rat || srv.mode || "-") : "-";
+      el("rat").textContent = ratVal;
+      el("state").textContent = srv.state || "-";
+      const dlBw = lte.dl_bw;
+      const ulBw = lte.ul_bw;
+      if (dlBw === null || dlBw === undefined || ulBw === null || ulBw === undefined) {
+        el("bwpair").textContent = "-";
+      } else {
+        el("bwpair").textContent = `${dlBw}/${ulBw} MHz`;
+      }
+      const earfcn = lte.earfcn;
+      const pci = lte.pcid;
+      currentServingEarfcn = Number.isFinite(Number(earfcn)) ? Number(earfcn) : null;
+      currentServingPci = Number.isFinite(Number(pci)) ? Number(pci) : null;
+      if (earfcn === null || earfcn === undefined || pci === null || pci === undefined) {
+        el("earfcnpci").textContent = "-";
+      } else {
+        el("earfcnpci").textContent = `${earfcn}/${pci}`;
+      }
+      el("cellid").textContent = lte.cell_id_hex || "-";
+
+      el("rsrp").textContent = fmt(lte.rsrp, " dBm");
+      el("nrsrp1").textContent = fmt(nb.strongest_rsrp, " dBm");
+      el("npci1").textContent = fmt(nb.strongest_pci);
+      el("nearfcn1").textContent = fmt(nb.strongest_earfcn);
+      el("rsrq").textContent = fmt(lte.rsrq, " dB");
+      el("sinr").textContent = fmt(qsinr.prx, " dB");
+      el("rssi").textContent = fmt(lte.rssi, " dBm");
+      el("txpwr").textContent = fmtTxPower(lte.tx_power);
+      const dominance = (lte.rsrp === null || lte.rsrp === undefined || nb.strongest_rsrp === null || nb.strongest_rsrp === undefined)
+        ? null
+        : Number(lte.rsrp) - Number(nb.strongest_rsrp);
+      el("dominance").textContent = fmt(dominance, " dB");
+      el("updated").textContent = fmtTs(sample.sample_ts);
+
+      const trendTs = sample.sample_ts || null;
+      if (trendTs !== lastTrendSampleTs) {
+        lastTrendSampleTs = trendTs;
+        addRfSample("rsrp", lte.rsrp, trendTs);
+        addRfSample("rsrq", lte.rsrq, trendTs);
+        addRfSample("sinr", qsinr.prx, trendTs);
+        addRfSample("rssi", lte.rssi, trendTs);
+        addRfSample("dominance", dominance, trendTs);
+        addBwSample(lte.dl_bw, trendTs);
+        addPciSample(lte.pcid, trendTs);
+        addNeighbourSample("rsrp", nb.strongest_rsrp, trendTs);
+        addNeighbourSample("pci", nb.strongest_pci, trendTs);
+        addCategorySample("state", srv.state || "-", trendTs);
+        addCategorySample("band", net.band || "-", trendTs);
+      }
+
+      el("chains").textContent =
+        `QRSRP: PRX=${fmt(qrsrp.prx)} DRX=${fmt(qrsrp.drx)} RX2=${fmt(qrsrp.rx2)} RX3=${fmt(qrsrp.rx3)}\\n` +
+        `QRSRQ: PRX=${fmt(qrsrq.prx)} DRX=${fmt(qrsrq.drx)} RX2=${fmt(qrsrq.rx2)} RX3=${fmt(qrsrq.rx3)}\\n` +
+        `QSINR: PRX=${fmt(qsinr.prx)} DRX=${fmt(qsinr.drx)} RX2=${fmt(qsinr.rx2)} RX3=${fmt(qsinr.rx3)}`;
+
+      const st = el("status");
+      if (payload.last_error) {
+        st.textContent = `Poll warning: ${payload.last_error}`;
+        st.className = "label warn";
+      } else {
+        st.textContent = `Connected. Poll ${payload.poll_hz} Hz`;
+        st.className = "label ok";
+      }
+    }
+
+    function applyCops(data, msg = "") {
+      const c = data?.cops || {};
+      el("copsmode").textContent = copsModeName(c.mode);
+      el("copsoperator").textContent = formatOperatorName(c.operator);
+      el("copsact").textContent = c.act === null || c.act === undefined ? "-" : String(c.act);
+      if (msg) el("copsmsg").textContent = msg;
+    }
+
+    function applyCopsScan(data, msg = "") {
+      const items = Array.isArray(data?.operators) ? data.operators : [];
+      if (!items.length) {
+        el("copsscan").textContent = "No operators parsed (scan may be unsupported or timed out).";
+      } else {
+        const lines = items.map((it) => {
+          const label = it.long_name || it.short_name || "Unknown";
+          const plmn = it.plmn ? ` (${it.plmn})` : "";
+          const act = it.act === null || it.act === undefined ? "" : ` AcT=${it.act}`;
+          const st = it.status_label || "-";
+          return `${label}${plmn} - ${st}${act}`;
+        });
+        el("copsscan").textContent = lines.join("\\n");
+      }
+      if (msg) el("copsmsg").textContent = msg;
+    }
+
+    function applyLocks(data, msg = "") {
+      const v = data?.locks || {};
+      el("lock-ratmode").textContent = v.mode_pref || "-";
+      el("lock-lteband").textContent = v.lte_band || "-";
+      const lteVal = String(v.lte_band || "");
+      const caPolicy = !lteVal ? "-" : (lteVal === "0" || lteVal.includes(":") ? "ON (multi/all)" : "OFF (single band)");
+      el("lock-ca").textContent = caPolicy;
+      el("lock-nrband").textContent = v.nr5g_band || v.nsa_nr5g_band || "-";
+      el("lock-nrdc").textContent = String(v.nrdc_mode || "0") === "1" ? "ON" : "OFF";
+      el("input-nrdc-enable").checked = String(v.nrdc_mode || "0") === "1";
+      const ratSel = el("input-ratmode");
+      if (v.mode_pref && Array.from(ratSel.options).some((o) => o.value === v.mode_pref)) {
+        ratSel.value = v.mode_pref;
+      }
+      if (msg) el("lockmsg").textContent = msg;
+    }
+
+    function applyPciLock(data, msg = "") {
+      const p = data?.pci_lock || {};
+      const locked = !!p.locked;
+      el("pcilock-state").textContent = locked ? "LOCKED" : "UNLOCKED";
+      el("pcilock-state").className = locked ? "warn" : "ok";
+      const earfcn = p.earfcn;
+      const pci = p.pci;
+      if (earfcn === null || earfcn === undefined || pci === null || pci === undefined) {
+        el("pcilock-pair").textContent = "-";
+      } else {
+        el("pcilock-pair").textContent = `${earfcn}/${pci}`;
+      }
+      if (msg) el("pcilock-msg").textContent = msg;
+    }
+
+    function applyMnoState(data, msg = "") {
+      const sel = String(data?.selected_profile || "auto");
+      const profiles = data?.profiles || {};
+      const label = profiles?.[sel]?.label || sel.toUpperCase();
+      const cops = data?.cops || {};
+      const plmn = cops?.operator || "-";
+      const mode = cops?.mode;
+      el("mno-selected").textContent = `${label}${mode === 0 ? " (auto)" : ""}`;
+      el("mno-current-plmn").textContent = formatOperatorName(plmn);
+      const selEl = el("mno-select");
+      if (selEl && Array.from(selEl.options).some((o) => o.value === sel)) selEl.value = sel;
+      if (msg) el("mnomsg").textContent = msg;
+    }
+
+    function applyDataGateState(data, msg = "") {
+      const inhibited = !!data?.inhibited;
+      const active = Array.isArray(data?.active_contexts) ? data.active_contexts : [];
+      el("data-gate-state").textContent = inhibited ? "INHIBITED" : "ALLOWED";
+      el("data-gate-state").className = inhibited ? "warn" : "ok";
+      el("data-gate-active").textContent = String(active.length);
+      if (msg) el("mnomsg").textContent = msg;
+    }
+
+    async function readMnoState(msg = "") {
+      try {
+        const r = await fetch("/api/network/mno");
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "MNO read failed");
+        applyMnoState(j, msg);
+      } catch (e) {
+        el("mnomsg").textContent = `MNO read error: ${e.message || e}`;
+      }
+    }
+
+    async function applyMnoSelection() {
+      const profile = String(el("mno-select").value || "auto");
+      try {
+        el("mnomsg").textContent = `Applying ${profile.toUpperCase()}...`;
+        const r = await fetch("/api/network/mno", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ profile })
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "MNO apply failed");
+        applyMnoState(j, `MNO profile applied: ${profile.toUpperCase()}`);
+      } catch (e) {
+        el("mnomsg").textContent = `MNO apply error: ${e.message || e}`;
+      } finally {
+        await readMnoState();
+      }
+    }
+
+    async function readDataGate() {
+      try {
+        const r = await fetch("/api/network/data-gate");
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "Data gate read failed");
+        applyDataGateState(j);
+      } catch (e) {
+        el("mnomsg").textContent = `Data gate read error: ${e.message || e}`;
+      }
+    }
+
+    async function setDataGate(inhibit) {
+      try {
+        el("mnomsg").textContent = inhibit ? "Inhibiting packet data..." : "Allowing packet data...";
+        const password = String(el("data-gate-password")?.value || "");
+        const r = await fetch("/api/network/data-gate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ inhibit, password })
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "Data gate update failed");
+        applyDataGateState(j.after || {}, inhibit ? "Packet data inhibited." : "Packet data allowed.");
+      } catch (e) {
+        el("mnomsg").textContent = `Data gate error: ${e.message || e}`;
+      } finally {
+        await readDataGate();
+      }
+    }
+
+    function applySimHighLevel(data, msg = "") {
+      el("sim-imei").textContent = data?.imei || "-";
+      el("sim-imsi").textContent = data?.imsi || "-";
+      el("sim-spn").textContent = data?.spn || "-";
+      const c = data?.cops || {};
+      const act = c?.act === null || c?.act === undefined ? "" : ` (AcT ${c.act})`;
+      el("sim-cops").textContent = c?.operator ? `${formatOperatorName(c.operator)}${act}` : "-";
+      const cpolCount = data?.cpol_count;
+      el("sim-cpol-count").textContent = cpolCount === null || cpolCount === undefined ? "-" : String(cpolCount);
+      if (msg) el("simmsg").textContent = msg;
+    }
+
+    function applySimInspector(data, msg = "") {
+      const d = data?.decoded || {};
+      const lines = [];
+      const pushPlmnFile = (key, title) => {
+        const f = d?.[key] || {};
+        const entries = Array.isArray(f?.entries) ? f.entries : [];
+        lines.push(`${title} (${f?.fileid || "-"}) count=${entries.length}`);
+        entries.slice(0, 12).forEach((e) => {
+          const act = e?.act_hex ? ` act=${e.act_hex}` : "";
+          lines.push(`  - ${e?.plmn || "-"}${act}`);
+        });
+        if (entries.length > 12) lines.push(`  ... ${entries.length - 12} more`);
+      };
+      pushPlmnFile("ef_plmnwact", "EF_PLMNwAcT");
+      pushPlmnFile("ef_oplmnwact", "EF_OPLMNwAcT");
+      pushPlmnFile("ef_ehplmn", "EF_EHPLMN");
+      pushPlmnFile("ef_fplmn", "EF_FPLMN");
+      const adMncLen = d?.ef_ad?.mnc_length;
+      lines.push(`EF_AD (${d?.ef_ad?.fileid || "-"}) mnc_length=${adMncLen === null || adMncLen === undefined ? "-" : adMncLen}`);
+      const hplmnTimer = d?.ef_hplmn?.hplmn_search_timer_min;
+      lines.push(`EF_HPLMN (${d?.ef_hplmn?.fileid || "-"}) timer_min=${hplmnTimer === null || hplmnTimer === undefined ? "-" : hplmnTimer}`);
+      const ustCount = d?.ef_ust?.enabled_services_count;
+      lines.push(`EF_UST (${d?.ef_ust?.fileid || "-"}) enabled_services=${ustCount === null || ustCount === undefined ? "-" : ustCount}`);
+      const ustList = Array.isArray(d?.ef_ust?.enabled_services) ? d.ef_ust.enabled_services : [];
+      if (ustList.length) lines.push(`  - UST service IDs: ${ustList.slice(0, 40).join(", ")}${ustList.length > 40 ? " ..." : ""}`);
+      const hplmnHex = d?.ef_hplmn?.hex || "";
+      const spdiHex = d?.ef_spdi?.hex || "";
+      lines.push(`EF_SPDI (${d?.ef_spdi?.fileid || "-"}) hex=${spdiHex || "-"}`);
+      lines.push(`EF_PNN (${d?.ef_pnn?.fileid || "-"}) hex=${d?.ef_pnn?.hex || "-"}`);
+      lines.push(`EF_OPL (${d?.ef_opl?.fileid || "-"}) hex=${d?.ef_opl?.hex || "-"}`);
+      lines.push(`EF_EPSLOCI (${d?.ef_epsloci?.fileid || "-"}) hex=${d?.ef_epsloci?.hex || "-"}`);
+      lines.push(`EF_5GSLOCI (${d?.ef_5gsloci?.fileid || "-"}) hex=${d?.ef_5gsloci?.hex || "-"} sw=${d?.ef_5gsloci?.sw1 || "-"},${d?.ef_5gsloci?.sw2 || "-"}`);
+      el("siminspect").textContent = lines.length ? lines.join("\\n") : "-";
+      if (msg) el("simmsg").textContent = msg;
+    }
+
+    async function readSimHighLevel() {
+      try {
+        const r = await fetch("/api/sim/high-level");
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "SIM high-level read failed");
+        applySimHighLevel(j, "SIM high-level read OK");
+      } catch (e) {
+        el("simmsg").textContent = `SIM high-level read error: ${e.message || e}`;
+      }
+    }
+
+    async function readSimInspector() {
+      try {
+        const r = await fetch("/api/sim/inspector");
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "SIM inspector read failed");
+        applySimInspector(j, "SIM inspector read OK");
+      } catch (e) {
+        el("simmsg").textContent = `SIM inspector read error: ${e.message || e}`;
+      }
+    }
+
+    async function readSerialStatus(showMessage = false) {
+      try {
+        const r = await fetch("/api/serial/status");
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.detail || "Serial status read failed");
+        serialBaud = Number(j.baudrate) || serialBaud;
+        el("serial-current").textContent = j.port || "-";
+        const openText = j.serial_open ? "Yes" : "No";
+        el("serial-open").textContent = openText;
+        el("serial-open").className = j.serial_open ? "ok" : "warn";
+        if (showMessage) {
+          el("serialmsg").textContent = j.last_open_error
+            ? `Serial warning: ${j.last_open_error}`
+            : `Serial OK on ${j.port || "-"}`;
+        }
+        return j;
+      } catch (e) {
+        el("serial-open").textContent = "No";
+        el("serial-open").className = "err";
+        if (showMessage) el("serialmsg").textContent = `Serial status error: ${e.message || e}`;
+        return null;
+      }
+    }
+
+    async function refreshSerialPorts(selectCurrent = true) {
+      try {
+        const r = await fetch("/api/serial/ports");
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "Port scan failed");
+        const ports = Array.isArray(j.ports) ? j.ports : [];
+        serialPorts = ports;
+        const sel = el("serial-port-select");
+        const previous = sel.value;
+        sel.innerHTML = "";
+        if (!ports.length) {
+          const op = document.createElement("option");
+          op.value = "";
+          op.textContent = "No COM ports found";
+          sel.appendChild(op);
+          el("serialmsg").textContent = "No serial ports detected.";
+          return;
+        }
+        for (const p of ports) {
+          const op = document.createElement("option");
+          op.value = p.device || "";
+          const desc = p.description ? ` - ${p.description}` : "";
+          op.textContent = `${p.device || "?"}${desc}`;
+          sel.appendChild(op);
+        }
+        const st = await readSerialStatus(false);
+        if (selectCurrent && st?.port) {
+          sel.value = st.port;
+        } else if (previous) {
+          sel.value = previous;
+        }
+        if (!sel.value && ports[0]?.device) sel.value = ports[0].device;
+        el("serialmsg").textContent = `Detected ${ports.length} serial port(s).`;
+      } catch (e) {
+        el("serialmsg").textContent = `Port refresh error: ${e.message || e}`;
+      }
+    }
+
+    function chooseLikelyAtPort(ports) {
+      if (!Array.isArray(ports) || !ports.length) return null;
+      const score = (p) => {
+        const d = String(p?.description || "").toLowerCase();
+        const m = String(p?.manufacturer || "").toLowerCase();
+        const name = `${d} ${m}`;
+        if (name.includes("quectel") && d.includes("usb at port")) return 100;
+        if (name.includes("quectel") && d.includes(" at ")) return 90;
+        if (d.includes("at port")) return 70;
+        if (name.includes("quectel")) return 50;
+        return 10;
+      };
+      const sorted = [...ports].sort((a, b) => score(b) - score(a));
+      return sorted[0] || null;
+    }
+
+    async function autoPickSerialPort() {
+      await refreshSerialPorts(false);
+      const sel = el("serial-port-select");
+      const best = chooseLikelyAtPort(serialPorts);
+      if (!best?.device) {
+        el("serialmsg").textContent = "No likely AT port found.";
+        return;
+      }
+      sel.value = best.device;
+      el("serialmsg").textContent = `Auto-selected ${best.device}${best.description ? ` (${best.description})` : ""}.`;
+    }
+
+    async function reconnectSerial() {
+      const port = el("serial-port-select").value || "";
+      if (!port) {
+        el("serialmsg").textContent = "Select a serial port first.";
+        return;
+      }
+      try {
+        el("serialmsg").textContent = `Reconnecting to ${port}...`;
+        const r = await fetch("/api/serial/reopen", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ port, baudrate: serialBaud })
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || j.last_open_error || "Reconnect failed");
+        await readSerialStatus(false);
+        await refreshSerialPorts(false);
+        el("serialmsg").textContent = `Reconnected on ${j.port} @ ${j.baudrate}`;
+      } catch (e) {
+        el("serialmsg").textContent = `Reconnect error: ${e.message || e}`;
+      }
+    }
+
+    const sleepMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    async function waitForModemRecovery(maxWaitSec = 90) {
+      const deadline = Date.now() + maxWaitSec * 1000;
+      while (Date.now() < deadline) {
+        await refreshSerialPorts(false);
+        const st = await readSerialStatus(false);
+        if (st?.serial_open) return st;
+
+        const best = chooseLikelyAtPort(serialPorts);
+        if (best?.device) {
+          try {
+            await fetch("/api/serial/reopen", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ port: best.device, baudrate: serialBaud })
+            });
+            const st2 = await readSerialStatus(false);
+            if (st2?.serial_open) return st2;
+          } catch (_) {}
+        }
+        await sleepMs(2000);
+      }
+      return null;
+    }
+
+    async function resetModem() {
+      const ok = window.confirm("Reset modem now? This will drop serial and network for a short period.");
+      if (!ok) return;
+      try {
+        el("serialmsg").textContent = "Sending modem reset (AT+CFUN=1,1)...";
+        const autoToggle = el("auto-ping-toggle");
+        if (autoToggle && autoToggle.checked) {
+          autoToggle.checked = false;
+          setAutoPing(false);
+        }
+        await fetch("/api/kpi/poll/stop", { method: "POST" });
+        const r = await fetch("/api/tools/modem-reset", { method: "POST" });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "Modem reset failed");
+        el("serialmsg").textContent = "Reset accepted. Waiting for modem recovery (up to 90s)...";
+        const recovered = await waitForModemRecovery(90);
+        if (recovered?.serial_open) {
+          el("serialmsg").textContent = `Modem recovered on ${recovered.port}.`;
+        } else {
+          el("serialmsg").textContent = "Modem not fully recovered yet. Use Refresh/Auto-select/Reconnect.";
+        }
+        await readSerialStatus(false);
+        await readCops();
+        await readLocks();
+      } catch (e) {
+        el("serialmsg").textContent = `Reset error: ${e.message || e}`;
+      } finally {
+        await fetch("/api/kpi/poll/start", { method: "POST" });
+      }
+    }
+
+    async function readCops() {
+      try {
+        const r = await fetch("/api/network/cops");
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "COPS read failed");
+        applyCops(j, "COPS read OK");
+      } catch (e) {
+        el("copsmsg").textContent = `COPS read error: ${e.message || e}`;
+      }
+    }
+
+    async function setCops(mode) {
+      try {
+        const r = await fetch("/api/network/cops", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode })
+        });
+        const j = await r.json();
+        const setFinal = j?.set?.final || "";
+        const setLines = Array.isArray(j?.set?.lines) ? j.set.lines.join(" | ") : "";
+        if (!r.ok || !j.ok) {
+          throw new Error(j.detail || j.error || `COPS set failed (${setFinal || "no final"}) ${setLines}`.trim());
+        }
+        applyCops(j, `COPS mode set to ${mode} (${setFinal || "OK"})`);
+      } catch (e) {
+        el("copsmsg").textContent = `COPS set error: ${e.message || e}`;
+      }
+    }
+
+    async function scanCops() {
+      const scanBtn = el("btn-cops-scan");
+      try {
+        if (scanBtn) scanBtn.disabled = true;
+        const ukOnly = !!el("cops-scan-uk-only")?.checked;
+        el("copsmsg").textContent = `Scanning operators via AT+COPS=? (up to ~35s)${ukOnly ? " with UK LTE+NR bands" : ""}. KPI polling is paused during scan.`;
+        const r = await fetch(`/api/network/cops/scan?uk_only=${ukOnly ? "1" : "0"}`);
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "COPS scan failed");
+        applyCopsScan(j, `COPS scan complete: ${Array.isArray(j.operators) ? j.operators.length : 0} operator(s)`);
+      } catch (e) {
+        el("copsmsg").textContent = `COPS scan error: ${e.message || e}`;
+      } finally {
+        if (scanBtn) scanBtn.disabled = false;
+      }
+    }
+
+    async function readLocks() {
+      try {
+        const r = await fetch("/api/network/locks");
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "Lock read failed");
+        applyLocks(j, "Lock config read OK");
+      } catch (e) {
+        el("lockmsg").textContent = `Lock read error: ${e.message || e}`;
+      }
+    }
+
+    async function setLocks() {
+      const ratMode = (el("input-ratmode").value || "").trim();
+      const lteBandManual = (el("input-lteband").value || "").trim();
+      const caOn = !!el("input-ca-enable").checked;
+      const caOnBands = (el("input-ca-on-bands").value || "").trim();
+      const caSingle = (el("input-ca-single-band").value || "").trim();
+      const nrBand = (el("input-nrband").value || "").trim();
+      const body = {};
+      if (ratMode) body.rat_mode = ratMode;
+      if (lteBandManual) {
+        body.lte_band = lteBandManual;
+      } else if (caOn && caOnBands) {
+        body.lte_band = caOnBands;
+      } else if (caSingle) {
+        body.lte_band = caSingle;
+      }
+      if (nrBand) body.nr5g_band = nrBand;
+      body.nrdc_mode = el("input-nrdc-enable").checked ? 1 : 0;
+      if (Object.keys(body).length === 0) {
+        el("lockmsg").textContent = "Enter at least one value before applying.";
+        return;
+      }
+      try {
+        const r = await fetch("/api/network/locks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "Lock set failed");
+        applyLocks(j, "Locks applied and verified.");
+      } catch (e) {
+        el("lockmsg").textContent = `Lock set error: ${e.message || e}`;
+      }
+    }
+
+    async function readPciLock() {
+      try {
+        const r = await fetch("/api/network/pci-lock");
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "PCI lock read failed");
+        applyPciLock(j, "PCI lock read OK");
+      } catch (e) {
+        el("pcilock-msg").textContent = `PCI lock read error: ${e.message || e}`;
+      }
+    }
+
+    async function setPciLock(lock, useCurrent = false) {
+      const body = { lock };
+      if (useCurrent) {
+        if (!Number.isFinite(currentServingEarfcn) || !Number.isFinite(currentServingPci)) {
+          el("pcilock-msg").textContent = "Current serving EARFCN/PCI not available.";
+          return;
+        }
+        body.earfcn = currentServingEarfcn;
+        body.pci = currentServingPci;
+      } else {
+        const e = (el("input-pcilock-earfcn").value || "").trim();
+        const p = (el("input-pcilock-pci").value || "").trim();
+        if (e) body.earfcn = Number(e);
+        if (p) body.pci = Number(p);
+      }
+      try {
+        const r = await fetch("/api/network/pci-lock", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "PCI lock set failed");
+        applyPciLock(j, lock ? "PCI lock applied." : "PCI unlock applied.");
+      } catch (e) {
+        el("pcilock-msg").textContent = `PCI lock set error: ${e.message || e}`;
+      }
+    }
+
+    async function runPingTest() {
+      if (pingBusy) return;
+      pingBusy = true;
+      try {
+        el("pingmsg").textContent = "Running AT+QPING test...";
+        el("pingtrace").textContent = "Running...";
+        // Pause KPI polling to make QPING lines visible in AT console.
+        await fetch("/api/kpi/poll/stop", { method: "POST" });
+        const r = await fetch("/api/tools/ping-test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ host: "8.8.8.8", count: 10, cid: 1 })
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) {
+          const statusCodes = Array.isArray(j?.qping_status_codes) ? j.qping_status_codes : [];
+          const pre = j?.precheck || {};
+          const contentionLikely =
+            statusCodes.includes(569) &&
+            pre.attached === true &&
+            pre.eps_registered === true &&
+            pre.cid_active === true;
+          let errMsg = j.detail || j.error || "Ping test failed";
+          if (contentionLikely) {
+            const stack = lastDataService?.usbnet_mode_label || "USB data stack";
+            errMsg += ` Likely host data-path contention (${stack}). Disconnect modem internet from PC or use a separate CID for AT ping.`;
+          }
+          throw new Error(errMsg);
+        }
+        const rttSamples = Array.isArray(j.times_ms)
+          ? j.times_ms.map((x) => Number(x)).filter((x) => Number.isFinite(x))
+          : [];
+        const points = rttSamples.length;
+        const avgValue =
+          j.avg_ms_packets ?? j.avg_ms_summary ?? j.avg_ms ?? null;
+        const avg = avgValue === null || avgValue === undefined ? "-" : `${avgValue} ms`;
+        el("pingmsg").textContent = `AT ping complete: avg ${avg} (${points} RTT samples)`;
+        addPingSamples(rttSamples);
+        const cmd = j?.cmd?.command || 'AT+QPING=?';
+        const cmdLines = Array.isArray(j?.cmd?.lines) ? j.cmd.lines : [];
+        const urcLines = Array.isArray(j?.urc_lines)
+          ? j.urc_lines.filter((x) => !/^\\+QPING:\\s*\\d+\\s*$/.test(String(x || "").trim()))
+          : [];
+        el("pingtrace").textContent =
+          [`> ${cmd}`, ...cmdLines.map((x) => `< ${x}`), ...urcLines.map((x) => `< URC ${x}`)].join("\\n");
+      } catch (e) {
+        const rawMsg = String(e?.message || e || "");
+        const cleanMsg = rawMsg
+          .replace(/QPING status code\\(s\\):\\s*[\\d,\\s]+;\\s*/i, "")
+          .trim();
+        const msg = cleanMsg || "No RTT samples received from modem.";
+        el("pingmsg").textContent = `Ping error: ${msg}`;
+        el("pingtrace").textContent = `Ping error: ${msg}`;
+      } finally {
+        await fetch("/api/kpi/poll/start", { method: "POST" });
+        pingBusy = false;
+      }
+    }
+
+    async function runVolteTest() {
+      const number = String(el("volte-number")?.value || "").trim();
+      const password = String(el("volte-password")?.value || "");
+      if (!number) {
+        el("volte-msg").textContent = "Enter a dial number first.";
+        return;
+      }
+      try {
+        el("volte-msg").textContent = `Running VoLTE call test to ${number}...`;
+        el("volte-trace").textContent = "Running...";
+        await fetch("/api/kpi/poll/stop", { method: "POST" });
+        const r = await fetch("/api/tools/volte-test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ number, hold_sec: 10, password })
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "VoLTE test failed");
+        const setupMs = Number(j.setup_time_ms);
+        const setupTxt = Number.isFinite(setupMs) ? `${Math.round(setupMs)} ms` : "-";
+        const durS = Number(j.call_duration_s);
+        const durTxt = Number.isFinite(durS) ? `${durS.toFixed(1)} s` : "-";
+        const rat = j?.nwinfo_during_call?.act || j?.nwinfo_after?.act || "-";
+        el("volte-msg").textContent = `VoLTE test OK: connected=${j.call_connected ? "yes" : "no"}, setup=${setupTxt}, duration=${durTxt}, RAT=${rat}`;
+        const clccStates = Array.isArray(j?.clcc_states)
+          ? j.clcc_states.map((x) => `${x.t_s}s: ${x.status || "-"}`).join("\\n")
+          : "-";
+        const clccAfter = Array.isArray(j?.clcc_after_samples)
+          ? j.clcc_after_samples.map((x) => `${x.t_s}s: ${(Array.isArray(x.states) && x.states.length) ? x.states.join(",") : "-"}`).join("\\n")
+          : "-";
+        const urc = Array.isArray(j?.call_urc_lines) ? j.call_urc_lines.join("\\n") : "-";
+        const ceer = j?.ceer || "-";
+        el("volte-trace").textContent = [
+          `Number: ${j.number || number}`,
+          `Connected: ${j.call_connected ? "yes" : "no"}`,
+          `Setup time: ${setupTxt}`,
+          `Call duration: ${durTxt}`,
+          `NW during call: ${JSON.stringify(j?.nwinfo_during_call || {})}`,
+          `NW after call: ${JSON.stringify(j?.nwinfo_after || {})}`,
+          `CEER: ${ceer}`,
+          "",
+          "CLCC states:",
+          clccStates,
+          "",
+          "Post-hangup CLCC:",
+          clccAfter,
+          "",
+          "Call URCs:",
+          urc
+        ].join("\\n");
+      } catch (e) {
+        const msg = String(e?.message || e || "VoLTE test failed");
+        el("volte-msg").textContent = `VoLTE error: ${msg}`;
+        el("volte-trace").textContent = `VoLTE error: ${msg}`;
+      } finally {
+        await fetch("/api/kpi/poll/start", { method: "POST" });
+      }
+    }
+
+    function setAutoPing(enabled) {
+      const state = el("auto-ping-state");
+      if (autoPingTimer) {
+        clearInterval(autoPingTimer);
+        autoPingTimer = null;
+      }
+      if (enabled) {
+        state.textContent = "ON";
+        state.className = "ok";
+        autoPingTimer = setInterval(() => { runPingTest(); }, 10000);
+        runPingTest();
+      } else {
+        state.textContent = "OFF";
+        state.className = "";
+      }
+    }
+
+    function addPingSamples(samples) {
+      if (!Array.isArray(samples) || samples.length === 0) return;
+      const ts = Date.now();
+      for (const s of samples) {
+        const v = Number(s);
+        if (!Number.isFinite(v)) continue;
+        pingHistory.push({ t: ts, v });
+      }
+      pruneHistoryByAge(pingHistory, ts);
+      drawPingChart();
+    }
+
+    function addRfSample(kind, value, tsSec = null) {
+      const v = Number(value);
+      if (!Number.isFinite(v) || !rfHistory[kind]) return;
+      const t = tsSec ? Number(tsSec) * 1000 : Date.now();
+      rfHistory[kind].push({ t, v });
+      pruneHistoryByAge(rfHistory[kind], t);
+      drawRfCharts();
+    }
+
+    function addBwSample(value, tsSec = null) {
+      const v = Number(value);
+      if (!Number.isFinite(v)) return;
+      const t = tsSec ? Number(tsSec) * 1000 : Date.now();
+      bwHistory.push({ t, v });
+      pruneHistoryByAge(bwHistory, t);
+      drawBwChart();
+    }
+
+    function addPciSample(value, tsSec = null) {
+      const v = Number(value);
+      if (!Number.isFinite(v)) return;
+      const t = tsSec ? Number(tsSec) * 1000 : Date.now();
+      pciHistory.push({ t, v });
+      pruneHistoryByAge(pciHistory, t);
+      drawPciChart();
+    }
+
+    function addNeighbourSample(kind, value, tsSec = null) {
+      const v = Number(value);
+      if (!Number.isFinite(v) || !neighbourHistory[kind]) return;
+      const t = tsSec ? Number(tsSec) * 1000 : Date.now();
+      neighbourHistory[kind].push({ t, v });
+      pruneHistoryByAge(neighbourHistory[kind], t);
+      drawNeighbourCharts();
+    }
+
+    function addCategorySample(kind, value, tsSec = null) {
+      if (!categoryHistory[kind]) return;
+      const v = String(value || "-").trim() || "-";
+      const t = tsSec ? Number(tsSec) * 1000 : Date.now();
+      categoryHistory[kind].push({ t, v });
+      pruneHistoryByAge(categoryHistory[kind], t);
+      drawCategoryCharts();
+    }
+
+    function drawPingChart() {
+      const canvas = el("pingchart");
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#101010";
+      ctx.fillRect(0, 0, w, h);
+
+      if (pingHistory.length === 0) {
+        ctx.fillStyle = "#777";
+        ctx.font = "12px Arial";
+        ctx.fillText("No ping samples yet", 12, 24);
+        return;
+      }
+
+      const values = pingHistory.map((p) => p.v);
+      const minV = Math.min(...values);
+      const maxV = Math.max(...values);
+      const pad = Math.max(2, (maxV - minV) * 0.15);
+      const yMin = Math.max(0, minV - pad);
+      const yMax = maxV + pad;
+      const span = Math.max(1, yMax - yMin);
+
+      ctx.strokeStyle = "#2a2a2a";
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = 10 + (i * (h - 20)) / 4;
+        ctx.beginPath();
+        ctx.moveTo(35, y);
+        ctx.lineTo(w - 8, y);
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = "#aaa";
+      ctx.font = "11px Arial";
+      ctx.fillText(`${yMax.toFixed(0)} ms`, 4, 14);
+      ctx.fillText(`${yMin.toFixed(0)} ms`, 4, h - 8);
+
+      const n = pingHistory.length;
+      const x0 = 38;
+      const x1 = w - 12;
+      const y0 = h - 12;
+      const y1 = 10;
+      const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
+
+      ctx.strokeStyle = "#39d353";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      pingHistory.forEach((p, i) => {
+        const x = x0 + i * xStep;
+        const y = y0 - ((p.v - yMin) / span) * (y0 - y1);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      ctx.fillStyle = "#8be9a8";
+      pingHistory.forEach((p, i) => {
+        const x = x0 + i * xStep;
+        const y = y0 - ((p.v - yMin) / span) * (y0 - y1);
+        ctx.beginPath();
+        ctx.arc(x, y, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+
+    function drawMetricChart(canvasId, samples, unitLabel, color, thresholdValue = null) {
+      const canvas = el(canvasId);
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#101010";
+      ctx.fillRect(0, 0, w, h);
+
+      if (!samples.length) {
+        ctx.fillStyle = "#777";
+        ctx.font = "12px Arial";
+        ctx.fillText("No samples yet", 12, 24);
+        return;
+      }
+
+      const values = samples.map((p) => p.v);
+      const minV = Math.min(...values);
+      const maxV = Math.max(...values);
+      const pad = Math.max(1, (maxV - minV) * 0.15);
+      let yMin = minV - pad;
+      let yMax = maxV + pad;
+      if (Number.isFinite(thresholdValue)) {
+        yMin = Math.min(yMin, Number(thresholdValue) - 0.5);
+        yMax = Math.max(yMax, Number(thresholdValue) + 0.5);
+      }
+      const span = Math.max(1, yMax - yMin);
+
+      ctx.strokeStyle = "#2a2a2a";
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = 10 + (i * (h - 20)) / 4;
+        ctx.beginPath();
+        ctx.moveTo(40, y);
+        ctx.lineTo(w - 8, y);
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = "#aaa";
+      ctx.font = "11px Arial";
+      ctx.fillText(`${yMax.toFixed(1)} ${unitLabel}`, 4, 14);
+      ctx.fillText(`${yMin.toFixed(1)} ${unitLabel}`, 4, h - 8);
+
+      const n = samples.length;
+      const x0 = 44;
+      const x1 = w - 12;
+      const y0 = h - 12;
+      const y1 = 10;
+      const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
+
+      if (Number.isFinite(thresholdValue)) {
+        const yThreshold = y0 - ((Number(thresholdValue) - yMin) / span) * (y0 - y1);
+        ctx.strokeStyle = "#ff4d4f";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x0, yThreshold);
+        ctx.lineTo(x1, yThreshold);
+        ctx.stroke();
+      }
+
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      samples.forEach((p, i) => {
+        const x = x0 + i * xStep;
+        const y = y0 - ((p.v - yMin) / span) * (y0 - y1);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      ctx.fillStyle = color;
+      samples.forEach((p, i) => {
+        const x = x0 + i * xStep;
+        const y = y0 - ((p.v - yMin) / span) * (y0 - y1);
+        ctx.beginPath();
+        ctx.arc(x, y, 2.1, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+
+    function drawRfCharts() {
+      const rsrp = rfSmoothingEnabled ? smoothSeries(rfHistory.rsrp, RF_SMOOTH_WINDOW) : rfHistory.rsrp;
+      const rsrq = rfSmoothingEnabled ? smoothSeries(rfHistory.rsrq, RF_SMOOTH_WINDOW) : rfHistory.rsrq;
+      const sinr = rfSmoothingEnabled ? smoothSeries(rfHistory.sinr, RF_SMOOTH_WINDOW) : rfHistory.sinr;
+      const rssi = rfSmoothingEnabled ? smoothSeries(rfHistory.rssi, RF_SMOOTH_WINDOW) : rfHistory.rssi;
+      const dominance = rfSmoothingEnabled ? smoothSeries(rfHistory.dominance, RF_SMOOTH_WINDOW) : rfHistory.dominance;
+      drawMetricChart("rsrpchart", rsrp, "dBm", "#4da3ff", -105);
+      drawMetricChart("rsrqchart", rsrq, "dB", "#f4b400", -15);
+      drawMetricChart("sinrchart", sinr, "dB", "#ff6d6d", 0);
+      drawMetricChart("rssichart", rssi, "dBm", "#b388ff", -25);
+      drawMetricChart("dominancechart", dominance, "dB", "#50fa7b", 6);
+    }
+
+    function drawBwChart() {
+      drawMetricChart("bwchart", bwHistory, "MHz", "#00d1b2");
+    }
+
+    function drawPciChart() {
+      drawMetricChart("pcichart", pciHistory, "", "#ff7f50");
+    }
+
+    function drawNeighbourCharts() {
+      drawMetricChart("nbrsrpchart", neighbourHistory.rsrp, "dBm", "#61dafb");
+      drawMetricChart("nbpcichart", neighbourHistory.pci, "", "#f78c6c");
+    }
+
+    function drawCategoryChart(canvasId, samples, color) {
+      const canvas = el(canvasId);
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#101010";
+      ctx.fillRect(0, 0, w, h);
+
+      if (!samples.length) {
+        ctx.fillStyle = "#777";
+        ctx.font = "12px Arial";
+        ctx.fillText("No samples yet", 12, 24);
+        return;
+      }
+
+      const labels = [];
+      for (const s of samples) {
+        if (!labels.includes(s.v)) labels.push(s.v);
+      }
+      const levels = Math.max(1, labels.length - 1);
+      const leftPad = 92;
+      const rightPad = 12;
+      const topPad = 10;
+      const bottomPad = 12;
+      const x0 = leftPad;
+      const x1 = w - rightPad;
+      const y0 = h - bottomPad;
+      const y1 = topPad;
+
+      ctx.strokeStyle = "#2a2a2a";
+      ctx.lineWidth = 1;
+      labels.forEach((lbl, idx) => {
+        const y = y0 - (idx / Math.max(1, levels)) * (y0 - y1);
+        ctx.beginPath();
+        ctx.moveTo(x0, y);
+        ctx.lineTo(x1, y);
+        ctx.stroke();
+        ctx.fillStyle = "#aaa";
+        ctx.font = "11px Arial";
+        const shown = lbl.length > 12 ? `${lbl.slice(0, 12)}...` : lbl;
+        ctx.fillText(shown, 4, y + 4);
+      });
+
+      const n = samples.length;
+      const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      samples.forEach((p, i) => {
+        const idx = labels.indexOf(p.v);
+        const y = y0 - (idx / Math.max(1, levels)) * (y0 - y1);
+        const x = x0 + i * xStep;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      ctx.fillStyle = color;
+      samples.forEach((p, i) => {
+        const idx = labels.indexOf(p.v);
+        const y = y0 - (idx / Math.max(1, levels)) * (y0 - y1);
+        const x = x0 + i * xStep;
+        ctx.beginPath();
+        ctx.arc(x, y, 2.1, 0, Math.PI * 2);
+        ctx.fill();
+      });
+    }
+
+    function drawCategoryCharts() {
+      drawCategoryChart("statechart", categoryHistory.state, "#8be9fd");
+      drawCategoryChart("bandchart", categoryHistory.band, "#ff9f43");
+    }
+
+    function clearDataServiceKpi() {
+      lastDataService = {};
+      el("ds-apn").textContent = "-";
+      el("ds-pdp").textContent = "-";
+      el("ds-cid1").textContent = "-";
+      el("ds-cid1").className = "";
+      el("ds-ip").textContent = "-";
+      el("ds-attach").textContent = "-";
+      el("ds-attach").className = "";
+      el("ds-reg").textContent = "-";
+      el("ds-reg").className = "";
+      el("ds-usbnet").textContent = "-";
+      el("ds-netdev").textContent = "-";
+      el("ds-dl").textContent = "-";
+      el("ds-ul").textContent = "-";
+      el("ds-counters").textContent = "-";
+      el("ds-warn").textContent = "-";
+      el("ds-warn").className = "label";
+    }
+
+    function clearAllCharts() {
+      pingHistory.length = 0;
+      rfHistory.rsrp.length = 0;
+      rfHistory.rsrq.length = 0;
+      rfHistory.sinr.length = 0;
+      rfHistory.rssi.length = 0;
+      rfHistory.dominance.length = 0;
+      bwHistory.length = 0;
+      pciHistory.length = 0;
+      neighbourHistory.rsrp.length = 0;
+      neighbourHistory.pci.length = 0;
+      categoryHistory.state.length = 0;
+      categoryHistory.band.length = 0;
+      drawPingChart();
+      drawRfCharts();
+      drawBwChart();
+      drawPciChart();
+      drawNeighbourCharts();
+      drawCategoryCharts();
+      clearDataServiceKpi();
+    }
+
+    async function pollFallback() {
+      try {
+        const r = await fetch("/api/kpi/latest");
+        if (!r.ok) return;
+        applySnap(await r.json());
+      } catch (_) {}
+    }
+
+    async function pollAtLog() {
+      try {
+        const r = await fetch("/api/at/log?limit=400");
+        if (!r.ok) return;
+        const j = await r.json();
+        const lines = Array.isArray(j.lines) ? j.lines : [];
+        const host = el("atlog");
+        host.textContent = lines.length ? lines.join("\\n") : "-";
+        host.scrollTop = host.scrollHeight;
+      } catch (_) {}
+    }
+
+    const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
+    const ws = new WebSocket(`${wsProto}//${location.host}/ws/kpi`);
+    ws.onopen = () => { el("status").textContent = "WebSocket connected."; el("status").className = "label ok"; };
+    ws.onmessage = (ev) => { try { applySnap(JSON.parse(ev.data)); } catch (_) {} };
+    ws.onclose = () => { el("status").textContent = "WebSocket disconnected; polling fallback."; el("status").className = "label warn"; };
+
+    el("btn-cops-read").addEventListener("click", () => readCops());
+    el("btn-cops-scan").addEventListener("click", () => scanCops());
+    el("btn-cops-auto").addEventListener("click", () => setCops(0));
+    el("btn-cops-dereg").addEventListener("click", () => setCops(2));
+    el("btn-lock-read").addEventListener("click", () => readLocks());
+    el("btn-lock-set").addEventListener("click", () => setLocks());
+    el("btn-pcilock-read").addEventListener("click", () => readPciLock());
+    el("btn-pcilock-lock-current").addEventListener("click", () => setPciLock(true, true));
+    el("btn-pcilock-lock-input").addEventListener("click", () => setPciLock(true, false));
+    el("btn-pcilock-unlock").addEventListener("click", () => setPciLock(false, false));
+    el("btn-mno-read").addEventListener("click", () => readMnoState("MNO state read OK"));
+    el("btn-mno-apply").addEventListener("click", () => applyMnoSelection());
+    el("btn-data-inhibit").addEventListener("click", () => setDataGate(true));
+    el("btn-data-allow").addEventListener("click", () => setDataGate(false));
+    el("btn-sim-high-read").addEventListener("click", () => readSimHighLevel());
+    el("btn-sim-inspect-read").addEventListener("click", () => readSimInspector());
+    el("btn-ping-test").addEventListener("click", () => runPingTest());
+    el("btn-volte-test").addEventListener("click", () => runVolteTest());
+    el("auto-ping-toggle").addEventListener("change", (ev) => setAutoPing(!!ev.target.checked));
+    el("btn-clear-charts").addEventListener("click", () => clearAllCharts());
+    el("rf-smooth-toggle").addEventListener("change", (ev) => {
+      rfSmoothingEnabled = !!ev.target.checked;
+      drawRfCharts();
+    });
+    el("btn-serial-refresh").addEventListener("click", () => refreshSerialPorts(false));
+    el("btn-serial-autopick").addEventListener("click", () => autoPickSerialPort());
+    el("btn-serial-reconnect").addEventListener("click", () => reconnectSerial());
+    el("btn-modem-reset").addEventListener("click", () => resetModem());
+
+    setInterval(pollFallback, 2000);
+    setInterval(pollAtLog, 1200);
+    setInterval(() => readSerialStatus(false), 3000);
+    pollFallback();
+    pollAtLog();
+    readSerialStatus(true);
+    refreshSerialPorts(true);
+    readCops();
+    readLocks();
+    readPciLock();
+    readMnoState();
+    readDataGate();
+    readSimHighLevel();
+    drawPingChart();
+    drawRfCharts();
+    drawBwChart();
+    drawPciChart();
+    drawNeighbourCharts();
+    drawCategoryCharts();
+  </script>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
+
+@app.get("/api/serial/status")
+async def serial_status() -> dict:
+    return await engine.status()
+
+
+@app.get("/api/serial/ports")
+async def serial_ports() -> dict:
+    items = list_ports.comports()
+    ports = [
+        {
+            "device": p.device,
+            "description": p.description,
+            "hwid": p.hwid,
+            "manufacturer": p.manufacturer,
+            "product": p.product,
+            "serial_number": p.serial_number,
+        }
+        for p in items
+    ]
+    ports.sort(key=lambda x: x.get("device") or "")
+    return {"ok": True, "ports": ports}
+
+
+@app.post("/api/at/send")
+async def send_at(body: SendAtBody) -> dict:
+    try:
+        return await engine.send_command(body.command, timeout_sec=body.timeout_sec)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"AT command failed: {exc}") from exc
+
+
+@app.get("/api/at/log")
+async def at_log(limit: int = 120) -> dict:
+    return await engine.at_log(limit=limit)
+
+
+@app.get("/api/sim/high-level")
+async def sim_high_level() -> dict:
+    imei_res = await engine.send_command("AT+CGSN", timeout_sec=4.0)
+    cimi_res = await engine.send_command("AT+CIMI", timeout_sec=4.0)
+    qspn_res = await engine.send_command("AT+QSPN", timeout_sec=4.0)
+    cops_res = await engine.send_command("AT+COPS?", timeout_sec=4.0)
+    cpol_res = await engine.send_command("AT+CPOL?", timeout_sec=8.0)
+
+    imei = _first_payload_line(imei_res.get("lines", []))
+    imsi = _first_payload_line(cimi_res.get("lines", []))
+    spn = _parse_qspn(qspn_res.get("lines", []))
+    cops = _parse_cops_lines(cops_res.get("lines", []))
+    cpol_entries = _parse_cpol(cpol_res.get("lines", []))
+
+    return {
+        "ok": True,
+        "imei": imei,
+        "imsi": imsi,
+        "spn": spn,
+        "cops": cops,
+        "cpol_count": len(cpol_entries),
+        "cpol_entries": cpol_entries,
+        "raw": {
+            "imei": imei_res,
+            "cimi": cimi_res,
+            "qspn": qspn_res,
+            "cops": cops_res,
+            "cpol": cpol_res,
+        },
+    }
+
+
+@app.get("/api/sim/inspector")
+async def sim_inspector() -> dict:
+    # Read-only EF inspection via CRSM.
+    files = [
+        ("ef_plmnwact", "EF_PLMNwAcT", 28512),
+        ("ef_oplmnwact", "EF_OPLMNwAcT", 28513),
+        ("ef_hplmn", "EF_HPLMN", 28465),
+        ("ef_fplmn", "EF_FPLMN", 28539),
+        ("ef_spdi", "EF_SPDI", 28621),
+        ("ef_ad", "EF_AD", 28589),
+        ("ef_ehplmn", "EF_EHPLMN", 28633),
+        ("ef_ust", "EF_UST", 28472),
+        ("ef_pnn", "EF_PNN", 28613),
+        ("ef_opl", "EF_OPL", 28614),
+        ("ef_epsloci", "EF_EPSLOCI", 28643),
+        ("ef_5gsloci", "EF_5GSLOCI", 20225),
+    ]
+    decoded: dict[str, dict] = {}
+    raw: dict[str, dict] = {}
+
+    for key, name, fileid in files:
+        cmd = f"AT+CRSM=176,{fileid},0,0,0"
+        res = await engine.send_command(cmd, timeout_sec=6.0)
+        raw[key] = res
+        crsm = _parse_crsm_hex(res.get("lines", []))
+        if key in {"ef_plmnwact", "ef_oplmnwact"}:
+            entries = _decode_plmn_file(crsm.get("hex", ""), with_act=True)
+            decoded[key] = {"name": name, "fileid": fileid, "entries": entries, "count": len(entries), **crsm}
+        elif key == "ef_fplmn":
+            entries = _decode_plmn_file(crsm.get("hex", ""), with_act=False)
+            decoded[key] = {"name": name, "fileid": fileid, "entries": entries, "count": len(entries), **crsm}
+        elif key == "ef_ehplmn":
+            entries = _decode_plmn_file(crsm.get("hex", ""), with_act=False)
+            decoded[key] = {"name": name, "fileid": fileid, "entries": entries, "count": len(entries), **crsm}
+        elif key == "ef_ad":
+            decoded[key] = {
+                "name": name,
+                "fileid": fileid,
+                "mnc_length": _decode_mnc_len_from_ad(crsm.get("hex", "")),
+                **crsm,
+            }
+        elif key == "ef_hplmn":
+            decoded[key] = {
+                "name": name,
+                "fileid": fileid,
+                "hplmn_search_timer_min": _decode_hplmn_timer_minutes(crsm.get("hex", "")),
+                **crsm,
+            }
+        elif key == "ef_ust":
+            enabled = _decode_ust_enabled_services(crsm.get("hex", ""))
+            decoded[key] = {
+                "name": name,
+                "fileid": fileid,
+                "enabled_services_count": len(enabled),
+                "enabled_services": enabled,
+                **crsm,
+            }
+        else:
+            # Keep raw hex for files that require BER-TLV-specific decoding.
+            decoded[key] = {"name": name, "fileid": fileid, **crsm}
+
+    return {
+        "ok": True,
+        "decoded": decoded,
+        "raw": raw,
+    }
+
+
+@app.post("/api/serial/reopen")
+async def reopen_serial(body: ReopenBody) -> dict:
+    try:
+        await engine.reopen(body.port, body.baudrate)
+        st = await engine.status()
+        if st.get("serial_open"):
+            _save_last_serial_state(str(st.get("port") or body.port), int(st.get("baudrate") or body.baudrate))
+        return {"ok": True, **st}
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to reopen serial: {exc}") from exc
+
+
+@app.get("/api/kpi/latest")
+async def kpi_latest() -> dict:
+    async with kpi_runtime.lock:
+        return {
+            "ok": True,
+            "poll_running": kpi_runtime.poll_running,
+            "poll_hz": kpi_runtime.poll_hz,
+            "last_error": kpi_runtime.last_error,
+            "sample": kpi_runtime.snapshot,
+        }
+
+
+@app.post("/api/kpi/poll")
+async def kpi_poll_config(body: KpiPollBody) -> dict:
+    async with kpi_runtime.lock:
+        kpi_runtime.poll_hz = body.poll_hz
+    return await kpi_latest()
+
+
+@app.post("/api/kpi/poll/start")
+async def kpi_poll_start() -> dict:
+    global _kpi_task
+    if _kpi_task is None or _kpi_task.done():
+        kpi_runtime.poll_running = True
+        _kpi_task = asyncio.create_task(kpi_poll_loop(engine, kpi_runtime))
+    return await kpi_latest()
+
+
+@app.post("/api/kpi/poll/stop")
+async def kpi_poll_stop() -> dict:
+    kpi_runtime.poll_running = False
+    return await kpi_latest()
+
+
+async def _poll_cops_state(total_wait_sec: float = 60.0, step_sec: float = 2.0) -> dict:
+    deadline = asyncio.get_running_loop().time() + max(2.0, float(total_wait_sec))
+    last_res: dict = {"ok": False, "lines": [], "final": "NO_READ"}
+    last_cops: dict = {}
+    while asyncio.get_running_loop().time() < deadline:
+        res = await engine.send_command("AT+COPS?", timeout_sec=6.0)
+        last_res = res
+        cops = _parse_cops_lines(res.get("lines", []))
+        if cops:
+            last_cops = cops
+            # If operator is present we have a stable registration state.
+            if cops.get("operator"):
+                return {"res": res, "cops": cops}
+        await asyncio.sleep(max(0.4, float(step_sec)))
+    return {"res": last_res, "cops": last_cops}
+
+
+@app.get("/api/network/cops")
+async def network_cops_get() -> dict:
+    res = await engine.send_command("AT+COPS?", timeout_sec=4.0)
+    return {
+        "ok": res.get("ok", False),
+        "cops": _parse_cops_lines(res.get("lines", [])),
+        "raw": res,
+    }
+
+
+@app.post("/api/network/cops")
+async def network_cops_set(body: CopsSetBody) -> dict:
+    if body.mode not in (0, 2):
+        raise HTTPException(status_code=400, detail="Only mode 0 (auto) and 2 (deregister) are enabled in this UI.")
+
+    # Operator registration can take long time on live networks.
+    set_timeout = 180.0 if body.mode == 0 else 45.0
+    set_res = await engine.send_command(f"AT+COPS={body.mode}", timeout_sec=set_timeout)
+    read_res = await engine.send_command("AT+COPS?", timeout_sec=4.0)
+    set_ok = bool(set_res.get("ok", False))
+    set_final = str(set_res.get("final", ""))
+    set_lines = set_res.get("lines", [])
+
+    error_msg = None
+    if not set_ok:
+        tail = ""
+        if isinstance(set_lines, list) and set_lines:
+            tail = set_lines[-1]
+        error_msg = f"COPS set failed ({set_final or 'no final'})"
+        if tail and tail.upper() not in ("OK", "ERROR"):
+            error_msg += f": {tail}"
+
+    return {
+        "ok": set_ok,
+        "error": error_msg,
+        "set": set_res,
+        "cops": _parse_cops_lines(read_res.get("lines", [])),
+        "raw": read_res,
+    }
+
+
+@app.get("/api/network/cops/scan")
+async def network_cops_scan(uk_only: bool = False) -> dict:
+    # Operator scan can be slow on live networks and can monopolize
+    # the AT command path. Pause KPI polling to keep queue healthy.
+    global _kpi_task
+    resume_poll = bool(kpi_runtime.poll_running)
+    original_lte_band: str | None = None
+    original_nr_band: str | None = None
+    nr_band_key_used: str | None = None
+    lte_band_changed = False
+    nr_band_changed = False
+    lte_band_set_res: dict | None = None
+    nr_band_set_res: dict | None = None
+    lte_band_restore_res: dict | None = None
+    nr_band_restore_res: dict | None = None
+    lte_band_read_res: dict | None = None
+    nr5g_band_read_res: dict | None = None
+    nsa_nr5g_band_read_res: dict | None = None
+    lte_band_restore_error: str | None = None
+    nr_band_restore_error: str | None = None
+    if resume_poll:
+        kpi_runtime.poll_running = False
+        await asyncio.sleep(0.25)
+
+    try:
+        if uk_only:
+            lte_band_read_res = await engine.send_command('AT+QNWPREFCFG="lte_band"', timeout_sec=5.0)
+            original_lte_band = _parse_qnwprefcfg_value(lte_band_read_res.get("lines", []), "lte_band")
+            if original_lte_band and original_lte_band != UK_LTE_SCAN_BANDS:
+                lte_band_set_res = await engine.send_command(
+                    f'AT+QNWPREFCFG="lte_band",{UK_LTE_SCAN_BANDS}',
+                    timeout_sec=8.0,
+                )
+                lte_band_changed = bool(lte_band_set_res.get("ok", False))
+
+            nr5g_band_read_res = await engine.send_command('AT+QNWPREFCFG="nr5g_band"', timeout_sec=5.0)
+            nsa_nr5g_band_read_res = await engine.send_command('AT+QNWPREFCFG="nsa_nr5g_band"', timeout_sec=5.0)
+            original_nr_band = _parse_qnwprefcfg_value(nr5g_band_read_res.get("lines", []), "nr5g_band")
+            nr_band_key_used = "nr5g_band"
+            if not original_nr_band:
+                original_nr_band = _parse_qnwprefcfg_value(nsa_nr5g_band_read_res.get("lines", []), "nsa_nr5g_band")
+                nr_band_key_used = "nsa_nr5g_band"
+            if original_nr_band and original_nr_band != UK_NR_SCAN_BANDS:
+                nr_band_set_res = await engine.send_command(
+                    f'AT+QNWPREFCFG="{nr_band_key_used}",{UK_NR_SCAN_BANDS}',
+                    timeout_sec=8.0,
+                )
+                nr_band_changed = bool(nr_band_set_res.get("ok", False))
+
+        res = await engine.send_command("AT+COPS=?", timeout_sec=35.0)
+        ops = _parse_cops_scan_lines(res.get("lines", []))
+        ok = bool(res.get("ok", False))
+        err = None
+        if not ok:
+            err = f"COPS scan failed ({res.get('final') or 'no final'})"
+        return {
+            "ok": ok,
+            "error": err,
+            "uk_only": uk_only,
+            "scan_scope": (
+                f"LTE bands {UK_LTE_SCAN_BANDS}; NR bands {UK_NR_SCAN_BANDS}"
+                if uk_only
+                else "default modem scope"
+            ),
+            "operators": ops,
+            "raw": {
+                "scan": res,
+                "lte_band_read": lte_band_read_res,
+                "lte_band_set": lte_band_set_res,
+                "nr5g_band_read": nr5g_band_read_res,
+                "nsa_nr5g_band_read": nsa_nr5g_band_read_res,
+                "nr_band_key_used": nr_band_key_used,
+                "nr_band_set": nr_band_set_res,
+            },
+        }
+    finally:
+        if uk_only and lte_band_changed and original_lte_band:
+            lte_band_restore_res = await engine.send_command(
+                f'AT+QNWPREFCFG="lte_band",{original_lte_band}',
+                timeout_sec=8.0,
+            )
+            if not lte_band_restore_res.get("ok", False):
+                lte_band_restore_error = (
+                    f"Failed restoring lte_band to {original_lte_band} "
+                    f"({lte_band_restore_res.get('final') or 'no final'})"
+                )
+        if uk_only and nr_band_changed and original_nr_band and nr_band_key_used:
+            nr_band_restore_res = await engine.send_command(
+                f'AT+QNWPREFCFG="{nr_band_key_used}",{original_nr_band}',
+                timeout_sec=8.0,
+            )
+            if not nr_band_restore_res.get("ok", False):
+                nr_band_restore_error = (
+                    f"Failed restoring {nr_band_key_used} to {original_nr_band} "
+                    f"({nr_band_restore_res.get('final') or 'no final'})"
+                )
+        if lte_band_restore_error or nr_band_restore_error:
+            kpi_runtime.last_error = " | ".join(
+                [x for x in [lte_band_restore_error, nr_band_restore_error] if x]
+            )
+        if resume_poll:
+            kpi_runtime.poll_running = True
+            if _kpi_task is None or _kpi_task.done():
+                _kpi_task = asyncio.create_task(kpi_poll_loop(engine, kpi_runtime))
+
+
+@app.get("/api/network/mno")
+async def network_mno_get() -> dict:
+    cops_res = await engine.send_command("AT+COPS?", timeout_sec=4.0)
+    cops = _parse_cops_lines(cops_res.get("lines", []))
+    selected = "auto" if cops.get("mode") == 0 else (_profile_key_from_cops_operator(cops.get("operator")) or "auto")
+    return {
+        "ok": True,
+        "selected_profile": selected,
+        "profiles": {k: {"label": v["label"], "plmn": v["plmn"]} for k, v in MNO_PROFILES.items()},
+        "cops": cops,
+        "raw": {"cops": cops_res},
+    }
+
+
+@app.post("/api/network/mno")
+async def network_mno_set(body: MnoSelectBody) -> dict:
+    key = str(body.profile or "").strip().lower()
+    if key not in MNO_PROFILES:
+        raise HTTPException(status_code=400, detail="Invalid profile. Use: vodafone, vmo2, ee, h3g, auto.")
+
+    cfg = MNO_PROFILES[key]
+    if key == "auto":
+        set_res = await engine.send_command("AT+COPS=0", timeout_sec=180.0)
+        polled = await _poll_cops_state(total_wait_sec=60.0, step_sec=2.0)
+        read_res = polled["res"]
+        cops = polled["cops"]
+        ok = bool(set_res.get("ok", False) and cops.get("operator"))
+        err = None if ok else "Auto registration did not produce an operator within timeout."
+        return {
+            "ok": ok,
+            "error": err,
+            "selected_profile": key,
+            "profile": {"label": cfg["label"], "plmn": cfg["plmn"]},
+            "set": set_res,
+            "cops": cops,
+            "raw": {"read": read_res},
+        }
+    else:
+        plmn = str(cfg["plmn"])
+        # Use mode 4 (manual/auto) to avoid leaving modem permanently deregistered
+        # if selected PLMN is temporarily unavailable.
+        set_res = await engine.send_command(f'AT+COPS=4,2,"{plmn}"', timeout_sec=180.0)
+        polled = await _poll_cops_state(total_wait_sec=75.0, step_sec=2.5)
+        read_res = polled["res"]
+        cops = polled["cops"]
+        current_profile = _profile_key_from_cops_operator(cops.get("operator"))
+        target_hit = bool(str(cops.get("operator") or "") == plmn or current_profile == key)
+        ok = bool(set_res.get("ok", False) and target_hit)
+        err = None
+        recover_res = None
+        if not ok:
+            err = (
+                f"MNO select did not settle on {plmn} within timeout "
+                f"(current={cops.get('operator') or '-'} mode={cops.get('mode') if cops else '-'}"
+                f"{f' profile={current_profile}' if current_profile else ''})"
+            )
+            # Auto-recover so user is not stranded in a de-registered state.
+            recover_res = await engine.send_command("AT+COPS=0", timeout_sec=120.0)
+            recovered = await _poll_cops_state(total_wait_sec=45.0, step_sec=2.0)
+            read_res = recovered["res"]
+            cops = recovered["cops"]
+    return {
+        "ok": ok,
+        "error": err,
+        "selected_profile": key,
+        "profile": {"label": cfg["label"], "plmn": cfg["plmn"]},
+        "set": set_res,
+        "cops": cops,
+        "raw": {"read": read_res, "recover_auto": recover_res},
+    }
+
+
+@app.get("/api/network/data-gate")
+async def network_data_gate_get() -> dict:
+    cgatt_res = await engine.send_command("AT+CGATT?", timeout_sec=3.0)
+    qiact_res = await engine.send_command("AT+QIACT?", timeout_sec=4.0)
+    attached = _parse_cgatt_attached(cgatt_res.get("lines", []))
+    contexts = _parse_qiact_contexts(qiact_res.get("lines", []))
+    active = [c for c in contexts if c.get("active")]
+    inhibited = len(active) == 0
+    return {
+        "ok": True,
+        "inhibited": inhibited,
+        "packet_attached": attached,
+        "active_contexts": active,
+        "raw": {"cgatt": cgatt_res, "qiact": qiact_res},
+    }
+
+
+@app.post("/api/network/data-gate")
+async def network_data_gate_set(body: DataGateBody) -> dict:
+    if not body.inhibit:
+        if (body.password or "") != DATA_GATE_UNLOCK_PASSWORD:
+            raise HTTPException(status_code=403, detail="Invalid password for data allow operation.")
+    actions: list[dict] = []
+    before = await network_data_gate_get()
+    if body.inhibit:
+        for c in before.get("active_contexts", []):
+            cid = c.get("cid")
+            if cid is None:
+                continue
+            res = await engine.send_command(f"AT+QIDEACT={int(cid)}", timeout_sec=15.0)
+            actions.append({"cmd": f"AT+QIDEACT={int(cid)}", "res": res})
+    else:
+        # Allow packet data: ensure attach then activate primary CID 1.
+        res_attach = await engine.send_command("AT+CGATT=1", timeout_sec=20.0)
+        actions.append({"cmd": "AT+CGATT=1", "res": res_attach})
+        res_activate = await engine.send_command("AT+QIACT=1", timeout_sec=20.0)
+        actions.append({"cmd": "AT+QIACT=1", "res": res_activate})
+    after = await network_data_gate_get()
+    return {
+        "ok": True,
+        "requested_inhibit": bool(body.inhibit),
+        "before": before,
+        "after": after,
+        "actions": actions,
+    }
+
+
+@app.get("/api/network/locks")
+async def network_locks_get() -> dict:
+    lock_state = await _read_lock_status()
+    async with _desired_locks_lock:
+        desired = dict(_desired_locks)
+    return {
+        "ok": True,
+        "locks": lock_state["values"],
+        "desired_locks": desired,
+        "raw": lock_state["raw"],
+    }
+
+
+@app.post("/api/network/locks")
+async def network_locks_set(body: LockSetBody) -> dict:
+    requested: dict[str, str] = {}
+
+    if body.rat_mode:
+        rat = body.rat_mode.strip().upper()
+        requested["mode_pref"] = rat
+
+    if body.lte_band:
+        band = body.lte_band.strip()
+        requested["lte_band"] = band
+
+    if body.nr5g_band:
+        band = body.nr5g_band.strip()
+        requested["nr5g_band"] = band
+
+    if body.nrdc_mode is not None:
+        mode = 1 if int(body.nrdc_mode) else 0
+        requested["nrdc_mode"] = str(mode)
+
+    if not requested:
+        raise HTTPException(status_code=400, detail="No lock values provided.")
+
+    normalized_requested = {
+        k: _normalize_lock_value(k, v)
+        for k, v in requested.items()
+    }
+
+    set_results = await _apply_lock_requests(requested)
+    lock_state = await _read_lock_status()
+    locks = lock_state["values"]
+    errors: list[str] = []
+
+    if "mode_pref" in normalized_requested:
+        want = normalized_requested["mode_pref"]
+        if not _lock_value_matches("mode_pref", want, locks):
+            final = set_results.get("mode_pref", {}).get("final", "UNKNOWN")
+            got = _normalize_lock_value("mode_pref", locks.get("mode_pref"))
+            errors.append(f"mode_pref verify failed (wanted {want}, got {got or '-'}, final={final})")
+
+    if "lte_band" in normalized_requested:
+        want = normalized_requested["lte_band"]
+        if not _lock_value_matches("lte_band", want, locks):
+            final = set_results.get("lte_band", {}).get("final", "UNKNOWN")
+            got = _normalize_lock_value("lte_band", locks.get("lte_band"))
+            errors.append(f"lte_band verify failed (wanted {want}, got {got or '-'}, final={final})")
+
+    if "nr5g_band" in normalized_requested:
+        want = normalized_requested["nr5g_band"]
+        if not _lock_value_matches("nr5g_band", want, locks):
+            final_nr = set_results.get("nr5g_band", {}).get("final", "UNKNOWN")
+            final_nsa = set_results.get("nsa_nr5g_band", {}).get("final", "N/A")
+            got_nr = _normalize_lock_value("nr5g_band", locks.get("nr5g_band"))
+            got_nsa = _normalize_lock_value("nsa_nr5g_band", locks.get("nsa_nr5g_band"))
+            errors.append(
+                f"nr5g_band verify failed (wanted {want}, got nr5g={got_nr or '-'}, "
+                f"nsa_nr5g={got_nsa or '-'}, finals={final_nr}/{final_nsa})"
+            )
+
+    if "nrdc_mode" in normalized_requested:
+        want = normalized_requested["nrdc_mode"]
+        if not _lock_value_matches("nrdc_mode", want, locks):
+            final = set_results.get("nrdc_mode", {}).get("final", "UNKNOWN")
+            got = _normalize_lock_value("nrdc_mode", locks.get("nrdc_mode"))
+            errors.append(f"nrdc_mode verify failed (wanted {want}, got {got or '-'}, final={final})")
+
+    if not errors:
+        async with _desired_locks_lock:
+            _desired_locks.update(normalized_requested)
+
+    return {
+        "ok": len(errors) == 0,
+        "error": "; ".join(errors) if errors else None,
+        "set": set_results,
+        "locks": locks,
+        "desired_locks": normalized_requested if not errors else None,
+        "raw": lock_state["raw"],
+    }
+
+
+@app.get("/api/network/pci-lock")
+async def network_pci_lock_get() -> dict:
+    res = await engine.send_command('AT+QNWLOCK="common/4g"', timeout_sec=4.0)
+    lock = _parse_qnwlock_common4g(res.get("lines", []))
+    return {
+        "ok": res.get("ok", False),
+        "pci_lock": lock or {"locked": False, "earfcn": None, "pci": None},
+        "raw": res,
+    }
+
+
+@app.post("/api/network/pci-lock")
+async def network_pci_lock_set(body: PciLockSetBody) -> dict:
+    before = await engine.send_command('AT+QNWLOCK="common/4g"', timeout_sec=4.0)
+    before_lock = _parse_qnwlock_common4g(before.get("lines", [])) or {}
+
+    earfcn = body.earfcn if body.earfcn is not None else before_lock.get("earfcn")
+    pci = body.pci if body.pci is not None else before_lock.get("pci")
+    if earfcn is None:
+        earfcn = 0
+    if pci is None:
+        pci = 0
+    mode = 1 if body.lock else 0
+
+    set_res = await engine.send_command(f'AT+QNWLOCK="common/4g",{mode},{earfcn},{pci}', timeout_sec=12.0)
+    after = await engine.send_command('AT+QNWLOCK="common/4g"', timeout_sec=4.0)
+    after_lock = _parse_qnwlock_common4g(after.get("lines", [])) or {"locked": False, "earfcn": None, "pci": None}
+
+    ok = False
+    if body.lock:
+        ok = bool(after_lock.get("locked") and after_lock.get("earfcn") == earfcn and after_lock.get("pci") == pci)
+    else:
+        ok = not bool(after_lock.get("locked"))
+
+    return {
+        "ok": ok,
+        "error": None if ok else f"PCI lock verify failed (set final={set_res.get('final', 'UNKNOWN')})",
+        "set": set_res,
+        "pci_lock": after_lock,
+        "raw": {"before": before, "after": after},
+    }
+
+
+@app.post("/api/tools/modem-reset")
+async def tools_modem_reset() -> dict:
+    # Quectel modem reboot/reset. Some firmware may drop port before final response.
+    cmd_res = await engine.send_command("AT+CFUN=1,1", timeout_sec=8.0)
+    final = str(cmd_res.get("final", "")).upper()
+    accepted = bool(cmd_res.get("ok", False) or final == "TIMEOUT")
+    # Give the modem a short grace period to detach/re-enumerate.
+    await asyncio.sleep(1.5)
+    status = await engine.status()
+    return {
+        "ok": accepted,
+        "error": None if accepted else f"Reset command rejected ({cmd_res.get('final', 'UNKNOWN')})",
+        "cmd": cmd_res,
+        "status": status,
+    }
+
+
+@app.post("/api/tools/ping-test")
+async def tools_ping_test(body: PingTestBody) -> dict:
+    # Run modem-side ping so TX/RX appears in AT console.
+    host = body.host.strip() or "8.8.8.8"
+    count = int(body.count)
+    cid = int(body.cid)
+    timeout_s = 10
+
+    # Prechecks to avoid running QPING when packet data path is known-bad.
+    precheck: dict = {"attempted_reactivate": False}
+    cgatt_res = await engine.send_command("AT+CGATT?", timeout_sec=3.0)
+    cereg_res = await engine.send_command("AT+CEREG?", timeout_sec=3.0)
+    qiact_res = await engine.send_command("AT+QIACT?", timeout_sec=4.0)
+    attached = _parse_cgatt_attached(cgatt_res.get("lines", []))
+    cereg_stat = _parse_cereg_stat(cereg_res.get("lines", []))
+    eps_registered = cereg_stat in (1, 5) if cereg_stat is not None else None
+    contexts = _parse_qiact_contexts(qiact_res.get("lines", []))
+    cid_ctx = next((x for x in contexts if x.get("cid") == cid), None)
+    cid_active = bool(cid_ctx.get("active")) if isinstance(cid_ctx, dict) else False
+    cid_ip = cid_ctx.get("ip") if isinstance(cid_ctx, dict) else None
+
+    reactivate_res = None
+    qiact_after_res = None
+    if not cid_active:
+        precheck["attempted_reactivate"] = True
+        reactivate_res = await engine.send_command(f"AT+QIACT={cid}", timeout_sec=15.0)
+        await asyncio.sleep(0.3)
+        qiact_after_res = await engine.send_command("AT+QIACT?", timeout_sec=4.0)
+        contexts2 = _parse_qiact_contexts(qiact_after_res.get("lines", []))
+        cid_ctx2 = next((x for x in contexts2 if x.get("cid") == cid), None)
+        cid_active = bool(cid_ctx2.get("active")) if isinstance(cid_ctx2, dict) else False
+        cid_ip = cid_ctx2.get("ip") if isinstance(cid_ctx2, dict) else None
+
+    precheck.update(
+        {
+            "attached": attached,
+            "cereg_stat": cereg_stat,
+            "eps_registered": eps_registered,
+            "cid": cid,
+            "cid_active": cid_active,
+            "cid_ip": cid_ip,
+            "raw": {
+                "cgatt": cgatt_res,
+                "cereg": cereg_res,
+                "qiact_before": qiact_res,
+                "qiact_reactivate": reactivate_res,
+                "qiact_after": qiact_after_res,
+            },
+        }
+    )
+
+    blockers: list[str] = []
+    if attached is False:
+        blockers.append("packet service detached (AT+CGATT=0)")
+    if eps_registered is False:
+        blockers.append(f"EPS not registered (AT+CEREG stat={cereg_stat})")
+    if not cid_active:
+        blockers.append(f"CID {cid} not active in AT+QIACT?")
+    if blockers:
+        return {
+            "ok": False,
+            "host": host,
+            "count": count,
+            "cid": cid,
+            "avg_ms": None,
+            "avg_ms_packets": None,
+            "avg_ms_summary": None,
+            "sum_ms": None,
+            "min_ms": None,
+            "max_ms": None,
+            "times_ms": [],
+            "qping_summary": None,
+            "qping_status_codes": [],
+            "error": "QPING precheck failed: " + "; ".join(blockers),
+            "cmd": None,
+            "urc_lines": [],
+            "precheck": precheck,
+        }
+
+    before = list(engine.urc_log)
+    cmd = f'AT+QPING={cid},"{host}",{timeout_s},{count}'
+    cmd_res = await engine.send_command(cmd, timeout_sec=5.0)
+    cmd_final = str(cmd_res.get("final", "")).upper()
+    # Some firmware returns immediate ERROR while still emitting +QPING URCs.
+    # So do not fail fast; collect URC lines and decide from those.
+
+    # Wait for +QPING URCs to appear after command acceptance.
+    deadline = asyncio.get_running_loop().time() + float(timeout_s + 6)
+    urc_lines: list[str] = []
+    while asyncio.get_running_loop().time() < deadline:
+        now_urc = list(engine.urc_log)
+        # simple diff from previous snapshot
+        if len(now_urc) >= len(before):
+            candidate = now_urc[len(before):]
+        else:
+            candidate = now_urc
+        urc_lines = [ln for ln in candidate if "+QPING:" in ln]
+        if urc_lines:
+            # Give a short grace period to collect additional ping lines.
+            await asyncio.sleep(0.5)
+            now_urc2 = list(engine.urc_log)
+            if len(now_urc2) >= len(before):
+                candidate2 = now_urc2[len(before):]
+            else:
+                candidate2 = now_urc2
+            urc_lines = [ln for ln in candidate2 if "+QPING:" in ln]
+            break
+        await asyncio.sleep(0.2)
+
+    parsed = _parse_qping_urcs(urc_lines)
+    times_ms = list(parsed.get("packet_times_ms") or [])
+    summary = parsed.get("summary")
+    status_codes = list(parsed.get("status_codes") or [])
+
+    sum_ms = round(sum(times_ms), 1) if times_ms else None
+    min_ms = min(times_ms) if times_ms else None
+    max_ms = max(times_ms) if times_ms else None
+    avg_from_packets = round(sum(times_ms) / len(times_ms), 1) if times_ms else None
+    summary_avg = float(summary["avg_ms"]) if isinstance(summary, dict) and "avg_ms" in summary else None
+    avg = avg_from_packets if avg_from_packets is not None else summary_avg
+    ok = avg is not None
+    error = None
+    if not ok:
+        error = "No +QPING latency samples received from modem."
+        if status_codes:
+            error = f"QPING status code(s): {', '.join(str(x) for x in status_codes)}; {error}"
+        if cmd_final and cmd_final not in ("OK", "TIMEOUT"):
+            error = f"QPING command final={cmd_res.get('final')}; {error}"
+        elif cmd_final == "TIMEOUT":
+            error = "QPING command timed out; no latency samples received."
+    return {
+        "ok": ok,
+        "host": host,
+        "count": count,
+        "cid": cid,
+        "avg_ms": avg,
+        "avg_ms_packets": avg_from_packets,
+        "avg_ms_summary": summary_avg,
+        "sum_ms": sum_ms,
+        "min_ms": min_ms,
+        "max_ms": max_ms,
+        "times_ms": times_ms,
+        "qping_summary": summary,
+        "qping_status_codes": status_codes,
+        "error": error,
+        "cmd": cmd_res,
+        "urc_lines": urc_lines,
+        "precheck": precheck,
+    }
+
+
+@app.post("/api/tools/volte-test")
+async def tools_volte_test(body: VolteTestBody) -> dict:
+    if (body.password or "") != DATA_GATE_UNLOCK_PASSWORD:
+        raise HTTPException(status_code=403, detail="Invalid password for VoLTE call test.")
+
+    number = _sanitize_dial_number(body.number)
+    if not number:
+        raise HTTPException(status_code=400, detail="Invalid dial number.")
+
+    hold_sec = int(body.hold_sec or 10)
+
+    # Ensure no stale call exists before test.
+    pre_hang = await engine.send_command("ATH", timeout_sec=4.0)
+    await asyncio.sleep(0.25)
+
+    before_urc = list(engine.urc_log)
+    nw_before_res = await engine.send_command("AT+QNWINFO", timeout_sec=3.0)
+    nw_before = _parse_qnwinfo_line(nw_before_res.get("lines", []))
+
+    dial_started = time.time()
+    dial_res = await engine.send_command(f"ATD{number};", timeout_sec=8.0)
+    dial_ok = bool(dial_res.get("ok", False))
+
+    deadline = asyncio.get_running_loop().time() + 35.0
+    call_connected = False
+    connect_ts: float | None = None
+    clcc_states: list[dict] = []
+    last_clcc: list[dict] = []
+    while asyncio.get_running_loop().time() < deadline:
+        clcc_res = await engine.send_command("AT+CLCC", timeout_sec=3.0)
+        clcc = _parse_clcc_lines(clcc_res.get("lines", []))
+        last_clcc = clcc
+        stat = clcc[0].get("stat") if clcc else None
+        clcc_states.append(
+            {
+                "t_s": round(time.time() - dial_started, 1),
+                "status": _clcc_stat_label(stat),
+                "raw_stat": stat,
+            }
+        )
+        if stat in (0, 1):
+            call_connected = True
+            connect_ts = time.time()
+            break
+        if stat is None:
+            # No call entries anymore.
+            break
+        await asyncio.sleep(0.8)
+
+    nw_during_res = await engine.send_command("AT+QNWINFO", timeout_sec=3.0)
+    nw_during = _parse_qnwinfo_line(nw_during_res.get("lines", []))
+
+    call_duration_s = 0.0
+    if call_connected and connect_ts is not None:
+        await asyncio.sleep(max(1, hold_sec))
+        call_duration_s = max(0.0, time.time() - connect_ts)
+
+    hang_attempts: list[dict] = []
+    hang_res = await engine.send_command("ATH", timeout_sec=5.0)
+    hang_attempts.append(hang_res)
+    await asyncio.sleep(0.35)
+
+    def _has_active_or_held(rows: list[dict]) -> bool:
+        # stat 0/1 means active/held and should be treated as still connected.
+        return any((r.get("stat") in (0, 1)) for r in rows)
+
+    end_deadline = asyncio.get_running_loop().time() + 15.0
+    clcc_after: list[dict] = []
+    clcc_after_samples: list[dict] = []
+    while asyncio.get_running_loop().time() < end_deadline:
+        clcc_after_res = await engine.send_command("AT+CLCC", timeout_sec=3.0)
+        clcc_after = _parse_clcc_lines(clcc_after_res.get("lines", []))
+        clcc_after_samples.append(
+            {
+                "t_s": round(time.time() - dial_started, 1),
+                "states": [_clcc_stat_label(x.get("stat")) for x in clcc_after],
+                "raw_states": [x.get("stat") for x in clcc_after],
+            }
+        )
+        if not clcc_after:
+            break
+        # Retry hangup once if call still truly active/held after initial ATH.
+        if _has_active_or_held(clcc_after) and len(hang_attempts) < 2:
+            hang_attempts.append(await engine.send_command("ATH", timeout_sec=5.0))
+            await asyncio.sleep(0.4)
+            continue
+        await asyncio.sleep(0.8)
+
+    ceer_res = await engine.send_command("AT+CEER", timeout_sec=3.0)
+    ceer = _parse_ceer(ceer_res.get("lines", []))
+
+    nw_after_res = await engine.send_command("AT+QNWINFO", timeout_sec=3.0)
+    nw_after = _parse_qnwinfo_line(nw_after_res.get("lines", []))
+
+    now_urc = list(engine.urc_log)
+    if len(now_urc) >= len(before_urc):
+        delta_urc = now_urc[len(before_urc):]
+    else:
+        delta_urc = now_urc
+    call_urc_lines = [
+        x
+        for x in delta_urc
+        if any(tok in str(x).upper() for tok in ("NO CARRIER", "+CLCC", "+CEER", "BUSY", "NO ANSWER", "NO DIALTONE"))
+    ]
+
+    setup_time_ms = int((connect_ts - dial_started) * 1000) if connect_ts else None
+    active_after_hang = _has_active_or_held(clcc_after)
+    ok = bool(dial_ok and call_connected and not active_after_hang)
+    error = None
+    if not ok:
+        if not dial_ok:
+            error = f"Dial command failed ({dial_res.get('final') or 'no final'})"
+        elif not call_connected:
+            error = "Call did not reach connected state within timeout."
+        elif active_after_hang:
+            error = "Call still appears active/held after hangup retries."
+
+    return {
+        "ok": ok,
+        "error": error,
+        "number": number,
+        "hold_sec": hold_sec,
+        "dial_ok": dial_ok,
+        "call_connected": call_connected,
+        "setup_time_ms": setup_time_ms,
+        "call_duration_s": round(call_duration_s, 1) if call_connected else 0.0,
+        "ceer": ceer,
+        "nwinfo_before": nw_before,
+        "nwinfo_during_call": nw_during,
+        "nwinfo_after": nw_after,
+        "clcc_states": clcc_states,
+        "clcc_last": last_clcc,
+        "clcc_after_hangup": clcc_after,
+        "clcc_after_samples": clcc_after_samples,
+        "active_after_hang": active_after_hang,
+        "call_urc_lines": call_urc_lines,
+        "raw": {
+            "pre_hang": pre_hang,
+            "dial": dial_res,
+            "hang": hang_res,
+            "hang_attempts": hang_attempts,
+            "ceer": ceer_res,
+            "qnwinfo_before": nw_before_res,
+            "qnwinfo_during": nw_during_res,
+            "qnwinfo_after": nw_after_res,
+        },
+    }
+
+
+@app.websocket("/ws/kpi")
+async def ws_kpi(ws: WebSocket) -> None:
+    await ws.accept()
+    ws_clients.append(ws)
+    try:
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        if ws in ws_clients:
+            ws_clients.remove(ws)
