@@ -34,5 +34,5 @@ if ($listeners) {
     Start-Sleep -Milliseconds 400
 }
 
-Write-Host "Starting MobileDriver backend on http://$BindHost`:$Port ..."
+Write-Host "Starting 5G ModemTestDriver backend on http://$BindHost`:$Port ..."
 & $pythonExe -m uvicorn app.main:app --host $BindHost --port $Port

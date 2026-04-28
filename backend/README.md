@@ -1,6 +1,6 @@
-# MobileDriver backend (serial AT engine)
+# 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 1.0** (see root `README.md` for feature overview).
+**Version 1.0** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver**.
 
 ## Quick start
 
@@ -34,7 +34,7 @@ $env:MD_BAUDRATE="115200"
 
 ## API
 
-- `GET /` live KPI page (**v1.0** shown in header): Serial Port tools, modem reset, COPS + lock controls with runtime re-apply guard, roaming MNO selector [Vodafone/VMO2/EE/H3G/Auto], packet-data inhibit/allow controls, CA policy switch, NRDC switch, PCI lock controls, neighbour-cell KPI, intra-cell dominance KPI, Data Service KPI [APN/PDP/CID1/attach/registration/usbnet/netdev], SIM High-Level + PLMN Inspector, TX power KPI when reported, AT console, **iperf3** + **host ICMP ping sweep** (bind interfaces, trends, optional repeat every 15 s), VoLTE call test, clear-all charts, 60s–60m chart window, optional time-roll gap mode, `EARFCN/PCI` color mapping, RF threshold lines, optional RF smoothing
+- `GET /` **5G ModemTestDriver** KPI page (**v1.0** in browser tab title and main heading): Serial Port tools, modem reset, COPS + lock controls with runtime re-apply guard, roaming MNO selector [Vodafone/VMO2/EE/H3G/Auto], packet-data inhibit/allow controls, CA policy switch, NRDC switch, PCI lock controls, neighbour-cell KPI, intra-cell dominance KPI, Data Service KPI [APN/PDP/CID1/attach/registration/usbnet/netdev], SIM High-Level + PLMN Inspector, TX power KPI when reported, AT console, **iperf3** + **host ICMP ping sweep** (bind interfaces, trends, optional repeat every 15 s), VoLTE call test, clear-all charts, 60s–60m chart window, optional time-roll gap mode, `EARFCN/PCI` color mapping, RF threshold lines, optional RF smoothing
 - `GET /api/serial/status`
 - `GET /api/serial/ports`
 - `POST /api/at/send`

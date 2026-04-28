@@ -1,8 +1,8 @@
-# MobileDriver
+# 5G ModemTestDriver
 
 **Version 1.0**
 
-Local web app backend for Quectel modem control and live LTE KPI monitoring over serial AT commands.
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.0** is shown in the page header).
 
 Development/test platform: **Robustel R5010 router**.
 
@@ -25,7 +25,7 @@ AT command catalog from current modem firmware:
   - `AT+QRSRQ`
   - `AT+QSINR`
 - Reads modem firmware with `AT+CGMR`
-- Serves a live KPI page at `/` with:
+- Serves the live KPI page at `/` (**5G ModemTestDriver**) with:
   - Serial Port tools (refresh ports, auto-select likely Quectel AT port, reconnect, remembers last successful port)
   - Modem reset button (`AT+CFUN=1,1`) with auto-recovery attempts
   - Registration control (`AT+COPS` auto/deregister)

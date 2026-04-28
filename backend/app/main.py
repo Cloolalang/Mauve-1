@@ -89,7 +89,7 @@ def _acquire_instance_lock() -> None:
     except OSError as exc:
         f.close()
         raise RuntimeError(
-            "Another MobileDriver backend instance is already running. "
+            "Another ModemTestDriver backend instance is already running. "
             "Stop the other instance before starting a new one."
         ) from exc
     _instance_lock_file = f
@@ -1018,7 +1018,7 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(
-    title="MobileDriver Serial + KPI Engine",
+    title="5G ModemTestDriver",
     version="0.2.0",
     lifespan=lifespan,
 )
@@ -1031,7 +1031,7 @@ async def home() -> HTMLResponse:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>MobileDriver KPI · v__APP_VERSION__</title>
+  <title>5G ModemTestDriver · v__APP_VERSION__</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 16px; background: #111; color: #f3f3f3; }
     h1 { margin: 0 0 12px 0; font-size: 22px; }
@@ -1048,7 +1048,7 @@ async def home() -> HTMLResponse:
 </head>
 <body>
   <h1 style="display:flex; align-items:baseline; gap:10px; flex-wrap:wrap;">
-    MobileDriver KPI
+    5G ModemTestDriver
     <span class="label" style="font-size:13px; font-weight:600; letter-spacing:0.02em;">v__APP_VERSION__</span>
   </h1>
   <div class="label">Live modem snapshot from COM AT engine</div>
