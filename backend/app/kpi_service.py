@@ -338,23 +338,6 @@ def _parse_qnetdevstatus(lines: list[str]) -> str | None:
     return None
 
 
-def _parse_qgdcnt(lines: list[str]) -> dict[str, int] | None:
-    # Common shape: +QGDCNT: <tx_kb>,<rx_kb>
-    for raw in lines:
-        if not raw.startswith("+QGDCNT:"):
-            continue
-        payload = raw.split(":", 1)[1].strip()
-        parts = _parse_csv_payload(payload)
-        if len(parts) < 2:
-            continue
-        tx_kb = _safe_int(parts[0])
-        rx_kb = _safe_int(parts[1])
-        if tx_kb is None or rx_kb is None:
-            continue
-        return {"tx_kb": tx_kb, "rx_kb": rx_kb}
-    return None
-
-
 @dataclass
 class KpiRuntime:
     snapshot: dict[str, Any] = field(default_factory=dict)
@@ -366,9 +349,6 @@ class KpiRuntime:
     modem_fw_at: float = 0.0
     data_service: dict[str, Any] = field(default_factory=dict)
     data_service_at: float = 0.0
-    traffic_prev_tx_kb: int | None = None
-    traffic_prev_rx_kb: int | None = None
-    traffic_prev_at: float = 0.0
 
 
 async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
@@ -407,28 +387,6 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                 qeng_nb = {"ok": False, "command": 'AT+QENG="neighbourcell"', "final": "SKIPPED_NO_SERVICE", "lines": []}
 
             refresh_ds = (now - runtime.data_service_at) > 5.0 or not runtime.data_service
-            qgdcnt = await engine.send_command("AT+QGDCNT?", timeout_sec=1.5)
-            qgdcnt_v = _parse_qgdcnt(qgdcnt.get("lines", []))
-            eps_ul_kbps: float | None = None
-            eps_dl_kbps: float | None = None
-            if qgdcnt_v is not None:
-                prev_ts = runtime.traffic_prev_at
-                dt = now - prev_ts if prev_ts else 0.0
-                prev_tx = runtime.traffic_prev_tx_kb
-                prev_rx = runtime.traffic_prev_rx_kb
-                tx_kb = qgdcnt_v["tx_kb"]
-                rx_kb = qgdcnt_v["rx_kb"]
-                if dt > 0.2 and prev_tx is not None and prev_rx is not None:
-                    dtx = tx_kb - prev_tx
-                    drx = rx_kb - prev_rx
-                    # Counter reset or wrap: skip one sample and re-baseline.
-                    if dtx >= 0 and drx >= 0:
-                        # Counters are kB; convert delta kB/s to kbps.
-                        eps_ul_kbps = (dtx * 8.192) / dt
-                        eps_dl_kbps = (drx * 8.192) / dt
-                runtime.traffic_prev_tx_kb = tx_kb
-                runtime.traffic_prev_rx_kb = rx_kb
-                runtime.traffic_prev_at = now
 
             if refresh_ds:
                 cgatt = await engine.send_command("AT+CGATT?", timeout_sec=1.5)
@@ -461,17 +419,8 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                     "usbnet_mode": usbnet_mode,
                     "usbnet_mode_label": _usbnet_mode_label(usbnet_mode),
                     "qnetdev_status": qnetdev_status,
-                    "qgdcnt_tx_kb": qgdcnt_v.get("tx_kb") if qgdcnt_v else None,
-                    "qgdcnt_rx_kb": qgdcnt_v.get("rx_kb") if qgdcnt_v else None,
-                    "eps_ul_kbps": eps_ul_kbps,
-                    "eps_dl_kbps": eps_dl_kbps,
                 }
                 runtime.data_service_at = now
-            else:
-                runtime.data_service["qgdcnt_tx_kb"] = qgdcnt_v.get("tx_kb") if qgdcnt_v else None
-                runtime.data_service["qgdcnt_rx_kb"] = qgdcnt_v.get("rx_kb") if qgdcnt_v else None
-                runtime.data_service["eps_ul_kbps"] = eps_ul_kbps
-                runtime.data_service["eps_dl_kbps"] = eps_dl_kbps
 
             serving = _parse_qeng_servingcell(qeng.get("lines", []))
             serving_pci = None
@@ -513,7 +462,6 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                     "qrsrp": qrsrp,
                     "qrsrq": qrsrq,
                     "qsinr": qsinr,
-                    "qgdcnt": qgdcnt,
                 },
             }
             async with runtime.lock:

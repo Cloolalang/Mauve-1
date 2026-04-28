@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -15,6 +18,8 @@ from serial.tools import list_ports
 
 from app.kpi_service import KpiRuntime, kpi_poll_loop
 from app.serial_engine import SerialEngine
+
+APP_VERSION = "1.0"
 
 
 def _serial_state_file_path() -> str:
@@ -153,16 +158,278 @@ class PciLockSetBody(BaseModel):
     pci: int | None = Field(default=None, ge=0)
 
 
-class PingTestBody(BaseModel):
-    host: str = Field(default="8.8.8.8")
-    count: int = Field(default=10, ge=1, le=20)
-    cid: int = Field(default=1, ge=1, le=16)
-
-
 class VolteTestBody(BaseModel):
     number: str = Field(min_length=3, max_length=40, description="Dial number, e.g. +447700900123")
     hold_sec: int = Field(default=10, ge=3, le=120, description="Call hold duration before hangup")
     password: str | None = Field(default=None, description="Unlock password (same as data allow password)")
+
+
+class IperfTestBody(BaseModel):
+    host: str = Field(default="iperf.as42831.net", min_length=1)
+    port: int = Field(default=5361, ge=1, le=65535)
+    duration_sec: int = Field(default=10, ge=1, le=300)
+    direction: str = Field(default="download", description="download=server->client, upload=client->server")
+    protocol: str = Field(default="tcp", description="Traffic mode. Currently only tcp is supported.")
+    mobile_only: bool = Field(default=True, description="Bind iperf to mobile data interface/IP only.")
+    bind_ip: str | None = Field(default=None, description="Optional local IPv4 to bind using iperf -B.")
+    bitrate_limit_mbps: float | None = Field(
+        default=None,
+        gt=0,
+        description="Optional TCP bitrate limit for iperf -b (Mbit/s), e.g. 10 → -b 10M.",
+    )
+
+
+class IcmpPingSweepBody(BaseModel):
+    host: str = Field(default="8.8.8.8", min_length=1, max_length=253)
+    count: int = Field(default=10, ge=1, le=100)
+    bind_ipv4: str | None = Field(default=None, description="Windows: ping -S source IPv4 (optional).")
+
+
+def _parse_icmp_ping_rtts_windows(text: str) -> list[float]:
+    out: list[float] = []
+    sub1 = re.compile(r"time\s*[<≤]\s*1\s*ms", re.I)
+    rtt_eq = re.compile(r"time[=]\s*(\d+)\s*ms", re.I)
+    rtt_angle = re.compile(r"time[=<]\s*(\d+)\s*ms", re.I)
+    temps_fr = re.compile(r"temps[=]\s*(\d+)\s*ms", re.I)
+    for line in text.splitlines():
+        if sub1.search(line):
+            out.append(0.5)
+            continue
+        ls = line.replace(" ", "").lower()
+        if "time<1ms" in ls:
+            out.append(0.5)
+            continue
+        m = rtt_eq.search(line) or rtt_angle.search(line)
+        if m:
+            out.append(float(m.group(1)))
+            continue
+        m2 = temps_fr.search(line)
+        if m2:
+            out.append(float(m2.group(1)))
+    return out
+
+
+def _parse_icmp_ping_rtts_unix(text: str) -> list[float]:
+    out: list[float] = []
+    rtt_re = re.compile(r"time=([\d.]+)\s*ms", re.I)
+    for line in text.splitlines():
+        m = rtt_re.search(line)
+        if m:
+            out.append(float(m.group(1)))
+    return out
+
+
+def _icmp_jitter_ms(rtts: list[float]) -> float | None:
+    if len(rtts) < 2:
+        return 0.0 if rtts else None
+    diffs = [abs(rtts[i] - rtts[i - 1]) for i in range(1, len(rtts))]
+    return round(sum(diffs) / len(diffs), 3)
+
+
+def _discover_iperf_binary(explicit: str | None = None) -> str | None:
+    candidates: list[str] = []
+    if explicit:
+        candidates.append(str(explicit).strip())
+    env_bin = os.getenv("MD_IPERF_BIN", "").strip()
+    if env_bin:
+        candidates.append(env_bin)
+    # Common local locations first (project root and backend root).
+    here = os.path.abspath(os.path.dirname(__file__))
+    candidates.extend(
+        [
+            os.path.abspath(os.path.join(here, "..", "vendor", "iperf", "iperf3.exe")),
+            os.path.abspath(os.path.join(here, "..", "..", "iperf3.exe")),
+            os.path.abspath(os.path.join(here, "..", "iperf3.exe")),
+            os.path.abspath(os.path.join(here, "..", "..", "..", "iperf3.exe")),
+            os.path.abspath(os.path.join(here, "..", "..", "..", "iperf3.1.1_32", "iperf3.exe")),
+        ]
+    )
+    # Then PATH lookups.
+    for exe in ("iperf3.exe", "iperf3", "iperf.exe", "iperf"):
+        p = shutil.which(exe)
+        if p:
+            candidates.append(p)
+    for c in candidates:
+        if not c:
+            continue
+        if os.path.isfile(c):
+            return c
+        p2 = shutil.which(c)
+        if p2:
+            return p2
+    # Last-resort search in common user locations on Windows.
+    if os.name == "nt":
+        search_roots = []
+        for key in ("USERPROFILE", "HOMEDRIVE"):
+            v = os.getenv(key, "").strip()
+            if v:
+                if key == "HOMEDRIVE":
+                    hp = f"{v}\\"
+                    if os.path.isdir(hp):
+                        search_roots.append(hp)
+                elif os.path.isdir(v):
+                    search_roots.append(v)
+        # De-duplicate while preserving order.
+        uniq_roots: list[str] = []
+        for r in search_roots:
+            if r not in uniq_roots:
+                uniq_roots.append(r)
+        hit = _find_iperf_under_roots(uniq_roots)
+        if hit:
+            return hit
+    return None
+
+
+def _find_iperf_under_roots(roots: list[str], max_depth: int = 4) -> str | None:
+    names = {"iperf3.exe", "iperf3", "iperf.exe", "iperf"}
+    for root in roots:
+        try:
+            root_abs = os.path.abspath(root)
+            base_depth = root_abs.rstrip("\\/").count(os.sep)
+            for dirpath, dirnames, filenames in os.walk(root_abs):
+                cur_depth = dirpath.rstrip("\\/").count(os.sep) - base_depth
+                if cur_depth > max_depth:
+                    dirnames[:] = []
+                    continue
+                low_files = {str(x).lower(): str(x) for x in filenames}
+                for n in names:
+                    key = n.lower()
+                    if key in low_files:
+                        return os.path.join(dirpath, low_files[key])
+        except Exception:
+            continue
+    return None
+
+
+def _compose_iperf_error(exit_code: int, stderr: str, stdout: str, parse_error: str | None) -> str:
+    chunks = [f"iperf failed (exit={exit_code})"]
+    s_err = (stderr or "").strip()
+    s_out = (stdout or "").strip()
+    if s_err:
+        tail = s_err if len(s_err) < 6000 else f"{s_err[:6000]}..."
+        chunks.append(tail)
+    elif s_out and not s_out.startswith("{"):
+        chunks.append(s_out[:4000])
+    if parse_error:
+        chunks.append(f"JSON parse: {parse_error}")
+    return "\n".join(chunks)
+
+
+def _extract_iperf_bits_per_second(report: dict, reverse: bool) -> tuple[float | None, str | None]:
+    end = report.get("end") if isinstance(report, dict) else None
+    if not isinstance(end, dict):
+        return None, None
+    sum_sent = end.get("sum_sent") if isinstance(end.get("sum_sent"), dict) else {}
+    sum_received = end.get("sum_received") if isinstance(end.get("sum_received"), dict) else {}
+    sum_any = end.get("sum") if isinstance(end.get("sum"), dict) else {}
+    # In reverse mode the client is receiver, so prefer sum_received.
+    pref = [("sum_received", sum_received), ("sum_sent", sum_sent)] if reverse else [("sum_sent", sum_sent), ("sum_received", sum_received)]
+    pref.append(("sum", sum_any))
+    for label, bucket in pref:
+        bps = bucket.get("bits_per_second") if isinstance(bucket, dict) else None
+        if isinstance(bps, (int, float)) and bps >= 0:
+            return float(bps), label
+    return None, None
+
+
+def _parse_ipconfig_windows_blocks() -> list[dict[str, str]]:
+    """Split ipconfig output into adapter blocks (header line without trailing colon + body)."""
+    try:
+        proc = subprocess.run(
+            ["ipconfig"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except Exception:
+        return []
+    txt = str(proc.stdout or "")
+    if not txt.strip():
+        return []
+    blocks: list[dict[str, str]] = []
+    current: dict[str, str] | None = None
+    for raw in txt.splitlines():
+        line = raw.rstrip()
+        s = line.strip()
+        if not s:
+            continue
+        if (line == s) and s.endswith(":"):
+            if current:
+                blocks.append(current)
+            current = {"header": s[:-1], "body": ""}
+            continue
+        if current is not None:
+            current["body"] += s + "\n"
+    if current:
+        blocks.append(current)
+    return blocks
+
+
+def _enumerate_windows_ipv4_adapters() -> list[dict[str, str]]:
+    """All IPv4 addresses Windows reports under adapter sections (for iperf -B)."""
+    if os.name != "nt":
+        return []
+    blocks = _parse_ipconfig_windows_blocks()
+    ip_re = re.compile(r"IPv4[^:]*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)")
+    rows: list[dict[str, str]] = []
+    for b in blocks:
+        header = str(b.get("header", "")).strip()
+        body = str(b.get("body", ""))
+        if not header:
+            continue
+        for m in ip_re.finditer(body):
+            ip = m.group(1)
+            try:
+                ipaddress.IPv4Address(ip)
+            except Exception:
+                continue
+            rows.append({"adapter": header, "ipv4": ip})
+
+    mobile_kw = ("mobile", "cellular", "wwan", "rndis", "quectel", "usb ethernet", "internet sharing")
+
+    def sort_key(r: dict[str, str]) -> tuple[int, str, str]:
+        hay = f'{r.get("adapter", "")} {r.get("ipv4", "")}'.lower()
+        mobile_first = 0 if any(k in hay for k in mobile_kw) else 1
+        return (mobile_first, str(r.get("adapter", "")).lower(), str(r.get("ipv4", "")))
+
+    rows.sort(key=sort_key)
+    return rows
+
+
+def _detect_mobile_bind_ip_windows() -> tuple[str | None, str | None]:
+    if os.name != "nt":
+        return None, None
+    blocks = _parse_ipconfig_windows_blocks()
+    if not blocks:
+        return None, None
+
+    keywords = (
+        "mobile",
+        "cellular",
+        "wwan",
+        "rndis",
+        "quectel",
+        "usb ethernet",
+        "internet sharing",
+    )
+    ip_re = re.compile(r"IPv4[^:]*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)")
+    for b in blocks:
+        header = str(b.get("header", ""))
+        body = str(b.get("body", ""))
+        hay = f"{header}\n{body}".lower()
+        if not any(k in hay for k in keywords):
+            continue
+        m = ip_re.search(body)
+        if not m:
+            continue
+        ip = m.group(1)
+        try:
+            ipaddress.IPv4Address(ip)
+        except Exception:
+            continue
+        return ip, header
+    return None, None
 
 
 def _parse_cops_lines(lines: list[str]) -> dict:
@@ -468,65 +735,6 @@ def _parse_qnwlock_common4g(lines: list[str]) -> dict | None:
     return None
 
 
-def _parse_ping_avg_ms(text: str) -> float | None:
-    # Windows ping summary: "Minimum = 29ms, Maximum = 57ms, Average = 43ms"
-    m_win = re.search(r"Average\s*=\s*(\d+)\s*ms", text, flags=re.IGNORECASE)
-    if m_win:
-        return float(m_win.group(1))
-
-    # Linux/macOS ping summary: "rtt min/avg/max/mdev = 8.121/11.451/14.330/2.116 ms"
-    m_unix = re.search(r"=\s*[\d.]+/([\d.]+)/[\d.]+/[\d.]+\s*ms", text, flags=re.IGNORECASE)
-    if m_unix:
-        try:
-            return float(m_unix.group(1))
-        except ValueError:
-            return None
-    return None
-
-
-def _parse_qping_urcs(lines: list[str]) -> dict:
-    # Quectel forms seen in the field:
-    # 1) +QPING: <cid>,"<ip>",<bytes>,<time_ms>,<ttl>
-    # 2) +QPING: <cid>,<sent>,<recv>,<lost>,<min_ms>,<max_ms>,<avg_ms>
-    # 3) +QPING: <code> (status/error style URC)
-    packet_times_ms: list[float] = []
-    summary: dict | None = None
-    status_codes: list[int] = []
-
-    for raw in lines:
-        if "+QPING:" not in raw:
-            continue
-        payload = raw.split(":", 1)[1].strip()
-
-        m_packet = re.fullmatch(r'(\d+)\s*,\s*"[^"]+"\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)', payload)
-        if m_packet:
-            packet_times_ms.append(float(m_packet.group(3)))
-            continue
-
-        m_summary = re.fullmatch(r"(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", payload)
-        if m_summary:
-            summary = {
-                "cid": int(m_summary.group(1)),
-                "sent": int(m_summary.group(2)),
-                "received": int(m_summary.group(3)),
-                "lost": int(m_summary.group(4)),
-                "min_ms": float(m_summary.group(5)),
-                "max_ms": float(m_summary.group(6)),
-                "avg_ms": float(m_summary.group(7)),
-            }
-            continue
-
-        m_code = re.fullmatch(r"(\d+)", payload)
-        if m_code:
-            status_codes.append(int(m_code.group(1)))
-
-    return {
-        "packet_times_ms": packet_times_ms,
-        "summary": summary,
-        "status_codes": status_codes,
-    }
-
-
 def _parse_cgatt_attached(lines: list[str]) -> bool | None:
     for raw in lines:
         if not raw.startswith("+CGATT:"):
@@ -823,7 +1031,7 @@ async def home() -> HTMLResponse:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>MobileDriver KPI</title>
+  <title>MobileDriver KPI · v__APP_VERSION__</title>
   <style>
     body { font-family: Arial, sans-serif; margin: 16px; background: #111; color: #f3f3f3; }
     h1 { margin: 0 0 12px 0; font-size: 22px; }
@@ -839,7 +1047,10 @@ async def home() -> HTMLResponse:
   </style>
 </head>
 <body>
-  <h1>MobileDriver KPI</h1>
+  <h1 style="display:flex; align-items:baseline; gap:10px; flex-wrap:wrap;">
+    MobileDriver KPI
+    <span class="label" style="font-size:13px; font-weight:600; letter-spacing:0.02em;">v__APP_VERSION__</span>
+  </h1>
   <div class="label">Live modem snapshot from COM AT engine</div>
   <div id="status" class="label" style="margin-top:8px;">Connecting...</div>
   <div style="margin-top:10px; display:flex; gap:14px; align-items:center; flex-wrap:wrap;">
@@ -895,9 +1106,6 @@ async def home() -> HTMLResponse:
       <div class="row"><span class="label">EPS Registration</span><span id="ds-reg">-</span></div>
       <div class="row"><span class="label">USB data stack</span><span id="ds-usbnet">-</span></div>
       <div class="row"><span class="label">Netdev status</span><span id="ds-netdev">-</span></div>
-      <div class="row"><span class="label">EPS DL throughput</span><span id="ds-dl">-</span></div>
-      <div class="row"><span class="label">EPS UL throughput</span><span id="ds-ul">-</span></div>
-      <div class="row"><span class="label">EPS data counters (RX/TX)</span><span id="ds-counters">-</span></div>
       <div id="ds-warn" class="label" style="margin-top:8px;">-</div>
     </div>
 
@@ -1144,25 +1352,6 @@ async def home() -> HTMLResponse:
     </div>
 
     <div class="card">
-      <div class="label">Ping Test</div>
-      <div class="row"><span class="label">Target</span><span>8.8.8.8</span></div>
-      <div class="row"><span class="label">Type</span><span>AT+QPING</span></div>
-      <div class="row"><span class="label">Count</span><span>10</span></div>
-      <div class="row">
-        <span class="label">Auto ping every 10s</span>
-        <label style="display:flex; align-items:center; gap:6px;">
-          <input id="auto-ping-toggle" type="checkbox" />
-          <span id="auto-ping-state">OFF</span>
-        </label>
-      </div>
-      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
-        <button id="btn-ping-test">Run AT Ping Test</button>
-      </div>
-      <div id="pingmsg" class="label" style="margin-top:8px;">-</div>
-      <pre id="pingtrace" class="mono" style="max-height:120px; overflow:auto; margin-top:8px;">-</pre>
-    </div>
-
-    <div class="card">
       <div class="label">VoLTE Call Test</div>
       <div class="row"><span class="label">Hold time</span><span>10 seconds</span></div>
       <div style="margin-top:8px;">
@@ -1181,8 +1370,133 @@ async def home() -> HTMLResponse:
     </div>
 
     <div class="card">
-      <div class="label">Ping Trend (ms)</div>
-      <canvas id="pingchart" width="420" height="180" style="width:100%; height:180px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label">Iperf3 Test</div>
+      <div style="margin-top:8px;">
+        <div class="label">Endpoint host:</div>
+        <input id="iperf-host" value="iperf.as42831.net" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+      </div>
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:8px;">
+        <div>
+          <div class="label">Port:</div>
+          <input id="iperf-port" type="number" min="1" max="65535" value="5361" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+        </div>
+        <div>
+          <div class="label">Duration (s):</div>
+          <input id="iperf-duration" type="number" min="1" max="300" value="10" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+        </div>
+      </div>
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:8px;">
+        <div>
+          <div class="label">Direction:</div>
+          <select id="iperf-direction" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;">
+            <option value="both" selected>Download then Upload</option>
+            <option value="download">Download (-R)</option>
+            <option value="upload">Upload</option>
+          </select>
+        </div>
+        <div>
+          <div class="label">Protocol:</div>
+          <select id="iperf-protocol" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;">
+            <option value="tcp" selected>TCP</option>
+          </select>
+        </div>
+      </div>
+      <div style="margin-top:8px;">
+        <div class="label">Bind interface / IPv4 (iperf -B)</div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:4px;">
+          <select id="iperf-bind-select" style="flex:1; min-width:220px; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px;">
+            <option value="auto" selected>Auto-detect mobile broadband IPv4</option>
+            <option value="manual">Manual IPv4…</option>
+          </select>
+          <button type="button" id="btn-iperf-refresh-ifaces">Refresh interfaces</button>
+        </div>
+        <input id="iperf-bind-ip" placeholder="Enter IPv4 when Manual is selected" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:8px; display:none;" />
+      </div>
+      <div style="margin-top:8px;">
+        <div class="label">Speed limit (Mbit/s, optional — maps to iperf -b):</div>
+        <input id="iperf-speed-limit" type="number" min="0" step="0.1" placeholder="Unlimited" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+      </div>
+      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+        <button id="btn-iperf-test">Run Iperf3 Test</button>
+      </div>
+      <div id="iperf-msg" class="label" style="margin-top:8px;">-</div>
+      <pre id="iperf-trace" class="mono" style="max-height:160px; overflow:auto; margin-top:8px;">-</pre>
+    </div>
+
+    <div class="card">
+      <div class="label">Iperf Latest Gauges</div>
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:8px;">
+        <div>
+          <div class="label">DL speed</div>
+          <canvas id="iperf-dl-gauge" width="220" height="130" style="width:100%; height:130px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+        </div>
+        <div>
+          <div class="label">UL speed</div>
+          <canvas id="iperf-ul-gauge" width="220" height="130" style="width:100%; height:130px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+        </div>
+      </div>
+      <div class="label" id="iperf-gauge-note" style="margin-top:6px;">Latest results (Mbps). Scale auto-ranges from recent max.</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Iperf Throughput Trend (Mbps)</div>
+      <canvas id="iperfchart" width="420" height="180" style="width:100%; height:180px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+    </div>
+
+    <div class="card">
+      <div class="label">ICMP Ping Sweep (host OS)</div>
+      <div style="margin-top:8px;">
+        <div class="label">Target host:</div>
+        <input id="ph-host" value="8.8.8.8" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+      </div>
+      <div style="margin-top:8px;">
+        <div class="label">Count:</div>
+        <input id="ph-count" type="number" min="1" max="100" value="10" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+      </div>
+      <div style="margin-top:8px;">
+        <div class="label">Bind source IPv4 (Windows ping -S)</div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:4px;">
+          <select id="ph-bind-select" style="flex:1; min-width:220px; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px;">
+            <option value="auto" selected>Auto (OS default route)</option>
+            <option value="manual">Manual IPv4…</option>
+          </select>
+          <button type="button" id="btn-ph-refresh-ifaces">Refresh interfaces</button>
+        </div>
+        <input id="ph-bind-ip" placeholder="Used when Manual is selected" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:8px; display:none;" />
+      </div>
+      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+        <button id="btn-ph-run" type="button">Run ICMP Ping Sweep</button>
+      </div>
+      <div class="row" style="margin-top:10px;">
+        <span class="label">Repeat sweep every 15 s</span>
+        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+          <input id="ph-repeat-toggle" type="checkbox" />
+          <span id="ph-repeat-state">OFF</span>
+        </label>
+      </div>
+      <div id="ph-msg" class="label" style="margin-top:8px;">-</div>
+      <pre id="ph-trace" class="mono" style="max-height:140px; overflow:auto; margin-top:8px;">-</pre>
+    </div>
+
+    <div class="card">
+      <div class="label">ICMP Ping Gauges</div>
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:8px;">
+        <div>
+          <div class="label">Avg RTT</div>
+          <canvas id="ph-lat-gauge" width="220" height="130" style="width:100%; height:130px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+        </div>
+        <div>
+          <div class="label">Jitter</div>
+          <canvas id="ph-jit-gauge" width="220" height="130" style="width:100%; height:130px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+        </div>
+      </div>
+      <div class="label" id="ph-gauge-note" style="margin-top:6px;">Latest sweep (ms). Scale from recent runs.</div>
+    </div>
+
+    <div class="card">
+      <div class="label">ICMP Ping Trend (ms)</div>
+      <canvas id="ph-sweep-chart" width="420" height="180" style="width:100%; height:180px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
@@ -1241,14 +1555,24 @@ async def home() -> HTMLResponse:
       cellColorMap.set(s, c);
       return c;
     };
-    let autoPingTimer = null;
-    let pingBusy = false;
+    let iperfBusy = false;
     let serialBaud = 115200;
     let serialPorts = [];
     let currentServingEarfcn = null;
     let currentServingPci = null;
     let lastDataService = {};
-    const pingHistory = [];
+    const iperfHistory = [];
+    const iperfDlHistory = [];
+    const iperfUlHistory = [];
+    let lastIperfDlMbps = null;
+    let lastIperfUlMbps = null;
+    let pingSweepBusy = false;
+    let phRepeatTimer = null;
+    const PH_REPEAT_INTERVAL_MS = 15000;
+    const phAvgHistory = [];
+    const phJitHistory = [];
+    let lastPhAvgMs = null;
+    let lastPhJitMs = null;
     const rfHistory = { rsrp: [], rsrq: [], sinr: [], rssi: [], dominance: [] };
     const bwHistory = [];
     const pciHistory = [];
@@ -1291,7 +1615,11 @@ async def home() -> HTMLResponse:
     }
 
     function pruneAllHistory(nowMs = Date.now()) {
-      pruneHistoryByAge(pingHistory, nowMs);
+      pruneHistoryByAge(iperfHistory, nowMs);
+      pruneHistoryByAge(iperfDlHistory, nowMs);
+      pruneHistoryByAge(iperfUlHistory, nowMs);
+      pruneHistoryByAge(phAvgHistory, nowMs);
+      pruneHistoryByAge(phJitHistory, nowMs);
       Object.values(rfHistory).forEach((h) => pruneHistoryByAge(h, nowMs));
       pruneHistoryByAge(bwHistory, nowMs);
       pruneHistoryByAge(pciHistory, nowMs);
@@ -1316,7 +1644,10 @@ async def home() -> HTMLResponse:
     }
 
     function redrawAllCharts() {
-      drawPingChart();
+      drawIperfChart();
+      drawIperfGauges();
+      drawPhSweepChart();
+      drawPhGauges();
       drawRfCharts();
       drawBwChart();
       drawPciChart();
@@ -1410,17 +1741,8 @@ async def home() -> HTMLResponse:
       el("ds-usbnet").textContent =
         ds.usbnet_mode_label || (ds.usbnet_mode === null || ds.usbnet_mode === undefined ? "-" : `mode ${ds.usbnet_mode}`);
       el("ds-netdev").textContent = ds.qnetdev_status || "-";
-      el("ds-dl").textContent = fmtKbps(ds.eps_dl_kbps);
-      el("ds-ul").textContent = fmtKbps(ds.eps_ul_kbps);
-      const rxKb = Number(ds.qgdcnt_rx_kb);
-      const txKb = Number(ds.qgdcnt_tx_kb);
-      if (Number.isFinite(rxKb) && Number.isFinite(txKb) && rxKb >= 0 && txKb >= 0) {
-        el("ds-counters").textContent = `${rxKb} kB / ${txKb} kB`;
-      } else {
-        el("ds-counters").textContent = "-";
-      }
       if (ds.usbnet_mode_label && /RNDIS|NDIS|QMI/i.test(String(ds.usbnet_mode_label))) {
-        el("ds-warn").textContent = "Note: USB data stack active (NDIS/QMI-like mode). QPING may timeout when host WAN session is busy.";
+        el("ds-warn").textContent = "Note: USB data stack active (NDIS/QMI-like mode). Host WAN usage may contend with modem traffic.";
         el("ds-warn").className = "label warn";
       } else {
         el("ds-warn").textContent = "-";
@@ -1854,11 +2176,6 @@ async def home() -> HTMLResponse:
       if (!ok) return;
       try {
         el("serialmsg").textContent = "Sending modem reset (AT+CFUN=1,1)...";
-        const autoToggle = el("auto-ping-toggle");
-        if (autoToggle && autoToggle.checked) {
-          autoToggle.checked = false;
-          setAutoPing(false);
-        }
         await fetch("/api/kpi/poll/stop", { method: "POST" });
         const r = await fetch("/api/tools/modem-reset", { method: "POST" });
         const j = await r.json();
@@ -2014,65 +2331,6 @@ async def home() -> HTMLResponse:
       }
     }
 
-    async function runPingTest() {
-      if (pingBusy) return;
-      pingBusy = true;
-      try {
-        el("pingmsg").textContent = "Running AT+QPING test...";
-        el("pingtrace").textContent = "Running...";
-        // Pause KPI polling to make QPING lines visible in AT console.
-        await fetch("/api/kpi/poll/stop", { method: "POST" });
-        const r = await fetch("/api/tools/ping-test", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ host: "8.8.8.8", count: 10, cid: 1 })
-        });
-        const j = await r.json();
-        if (!r.ok || !j.ok) {
-          const statusCodes = Array.isArray(j?.qping_status_codes) ? j.qping_status_codes : [];
-          const pre = j?.precheck || {};
-          const contentionLikely =
-            statusCodes.includes(569) &&
-            pre.attached === true &&
-            pre.eps_registered === true &&
-            pre.cid_active === true;
-          let errMsg = j.detail || j.error || "Ping test failed";
-          if (contentionLikely) {
-            const stack = lastDataService?.usbnet_mode_label || "USB data stack";
-            errMsg += ` Likely host data-path contention (${stack}). Disconnect modem internet from PC or use a separate CID for AT ping.`;
-          }
-          throw new Error(errMsg);
-        }
-        const rttSamples = Array.isArray(j.times_ms)
-          ? j.times_ms.map((x) => Number(x)).filter((x) => Number.isFinite(x))
-          : [];
-        const points = rttSamples.length;
-        const avgValue =
-          j.avg_ms_packets ?? j.avg_ms_summary ?? j.avg_ms ?? null;
-        const avg = avgValue === null || avgValue === undefined ? "-" : `${avgValue} ms`;
-        el("pingmsg").textContent = `AT ping complete: avg ${avg} (${points} RTT samples)`;
-        addPingSamples(rttSamples);
-        const cmd = j?.cmd?.command || 'AT+QPING=?';
-        const cmdLines = Array.isArray(j?.cmd?.lines) ? j.cmd.lines : [];
-        const urcLines = Array.isArray(j?.urc_lines)
-          ? j.urc_lines.filter((x) => !/^\\+QPING:\\s*\\d+\\s*$/.test(String(x || "").trim()))
-          : [];
-        el("pingtrace").textContent =
-          [`> ${cmd}`, ...cmdLines.map((x) => `< ${x}`), ...urcLines.map((x) => `< URC ${x}`)].join("\\n");
-      } catch (e) {
-        const rawMsg = String(e?.message || e || "");
-        const cleanMsg = rawMsg
-          .replace(/QPING status code\\(s\\):\\s*[\\d,\\s]+;\\s*/i, "")
-          .trim();
-        const msg = cleanMsg || "No RTT samples received from modem.";
-        el("pingmsg").textContent = `Ping error: ${msg}`;
-        el("pingtrace").textContent = `Ping error: ${msg}`;
-      } finally {
-        await fetch("/api/kpi/poll/start", { method: "POST" });
-        pingBusy = false;
-      }
-    }
-
     async function runVolteTest() {
       const number = String(el("volte-number")?.value || "").trim();
       const password = String(el("volte-password")?.value || "");
@@ -2132,33 +2390,340 @@ async def home() -> HTMLResponse:
       }
     }
 
-    function setAutoPing(enabled) {
-      const state = el("auto-ping-state");
-      if (autoPingTimer) {
-        clearInterval(autoPingTimer);
-        autoPingTimer = null;
-      }
-      if (enabled) {
-        state.textContent = "ON";
-        state.className = "ok";
-        autoPingTimer = setInterval(() => { runPingTest(); }, 10000);
-        runPingTest();
+    function syncIperfBindUi() {
+      const sel = el("iperf-bind-select");
+      const inp = el("iperf-bind-ip");
+      if (!sel || !inp) return;
+      const v = sel.value;
+      if (v === "manual") {
+        inp.style.display = "block";
       } else {
+        inp.style.display = "none";
+        if (v === "auto") inp.value = "";
+      }
+    }
+
+    function resolveIperfBindIp() {
+      const sel = el("iperf-bind-select");
+      const inp = el("iperf-bind-ip");
+      if (!sel) return "";
+      const v = sel.value;
+      if (v === "manual") return String(inp?.value || "").trim();
+      if (v === "auto") return "";
+      return String(v || "").trim();
+    }
+
+    function syncPhBindUi() {
+      const sel = el("ph-bind-select");
+      const inp = el("ph-bind-ip");
+      if (!sel || !inp) return;
+      const v = sel.value;
+      if (v === "manual") {
+        inp.style.display = "block";
+      } else {
+        inp.style.display = "none";
+        if (v === "auto") inp.value = "";
+      }
+    }
+
+    function resolvePhBindIp() {
+      const sel = el("ph-bind-select");
+      const inp = el("ph-bind-ip");
+      if (!sel) return "";
+      const v = sel.value;
+      if (v === "manual") return String(inp?.value || "").trim();
+      if (v === "auto") return "";
+      return String(v || "").trim();
+    }
+
+    async function loadBindInterfaces() {
+      try {
+        const r = await fetch("/api/tools/bind-interfaces");
+        const j = await r.json();
+        const opts = Array.isArray(j.interfaces) ? j.interfaces : [];
+
+        function populateBindSelect(sel, prevVal, autoLabel) {
+          if (!sel) return;
+          sel.innerHTML = "";
+          const optAuto = document.createElement("option");
+          optAuto.value = "auto";
+          optAuto.textContent = autoLabel;
+          sel.appendChild(optAuto);
+          for (const row of opts) {
+            const ip = String(row.ipv4 || "").trim();
+            const ad = String(row.adapter || "").trim();
+            const okIp =
+              /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(ip) &&
+              ip.split(".").every((x) => {
+                const n = Number(x);
+                return Number.isFinite(n) && n >= 0 && n <= 255;
+              });
+            if (!ip || !okIp) continue;
+            const o = document.createElement("option");
+            o.value = ip;
+            o.textContent = ad ? `${ad} — ${ip}` : ip;
+            sel.appendChild(o);
+          }
+          const optMan = document.createElement("option");
+          optMan.value = "manual";
+          optMan.textContent = "Manual IPv4…";
+          sel.appendChild(optMan);
+          let restored = false;
+          for (let i = 0; i < sel.options.length; i++) {
+            if (sel.options[i].value === prevVal) {
+              sel.selectedIndex = i;
+              restored = true;
+              break;
+            }
+          }
+          if (!restored) sel.value = "auto";
+        }
+
+        const selIp = el("iperf-bind-select");
+        const selPh = el("ph-bind-select");
+        const prevIp = selIp ? selIp.value : "auto";
+        const prevPh = selPh ? selPh.value : "auto";
+        populateBindSelect(selIp, prevIp, "Auto-detect mobile broadband IPv4");
+        populateBindSelect(selPh, prevPh, "Auto (OS default route)");
+        syncIperfBindUi();
+        syncPhBindUi();
+      } catch (_) {}
+    }
+
+    async function runIperfTest() {
+      if (iperfBusy) return;
+      iperfBusy = true;
+      const host = String(el("iperf-host")?.value || "").trim();
+      const port = Number(el("iperf-port")?.value || 5361);
+      const durationSec = Number(el("iperf-duration")?.value || 10);
+      const direction = String(el("iperf-direction")?.value || "both").trim().toLowerCase();
+      const protocol = String(el("iperf-protocol")?.value || "tcp").trim().toLowerCase();
+      const bindIp = resolveIperfBindIp();
+      const speedLimitRaw = String(el("iperf-speed-limit")?.value || "").trim();
+      const speedLimit = speedLimitRaw === "" ? null : Number(speedLimitRaw);
+      if (!host) {
+        el("iperf-msg").textContent = "Enter endpoint host.";
+        iperfBusy = false;
+        return;
+      }
+      if (!Number.isFinite(port) || port < 1 || port > 65535) {
+        el("iperf-msg").textContent = "Port must be 1..65535.";
+        iperfBusy = false;
+        return;
+      }
+      if (!Number.isFinite(durationSec) || durationSec < 1 || durationSec > 300) {
+        el("iperf-msg").textContent = "Duration must be 1..300 seconds.";
+        iperfBusy = false;
+        return;
+      }
+      if (speedLimit !== null && (!Number.isFinite(speedLimit) || speedLimit <= 0)) {
+        el("iperf-msg").textContent = "Speed limit must be empty or a positive Mbit/s value.";
+        iperfBusy = false;
+        return;
+      }
+      if (String(el("iperf-bind-select")?.value || "") === "manual" && !bindIp) {
+        el("iperf-msg").textContent = "Manual bind selected: enter an IPv4 address.";
+        iperfBusy = false;
+        return;
+      }
+      try {
+        el("iperf-msg").textContent = `Running iperf ${direction} test...`;
+        el("iperf-trace").textContent = "Running...";
+        const runOne = async (dir) => {
+          const body = {
+            host,
+            port: Math.trunc(port),
+            duration_sec: Math.trunc(durationSec),
+            direction: dir,
+            protocol,
+            mobile_only: true
+          };
+          if (bindIp) body.bind_ip = bindIp;
+          if (speedLimit !== null) body.bitrate_limit_mbps = speedLimit;
+          const r = await fetch("/api/tools/iperf-test", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          const j = await r.json();
+          if (!r.ok || !j.ok) {
+            const detail =
+              typeof j.detail === "string"
+                ? j.detail
+                : Array.isArray(j.detail)
+                  ? JSON.stringify(j.detail)
+                  : j.detail
+                    ? JSON.stringify(j.detail)
+                    : "";
+            throw new Error(j.error || detail || `Iperf ${dir} failed`);
+          }
+          return j;
+        };
+
+        const results = [];
+        const dirs = direction === "both" ? ["download", "upload"] : [direction];
+        for (const dir of dirs) {
+          el("iperf-msg").textContent = `Running iperf ${dir} test...`;
+          const j = await runOne(dir);
+          const mbps = Number(j.throughput_mbps);
+          if (Number.isFinite(mbps) && mbps >= 0) {
+            addIperfSample(mbps, dir);
+            if (dir === "download") lastIperfDlMbps = mbps;
+            if (dir === "upload") lastIperfUlMbps = mbps;
+            drawIperfGauges();
+          }
+          results.push(j);
+        }
+
+        const dlTxt = Number.isFinite(lastIperfDlMbps) ? `${lastIperfDlMbps.toFixed(3)} Mbps` : "-";
+        const ulTxt = Number.isFinite(lastIperfUlMbps) ? `${lastIperfUlMbps.toFixed(3)} Mbps` : "-";
+        const modeTxt = direction === "both" ? "download+upload" : direction;
+        el("iperf-msg").textContent = `Iperf ${modeTxt} complete: DL ${dlTxt}, UL ${ulTxt}`;
+
+        const lines = [];
+        for (const j of results) {
+          const mbps = Number(j.throughput_mbps);
+          const shownMbps = Number.isFinite(mbps) ? `${mbps.toFixed(3)} Mbps` : "-";
+          const cmd = Array.isArray(j.command) ? j.command.join(" ") : "-";
+          const src = j.throughput_source || "-";
+          const stderrTail = (j.stderr_tail || "").trim() || "-";
+          lines.push(
+            `Command: ${cmd}`,
+            `Direction: ${j.direction || "-"}`,
+            `Protocol: ${j.protocol || protocol}`,
+            `Bound IP: ${j.bind_ip || "-"}`,
+            `Mobile adapter: ${j.detected_mobile_adapter || "-"}`,
+            `Measured throughput: ${shownMbps}`,
+            `Result source: ${src}`,
+            `Exit code: ${j.exit_code}`,
+            "",
+            "stderr tail:",
+            stderrTail,
+            "",
+            "----",
+            ""
+          );
+        }
+        while (lines.length && !String(lines[lines.length - 1]).trim()) lines.pop();
+        el("iperf-trace").textContent = lines.join("\\n");
+      } catch (e) {
+        const msg = String(e?.message || e || "Iperf test failed");
+        el("iperf-msg").textContent = `Iperf error: ${msg}`;
+        el("iperf-trace").textContent = `Iperf error: ${msg}`;
+      } finally {
+        iperfBusy = false;
+      }
+    }
+
+    function addPhSweepSample(avgMs, jitMs) {
+      const a = Number(avgMs);
+      const j = Number(jitMs);
+      if (!Number.isFinite(a) || a < 0) return;
+      const t = Date.now();
+      const jv = Number.isFinite(j) && j >= 0 ? j : 0;
+      phAvgHistory.push({ t, v: a });
+      phJitHistory.push({ t, v: jv });
+      pruneHistoryByAge(phAvgHistory, t);
+      pruneHistoryByAge(phJitHistory, t);
+      drawPhSweepChart();
+      drawPhGauges();
+    }
+
+    function setPhRepeatPing(enabled) {
+      const state = el("ph-repeat-state");
+      const toggle = el("ph-repeat-toggle");
+      if (phRepeatTimer) {
+        clearInterval(phRepeatTimer);
+        phRepeatTimer = null;
+      }
+      if (toggle) toggle.checked = !!enabled;
+      if (enabled) {
+        if (state) {
+          state.textContent = "ON";
+          state.className = "ok";
+        }
+        runPingSweepTest();
+        phRepeatTimer = setInterval(() => runPingSweepTest(), PH_REPEAT_INTERVAL_MS);
+      } else if (state) {
         state.textContent = "OFF";
         state.className = "";
       }
     }
 
-    function addPingSamples(samples) {
-      if (!Array.isArray(samples) || samples.length === 0) return;
-      const ts = Date.now();
-      for (const s of samples) {
-        const v = Number(s);
-        if (!Number.isFinite(v)) continue;
-        pingHistory.push({ t: ts, v });
+    async function runPingSweepTest() {
+      if (pingSweepBusy) return;
+      pingSweepBusy = true;
+      const hostRaw = String(el("ph-host")?.value || "").trim();
+      const host = hostRaw || "8.8.8.8";
+      const count = Number(el("ph-count")?.value ?? 10);
+      const bindIp = resolvePhBindIp();
+      if (!Number.isFinite(count) || count < 1 || count > 100) {
+        el("ph-msg").textContent = "Count must be 1..100.";
+        pingSweepBusy = false;
+        return;
       }
-      pruneHistoryByAge(pingHistory, ts);
-      drawPingChart();
+      if (String(el("ph-bind-select")?.value || "") === "manual" && !bindIp) {
+        el("ph-msg").textContent = "Manual bind selected: enter an IPv4 address.";
+        pingSweepBusy = false;
+        return;
+      }
+      try {
+        el("ph-msg").textContent = "Running ICMP ping sweep...";
+        el("ph-trace").textContent = "Running...";
+        const body = { host, count: Math.trunc(count) };
+        if (bindIp) body.bind_ipv4 = bindIp;
+        const r = await fetch("/api/tools/icmp-ping", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) {
+          const detail =
+            typeof j.detail === "string"
+              ? j.detail
+              : Array.isArray(j.detail)
+                ? JSON.stringify(j.detail)
+                : j.detail
+                  ? JSON.stringify(j.detail)
+                  : "";
+          throw new Error(j.error || detail || "ICMP ping sweep failed");
+        }
+        const avg = Number(j.avg_ms);
+        const jit = Number(j.jitter_ms);
+        lastPhAvgMs = Number.isFinite(avg) ? avg : null;
+        lastPhJitMs = Number.isFinite(jit) ? jit : null;
+        if (lastPhAvgMs !== null) {
+          addPhSweepSample(lastPhAvgMs, lastPhJitMs ?? 0);
+        } else {
+          drawPhGauges();
+        }
+        const rcv = j.received != null ? j.received : "-";
+        el("ph-msg").textContent = `ICMP sweep OK: ${host}, ${j.count} probes, ${rcv} replies, avg ${lastPhAvgMs != null ? `${lastPhAvgMs.toFixed(2)} ms` : "-"}, jitter ${lastPhJitMs != null ? `${lastPhJitMs.toFixed(2)} ms` : "-"}`;
+        const cmd = Array.isArray(j.command) ? j.command.join(" ") : "-";
+        const tail = String(j.stdout_tail || "").trim() || "-";
+        el("ph-trace").textContent = [`Command: ${cmd}`, `Exit: ${j.exit_code}`, "", "stdout tail:", tail].join("\\n");
+      } catch (e) {
+        const msg = String(e?.message || e || "ICMP ping sweep failed");
+        el("ph-msg").textContent = `ICMP sweep error: ${msg}`;
+        el("ph-trace").textContent = `ICMP sweep error: ${msg}`;
+      } finally {
+        pingSweepBusy = false;
+      }
+    }
+
+    function addIperfSample(value, direction = null) {
+      const v = Number(value);
+      if (!Number.isFinite(v) || v < 0) return;
+      const t = Date.now();
+      iperfHistory.push({ t, v });
+      const d = String(direction || "").toLowerCase();
+      if (d === "download") iperfDlHistory.push({ t, v });
+      if (d === "upload") iperfUlHistory.push({ t, v });
+      pruneHistoryByAge(iperfHistory, t);
+      pruneHistoryByAge(iperfDlHistory, t);
+      pruneHistoryByAge(iperfUlHistory, t);
+      drawIperfChart();
     }
 
     function addRfSample(kind, value, tsSec = null) {
@@ -2226,8 +2791,8 @@ async def home() -> HTMLResponse:
       drawCategoryCharts();
     }
 
-    function drawPingChart() {
-      const canvas = el("pingchart");
+    function drawIperfChart() {
+      const canvas = el("iperfchart");
       if (!canvas) return;
       const ctx = canvas.getContext("2d");
       const w = canvas.width;
@@ -2236,17 +2801,18 @@ async def home() -> HTMLResponse:
       ctx.fillStyle = "#101010";
       ctx.fillRect(0, 0, w, h);
 
-      if (pingHistory.length === 0) {
+      const all = [...iperfDlHistory, ...iperfUlHistory];
+      if (!all.length) {
         ctx.fillStyle = "#777";
         ctx.font = "12px Arial";
-        ctx.fillText("No ping samples yet", 12, 24);
+        ctx.fillText("No iperf samples yet", 12, 24);
         return;
       }
 
-      const values = pingHistory.map((p) => p.v);
+      const values = all.map((p) => Number(p?.v)).filter((x) => Number.isFinite(x));
       const minV = Math.min(...values);
       const maxV = Math.max(...values);
-      const pad = Math.max(2, (maxV - minV) * 0.15);
+      const pad = Math.max(1, (maxV - minV) * 0.15);
       const yMin = Math.max(0, minV - pad);
       const yMax = maxV + pad;
       const span = Math.max(1, yMax - yMin);
@@ -2256,60 +2822,287 @@ async def home() -> HTMLResponse:
       for (let i = 0; i <= 4; i++) {
         const y = 10 + (i * (h - 20)) / 4;
         ctx.beginPath();
-        ctx.moveTo(35, y);
-        ctx.lineTo(w - 8, y);
+        ctx.moveTo(44, y);
+        ctx.lineTo(w - 12, y);
         ctx.stroke();
       }
 
       ctx.fillStyle = "#aaa";
       ctx.font = "11px Arial";
-      ctx.fillText(`${yMax.toFixed(0)} ms`, 4, 14);
-      ctx.fillText(`${yMin.toFixed(0)} ms`, 4, h - 8);
+      ctx.fillText(`${yMax.toFixed(1)} Mbps`, 4, 14);
+      ctx.fillText(`${yMin.toFixed(1)} Mbps`, 4, h - 8);
 
-      const n = pingHistory.length;
-      const x0 = 38;
+      const x0 = 44;
       const x1 = w - 12;
       const y0 = h - 12;
       const y1 = 10;
-      const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
       const nowMs = Date.now();
       const windowStartMs = nowMs - chartWindowMs;
-      const expectedStepMs = Math.max(200, 1000 / Math.max(0.1, Number(currentPollHz) || 2));
-      const gapBreakMs = expectedStepMs * 1.8;
-      const xFor = (p, i) => {
-        if (!chartGapModeEnabled) return x0 + i * xStep;
+      const xFor = (p) => {
         const t = Number(p?.t);
-        if (!Number.isFinite(t)) return x0 + i * xStep;
+        if (!Number.isFinite(t)) return x0;
         const ratio = Math.max(0, Math.min(1, (t - windowStartMs) / chartWindowMs));
         return x0 + ratio * (x1 - x0);
       };
+      const yFor = (v) => y0 - ((v - yMin) / span) * (y0 - y1);
 
-      ctx.strokeStyle = "#39d353";
-      ctx.lineWidth = 2;
-      for (let i = 1; i < pingHistory.length; i++) {
-        const p0 = pingHistory[i - 1];
-        const p1 = pingHistory[i];
-        const t0 = Number(p0?.t);
-        const t1 = Number(p1?.t);
-        if (chartGapModeEnabled && Number.isFinite(t0) && Number.isFinite(t1) && (t1 - t0) > gapBreakMs) continue;
-        const xA = xFor(p0, i - 1);
-        const yA = y0 - ((p0.v - yMin) / span) * (y0 - y1);
-        const xB = xFor(p1, i);
-        const yB = y0 - ((p1.v - yMin) / span) * (y0 - y1);
+      const drawSeries = (samples, lineColor, pointColor) => {
+        if (!samples.length) return;
+        const sorted = [...samples].sort((a, b) => Number(a.t) - Number(b.t));
+        ctx.strokeStyle = lineColor;
+        ctx.lineWidth = 2;
+        for (let i = 1; i < sorted.length; i++) {
+          const p0 = sorted[i - 1];
+          const p1 = sorted[i];
+          const xA = xFor(p0);
+          const yA = yFor(p0.v);
+          const xB = xFor(p1);
+          const yB = yFor(p1.v);
+          ctx.beginPath();
+          ctx.moveTo(xA, yA);
+          ctx.lineTo(xB, yB);
+          ctx.stroke();
+        }
+        ctx.fillStyle = pointColor;
+        sorted.forEach((p) => {
+          const x = xFor(p);
+          const y = yFor(p.v);
+          ctx.beginPath();
+          ctx.arc(x, y, 2.1, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      };
+
+      drawSeries(iperfDlHistory, "#00e5ff", "#8cf7ff");
+      drawSeries(iperfUlHistory, "#ffb86c", "#ffd7ad");
+
+      // Legend
+      ctx.font = "11px Arial";
+      ctx.fillStyle = "#00e5ff";
+      ctx.fillRect(w - 122, 10, 10, 3);
+      ctx.fillStyle = "#cdefff";
+      ctx.fillText("DL", w - 108, 15);
+      ctx.fillStyle = "#ffb86c";
+      ctx.fillRect(w - 70, 10, 10, 3);
+      ctx.fillStyle = "#ffe2c3";
+      ctx.fillText("UL", w - 56, 15);
+    }
+
+    function drawSingleGauge(canvasId, valueMbps, color, label) {
+      const canvas = el(canvasId);
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#101010";
+      ctx.fillRect(0, 0, w, h);
+
+      const cx = w / 2;
+      const cy = h - 14;
+      const r = Math.min(w * 0.44, h * 0.78);
+      const start = Math.PI;
+      const end = 2 * Math.PI;
+      const span = end - start;
+      const finiteVals = iperfHistory.map((x) => Number(x?.v)).filter((x) => Number.isFinite(x) && x >= 0);
+      const histMax = finiteVals.length ? Math.max(...finiteVals) : 10;
+      const gaugeMax = Math.max(10, Math.ceil(histMax / 5) * 5);
+      const v = Number.isFinite(valueMbps) && valueMbps >= 0 ? valueMbps : null;
+      const ratio = v === null ? 0 : Math.max(0, Math.min(1, v / gaugeMax));
+
+      ctx.lineWidth = 10;
+      ctx.strokeStyle = "#2a2a2a";
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, start, end, false);
+      ctx.stroke();
+
+      if (v !== null) {
+        ctx.strokeStyle = color;
         ctx.beginPath();
-        ctx.moveTo(xA, yA);
-        ctx.lineTo(xB, yB);
+        ctx.arc(cx, cy, r, start, start + span * ratio, false);
         ctx.stroke();
       }
 
-      ctx.fillStyle = "#8be9a8";
-      pingHistory.forEach((p, i) => {
-        const x = xFor(p, i);
-        const y = y0 - ((p.v - yMin) / span) * (y0 - y1);
+      const valueText = v === null ? "-" : `${v.toFixed(2)} Mbps`;
+      ctx.fillStyle = "#e6e6e6";
+      ctx.font = "bold 14px Arial";
+      const valueW = ctx.measureText(valueText).width;
+      ctx.fillText(valueText, cx - valueW / 2, cy - 16);
+
+      ctx.fillStyle = "#999";
+      ctx.font = "11px Arial";
+      const minText = "0";
+      const maxText = `${gaugeMax}`;
+      ctx.fillText(minText, cx - r + 2, cy + 1);
+      const maxW = ctx.measureText(maxText).width;
+      ctx.fillText(maxText, cx + r - maxW - 2, cy + 1);
+      const lblW = ctx.measureText(label).width;
+      ctx.fillText(label, cx - lblW / 2, cy - r - 6);
+    }
+
+    function drawIperfGauges() {
+      drawSingleGauge("iperf-dl-gauge", lastIperfDlMbps, "#00e5ff", "Download");
+      drawSingleGauge("iperf-ul-gauge", lastIperfUlMbps, "#ffb86c", "Upload");
+      const dlTxt = Number.isFinite(lastIperfDlMbps) ? `${lastIperfDlMbps.toFixed(3)} Mbps` : "-";
+      const ulTxt = Number.isFinite(lastIperfUlMbps) ? `${lastIperfUlMbps.toFixed(3)} Mbps` : "-";
+      const note = el("iperf-gauge-note");
+      if (note) note.textContent = `Latest results: DL ${dlTxt}, UL ${ulTxt}`;
+    }
+
+    function drawPhSweepChart() {
+      const canvas = el("ph-sweep-chart");
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#101010";
+      ctx.fillRect(0, 0, w, h);
+
+      const all = [...phAvgHistory, ...phJitHistory];
+      if (!all.length) {
+        ctx.fillStyle = "#777";
+        ctx.font = "12px Arial";
+        ctx.fillText("No ICMP sweep samples yet", 12, 24);
+        return;
+      }
+
+      const values = all.map((p) => Number(p?.v)).filter((x) => Number.isFinite(x));
+      const minV = Math.min(...values);
+      const maxV = Math.max(...values);
+      const pad = Math.max(0.5, (maxV - minV) * 0.15);
+      const yMin = Math.max(0, minV - pad);
+      const yMax = maxV + pad;
+      const span = Math.max(1, yMax - yMin);
+
+      ctx.strokeStyle = "#2a2a2a";
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = 10 + (i * (h - 20)) / 4;
         ctx.beginPath();
-        ctx.arc(x, y, 2.2, 0, Math.PI * 2);
-        ctx.fill();
-      });
+        ctx.moveTo(44, y);
+        ctx.lineTo(w - 12, y);
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = "#aaa";
+      ctx.font = "11px Arial";
+      ctx.fillText(`${yMax.toFixed(1)} ms`, 4, 14);
+      ctx.fillText(`${yMin.toFixed(1)} ms`, 4, h - 8);
+
+      const x0 = 44;
+      const x1 = w - 12;
+      const y0 = h - 12;
+      const y1 = 10;
+      const nowMs = Date.now();
+      const windowStartMs = nowMs - chartWindowMs;
+      const xFor = (p) => {
+        const t = Number(p?.t);
+        if (!Number.isFinite(t)) return x0;
+        const ratio = Math.max(0, Math.min(1, (t - windowStartMs) / chartWindowMs));
+        return x0 + ratio * (x1 - x0);
+      };
+      const yFor = (v) => y0 - ((v - yMin) / span) * (y0 - y1);
+
+      const drawSeries = (samples, lineColor, pointColor) => {
+        if (!samples.length) return;
+        const sorted = [...samples].sort((a, b) => Number(a.t) - Number(b.t));
+        ctx.strokeStyle = lineColor;
+        ctx.lineWidth = 2;
+        for (let i = 1; i < sorted.length; i++) {
+          const p0 = sorted[i - 1];
+          const p1 = sorted[i];
+          const xA = xFor(p0);
+          const yA = yFor(p0.v);
+          const xB = xFor(p1);
+          const yB = yFor(p1.v);
+          ctx.beginPath();
+          ctx.moveTo(xA, yA);
+          ctx.lineTo(xB, yB);
+          ctx.stroke();
+        }
+        ctx.fillStyle = pointColor;
+        sorted.forEach((p) => {
+          const x = xFor(p);
+          const y = yFor(p.v);
+          ctx.beginPath();
+          ctx.arc(x, y, 2.1, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      };
+
+      drawSeries(phAvgHistory, "#7cffd4", "#c6fff0");
+      drawSeries(phJitHistory, "#ff9edb", "#ffd6ef");
+
+      ctx.font = "11px Arial";
+      ctx.fillStyle = "#7cffd4";
+      ctx.fillRect(w - 148, 10, 10, 3);
+      ctx.fillStyle = "#e8fff8";
+      ctx.fillText("Avg RTT", w - 132, 15);
+      ctx.fillStyle = "#ff9edb";
+      ctx.fillRect(w - 62, 10, 10, 3);
+      ctx.fillStyle = "#ffeaf7";
+      ctx.fillText("Jitter", w - 46, 15);
+    }
+
+    function drawLatencyGauge(canvasId, valueMs, color, label, scaleHistory) {
+      const canvas = el(canvasId);
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#101010";
+      ctx.fillRect(0, 0, w, h);
+
+      const cx = w / 2;
+      const cy = h - 14;
+      const r = Math.min(w * 0.44, h * 0.78);
+      const start = Math.PI;
+      const end = 2 * Math.PI;
+      const arcSpan = end - start;
+      const finiteVals = (scaleHistory || []).map((x) => Number(x?.v)).filter((x) => Number.isFinite(x) && x >= 0);
+      const histMax = finiteVals.length ? Math.max(...finiteVals) : 50;
+      const gaugeMax = Math.max(5, Math.ceil(histMax / 5) * 5);
+      const v = Number.isFinite(valueMs) && valueMs >= 0 ? valueMs : null;
+      const ratio = v === null ? 0 : Math.max(0, Math.min(1, v / gaugeMax));
+
+      ctx.lineWidth = 10;
+      ctx.strokeStyle = "#2a2a2a";
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, start, end, false);
+      ctx.stroke();
+
+      if (v !== null) {
+        ctx.strokeStyle = color;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, start, start + arcSpan * ratio, false);
+        ctx.stroke();
+      }
+
+      const valueText = v === null ? "-" : `${v.toFixed(2)} ms`;
+      ctx.fillStyle = "#e6e6e6";
+      ctx.font = "bold 14px Arial";
+      const valueW = ctx.measureText(valueText).width;
+      ctx.fillText(valueText, cx - valueW / 2, cy - 16);
+
+      ctx.fillStyle = "#999";
+      ctx.font = "11px Arial";
+      ctx.fillText("0", cx - r + 2, cy + 1);
+      const maxText = `${gaugeMax}`;
+      const maxW = ctx.measureText(maxText).width;
+      ctx.fillText(maxText, cx + r - maxW - 2, cy + 1);
+      const lblW = ctx.measureText(label).width;
+      ctx.fillText(label, cx - lblW / 2, cy - r - 6);
+    }
+
+    function drawPhGauges() {
+      drawLatencyGauge("ph-lat-gauge", lastPhAvgMs, "#7cffd4", "Avg RTT", phAvgHistory);
+      drawLatencyGauge("ph-jit-gauge", lastPhJitMs, "#ff9edb", "Jitter", phJitHistory);
+      const aTxt = Number.isFinite(lastPhAvgMs) ? `${lastPhAvgMs.toFixed(2)} ms` : "-";
+      const jTxt = Number.isFinite(lastPhJitMs) ? `${lastPhJitMs.toFixed(2)} ms` : "-";
+      const note = el("ph-gauge-note");
+      if (note) note.textContent = `Latest sweep: avg ${aTxt}, jitter ${jTxt} (gauge scale from recent runs).`;
     }
 
     function drawMetricChart(canvasId, samples, unitLabel, color, thresholdValue = null) {
@@ -2573,15 +3366,20 @@ async def home() -> HTMLResponse:
       el("ds-reg").className = "";
       el("ds-usbnet").textContent = "-";
       el("ds-netdev").textContent = "-";
-      el("ds-dl").textContent = "-";
-      el("ds-ul").textContent = "-";
-      el("ds-counters").textContent = "-";
       el("ds-warn").textContent = "-";
       el("ds-warn").className = "label";
     }
 
     function clearAllCharts() {
-      pingHistory.length = 0;
+      iperfHistory.length = 0;
+      iperfDlHistory.length = 0;
+      iperfUlHistory.length = 0;
+      lastIperfDlMbps = null;
+      lastIperfUlMbps = null;
+      phAvgHistory.length = 0;
+      phJitHistory.length = 0;
+      lastPhAvgMs = null;
+      lastPhJitMs = null;
       rfHistory.rsrp.length = 0;
       rfHistory.rsrq.length = 0;
       rfHistory.sinr.length = 0;
@@ -2593,7 +3391,10 @@ async def home() -> HTMLResponse:
       neighbourHistory.pci.length = 0;
       categoryHistory.state.length = 0;
       categoryHistory.band.length = 0;
-      drawPingChart();
+      drawIperfChart();
+      drawIperfGauges();
+      drawPhSweepChart();
+      drawPhGauges();
       drawRfCharts();
       drawBwChart();
       drawPciChart();
@@ -2644,9 +3445,18 @@ async def home() -> HTMLResponse:
     el("btn-data-allow").addEventListener("click", () => setDataGate(false));
     el("btn-sim-high-read").addEventListener("click", () => readSimHighLevel());
     el("btn-sim-inspect-read").addEventListener("click", () => readSimInspector());
-    el("btn-ping-test").addEventListener("click", () => runPingTest());
     el("btn-volte-test").addEventListener("click", () => runVolteTest());
-    el("auto-ping-toggle").addEventListener("change", (ev) => setAutoPing(!!ev.target.checked));
+    el("btn-iperf-test").addEventListener("click", () => runIperfTest());
+    el("iperf-bind-select").addEventListener("change", () => syncIperfBindUi());
+    el("btn-iperf-refresh-ifaces").addEventListener("click", () => loadBindInterfaces());
+    const phBindSel = el("ph-bind-select");
+    if (phBindSel) phBindSel.addEventListener("change", () => syncPhBindUi());
+    const btnPhRefresh = el("btn-ph-refresh-ifaces");
+    if (btnPhRefresh) btnPhRefresh.addEventListener("click", () => loadBindInterfaces());
+    const btnPhRun = el("btn-ph-run");
+    if (btnPhRun) btnPhRun.addEventListener("click", () => runPingSweepTest());
+    const phRepeatToggle = el("ph-repeat-toggle");
+    if (phRepeatToggle) phRepeatToggle.addEventListener("change", (ev) => setPhRepeatPing(!!ev.target.checked));
     el("btn-clear-charts").addEventListener("click", () => clearAllCharts());
     el("btn-chart-gap-mode").addEventListener("click", () => setChartGapMode(!chartGapModeEnabled));
     el("chart-window-select").addEventListener("change", (ev) => {
@@ -2682,10 +3492,11 @@ async def home() -> HTMLResponse:
     applyChartWindowSec(Number(el("chart-window-select")?.value || 60));
     updateChartGapButton();
     redrawAllCharts();
+    loadBindInterfaces();
   </script>
 </body>
 </html>"""
-    return HTMLResponse(content=html)
+    return HTMLResponse(content=html.replace("__APP_VERSION__", APP_VERSION))
 
 
 @app.get("/api/serial/status")
@@ -3291,6 +4102,14 @@ async def network_pci_lock_set(body: PciLockSetBody) -> dict:
     }
 
 
+@app.get("/api/tools/bind-interfaces")
+async def tools_bind_interfaces() -> dict:
+    if os.name != "nt":
+        return {"ok": True, "interfaces": [], "platform": "non-windows"}
+    interfaces = _enumerate_windows_ipv4_adapters()
+    return {"ok": True, "interfaces": interfaces, "platform": "windows"}
+
+
 @app.post("/api/tools/modem-reset")
 async def tools_modem_reset() -> dict:
     # Quectel modem reboot/reset. Some firmware may drop port before final response.
@@ -3308,154 +4127,208 @@ async def tools_modem_reset() -> dict:
     }
 
 
-@app.post("/api/tools/ping-test")
-async def tools_ping_test(body: PingTestBody) -> dict:
-    # Run modem-side ping so TX/RX appears in AT console.
-    host = body.host.strip() or "8.8.8.8"
-    count = int(body.count)
-    cid = int(body.cid)
-    timeout_s = 10
-
-    # Prechecks to avoid running QPING when packet data path is known-bad.
-    precheck: dict = {"attempted_reactivate": False}
-    cgatt_res = await engine.send_command("AT+CGATT?", timeout_sec=3.0)
-    cereg_res = await engine.send_command("AT+CEREG?", timeout_sec=3.0)
-    qiact_res = await engine.send_command("AT+QIACT?", timeout_sec=4.0)
-    attached = _parse_cgatt_attached(cgatt_res.get("lines", []))
-    cereg_stat = _parse_cereg_stat(cereg_res.get("lines", []))
-    eps_registered = cereg_stat in (1, 5) if cereg_stat is not None else None
-    contexts = _parse_qiact_contexts(qiact_res.get("lines", []))
-    cid_ctx = next((x for x in contexts if x.get("cid") == cid), None)
-    cid_active = bool(cid_ctx.get("active")) if isinstance(cid_ctx, dict) else False
-    cid_ip = cid_ctx.get("ip") if isinstance(cid_ctx, dict) else None
-
-    reactivate_res = None
-    qiact_after_res = None
-    if not cid_active:
-        precheck["attempted_reactivate"] = True
-        reactivate_res = await engine.send_command(f"AT+QIACT={cid}", timeout_sec=15.0)
-        await asyncio.sleep(0.3)
-        qiact_after_res = await engine.send_command("AT+QIACT?", timeout_sec=4.0)
-        contexts2 = _parse_qiact_contexts(qiact_after_res.get("lines", []))
-        cid_ctx2 = next((x for x in contexts2 if x.get("cid") == cid), None)
-        cid_active = bool(cid_ctx2.get("active")) if isinstance(cid_ctx2, dict) else False
-        cid_ip = cid_ctx2.get("ip") if isinstance(cid_ctx2, dict) else None
-
-    precheck.update(
-        {
-            "attached": attached,
-            "cereg_stat": cereg_stat,
-            "eps_registered": eps_registered,
-            "cid": cid,
-            "cid_active": cid_active,
-            "cid_ip": cid_ip,
-            "raw": {
-                "cgatt": cgatt_res,
-                "cereg": cereg_res,
-                "qiact_before": qiact_res,
-                "qiact_reactivate": reactivate_res,
-                "qiact_after": qiact_after_res,
-            },
-        }
-    )
-
-    blockers: list[str] = []
-    if attached is False:
-        blockers.append("packet service detached (AT+CGATT=0)")
-    if eps_registered is False:
-        blockers.append(f"EPS not registered (AT+CEREG stat={cereg_stat})")
-    if not cid_active:
-        blockers.append(f"CID {cid} not active in AT+QIACT?")
-    if blockers:
+@app.post("/api/tools/iperf-test")
+async def tools_iperf_test(body: IperfTestBody) -> dict:
+    host = str(body.host or "").strip()
+    if not host:
+        raise HTTPException(status_code=400, detail="host is required.")
+    direction = str(body.direction or "download").strip().lower()
+    if direction not in ("download", "upload"):
+        raise HTTPException(status_code=400, detail="direction must be 'download' or 'upload'.")
+    protocol = str(body.protocol or "tcp").strip().lower()
+    if protocol != "tcp":
+        raise HTTPException(status_code=400, detail="Only protocol='tcp' is currently supported.")
+    reverse = direction == "download"
+    limit_mbps = body.bitrate_limit_mbps
+    bind_ip = str(body.bind_ip or "").strip() or None
+    if bind_ip:
+        try:
+            ipaddress.IPv4Address(bind_ip)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"Invalid bind_ip: {bind_ip}") from exc
+    detected_adapter = None
+    if body.mobile_only and not bind_ip:
+        bind_ip, detected_adapter = _detect_mobile_bind_ip_windows()
+        if not bind_ip:
+            return {
+                "ok": False,
+                "error": "Mobile-only mode could not detect mobile interface IPv4. Set bind_ip manually.",
+                "host": host,
+                "port": int(body.port),
+                "duration_sec": int(body.duration_sec),
+                "direction": direction,
+                "protocol": protocol,
+                "mobile_only": bool(body.mobile_only),
+                "bind_ip": None,
+                "bitrate_limit_mbps": limit_mbps,
+            }
+    binary = _discover_iperf_binary()
+    if not binary:
         return {
             "ok": False,
+            "error": "iperf3 binary not found. Place iperf3.exe in project/backend root or set MD_IPERF_BIN.",
             "host": host,
-            "count": count,
-            "cid": cid,
-            "avg_ms": None,
-            "avg_ms_packets": None,
-            "avg_ms_summary": None,
-            "sum_ms": None,
-            "min_ms": None,
-            "max_ms": None,
-            "times_ms": [],
-            "qping_summary": None,
-            "qping_status_codes": [],
-            "error": "QPING precheck failed: " + "; ".join(blockers),
-            "cmd": None,
-            "urc_lines": [],
-            "precheck": precheck,
+            "port": int(body.port),
+            "duration_sec": int(body.duration_sec),
+            "direction": direction,
+            "protocol": protocol,
+            "mobile_only": bool(body.mobile_only),
+            "bind_ip": bind_ip,
+            "bitrate_limit_mbps": limit_mbps,
         }
-
-    before = list(engine.urc_log)
-    cmd = f'AT+QPING={cid},"{host}",{timeout_s},{count}'
-    cmd_res = await engine.send_command(cmd, timeout_sec=5.0)
-    cmd_final = str(cmd_res.get("final", "")).upper()
-    # Some firmware returns immediate ERROR while still emitting +QPING URCs.
-    # So do not fail fast; collect URC lines and decide from those.
-
-    # Wait for +QPING URCs to appear after command acceptance.
-    deadline = asyncio.get_running_loop().time() + float(timeout_s + 6)
-    urc_lines: list[str] = []
-    while asyncio.get_running_loop().time() < deadline:
-        now_urc = list(engine.urc_log)
-        # simple diff from previous snapshot
-        if len(now_urc) >= len(before):
-            candidate = now_urc[len(before):]
-        else:
-            candidate = now_urc
-        urc_lines = [ln for ln in candidate if "+QPING:" in ln]
-        if urc_lines:
-            # Give a short grace period to collect additional ping lines.
-            await asyncio.sleep(0.5)
-            now_urc2 = list(engine.urc_log)
-            if len(now_urc2) >= len(before):
-                candidate2 = now_urc2[len(before):]
-            else:
-                candidate2 = now_urc2
-            urc_lines = [ln for ln in candidate2 if "+QPING:" in ln]
-            break
-        await asyncio.sleep(0.2)
-
-    parsed = _parse_qping_urcs(urc_lines)
-    times_ms = list(parsed.get("packet_times_ms") or [])
-    summary = parsed.get("summary")
-    status_codes = list(parsed.get("status_codes") or [])
-
-    sum_ms = round(sum(times_ms), 1) if times_ms else None
-    min_ms = min(times_ms) if times_ms else None
-    max_ms = max(times_ms) if times_ms else None
-    avg_from_packets = round(sum(times_ms) / len(times_ms), 1) if times_ms else None
-    summary_avg = float(summary["avg_ms"]) if isinstance(summary, dict) and "avg_ms" in summary else None
-    avg = avg_from_packets if avg_from_packets is not None else summary_avg
-    ok = avg is not None
-    error = None
-    if not ok:
-        error = "No +QPING latency samples received from modem."
-        if status_codes:
-            error = f"QPING status code(s): {', '.join(str(x) for x in status_codes)}; {error}"
-        if cmd_final and cmd_final not in ("OK", "TIMEOUT"):
-            error = f"QPING command final={cmd_res.get('final')}; {error}"
-        elif cmd_final == "TIMEOUT":
-            error = "QPING command timed out; no latency samples received."
+    cmd = [
+        binary,
+        "-c",
+        host,
+        # Force IPv4: hostname may resolve to IPv6 while -B binds an IPv4, which yields exit=1.
+        "-4",
+        "-p",
+        str(int(body.port)),
+        "-t",
+        str(int(body.duration_sec)),
+        "-J",
+    ]
+    if reverse:
+        cmd.append("-R")
+    if bind_ip:
+        cmd.extend(["-B", bind_ip])
+    if limit_mbps is not None:
+        cmd.extend(["-b", f"{float(limit_mbps):g}M"])
+    timeout_sec = int(body.duration_sec) + 15
+    try:
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "error": f"iperf timed out after {timeout_sec}s",
+            "command": cmd,
+            "host": host,
+            "port": int(body.port),
+            "duration_sec": int(body.duration_sec),
+            "direction": direction,
+            "protocol": protocol,
+            "mobile_only": bool(body.mobile_only),
+            "bind_ip": bind_ip,
+            "bitrate_limit_mbps": limit_mbps,
+        }
+    stdout = str(proc.stdout or "")
+    stderr = str(proc.stderr or "")
+    report = None
+    parse_error = None
+    if stdout.strip():
+        try:
+            report = json.loads(stdout)
+        except Exception as exc:  # noqa: BLE001
+            parse_error = str(exc)
+    bps, source = _extract_iperf_bits_per_second(report or {}, reverse=reverse)
+    mbps = (bps / 1_000_000.0) if isinstance(bps, (int, float)) else None
+    ok = proc.returncode == 0 and mbps is not None
+    err_detail = None if ok else _compose_iperf_error(proc.returncode, stderr, stdout, parse_error)
     return {
         "ok": ok,
+        "error": err_detail,
+        "host": host,
+        "port": int(body.port),
+        "duration_sec": int(body.duration_sec),
+        "direction": direction,
+        "protocol": protocol,
+        "mobile_only": bool(body.mobile_only),
+        "bind_ip": bind_ip,
+        "detected_mobile_adapter": detected_adapter,
+        "bitrate_limit_mbps": limit_mbps,
+        "throughput_mbps": round(float(mbps), 3) if mbps is not None else None,
+        "throughput_source": source,
+        "command": cmd,
+        "exit_code": proc.returncode,
+        "json_parse_error": parse_error,
+        "stderr_tail": "\n".join(stderr.splitlines()[-40:]) if stderr else "",
+        "stdout_head": (stdout[:1200] + "...") if len(stdout) > 1200 else stdout if stdout else "",
+        "raw": report,
+    }
+
+
+@app.post("/api/tools/icmp-ping")
+async def tools_icmp_ping(body: IcmpPingSweepBody) -> dict:
+    host = body.host.strip() or "8.8.8.8"
+    count = int(body.count)
+    bind = str(body.bind_ipv4 or "").strip() or None
+    if bind:
+        try:
+            ipaddress.IPv4Address(bind)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"Invalid bind_ipv4: {bind}") from exc
+
+    if os.name == "nt":
+        cmd = ["ping", "-4", "-n", str(count), "-w", "3000"]
+        if bind:
+            cmd.extend(["-S", bind])
+        cmd.append(host)
+    else:
+        cmd = ["ping", "-c", str(count), "-W", "5", host]
+
+    timeout_sec = min(120, max(15, count * 4 + 10))
+    try:
+        proc = await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "error": f"ping subprocess timed out after {timeout_sec}s",
+            "host": host,
+            "count": count,
+            "bind_ipv4": bind,
+            "command": cmd,
+        }
+
+    stdout = str(proc.stdout or "")
+    stderr = str(proc.stderr or "")
+    combined = stdout + "\n" + stderr
+    if os.name == "nt":
+        rtts = _parse_icmp_ping_rtts_windows(combined)
+    else:
+        rtts = _parse_icmp_ping_rtts_unix(combined)
+
+    jitter = _icmp_jitter_ms(rtts) if rtts else None
+    avg_ms = round(sum(rtts) / len(rtts), 3) if rtts else None
+    min_ms = round(min(rtts), 3) if rtts else None
+    max_ms = round(max(rtts), 3) if rtts else None
+    ok_success = bool(rtts)
+    err = None
+    if not ok_success:
+        tail = (stderr or stdout)[-1500:] if (stderr or stdout) else ""
+        err = f"ICMP ping failed (exit={proc.returncode})"
+        if tail.strip():
+            err = f"{err}\n{tail.strip()}"
+
+    return {
+        "ok": ok_success,
+        "error": None if ok_success else err,
         "host": host,
         "count": count,
-        "cid": cid,
-        "avg_ms": avg,
-        "avg_ms_packets": avg_from_packets,
-        "avg_ms_summary": summary_avg,
-        "sum_ms": sum_ms,
+        "received": len(rtts),
+        "rtt_ms": rtts,
+        "avg_ms": avg_ms,
         "min_ms": min_ms,
         "max_ms": max_ms,
-        "times_ms": times_ms,
-        "qping_summary": summary,
-        "qping_status_codes": status_codes,
-        "error": error,
-        "cmd": cmd_res,
-        "urc_lines": urc_lines,
-        "precheck": precheck,
+        "jitter_ms": jitter,
+        "bind_ipv4": bind,
+        "bind_supported": os.name == "nt",
+        "command": cmd,
+        "exit_code": proc.returncode,
+        "stdout_tail": stdout[-4000:] if stdout else "",
     }
 
 

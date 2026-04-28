@@ -1,5 +1,7 @@
 # MobileDriver
 
+**Version 1.0**
+
 Local web app backend for Quectel modem control and live LTE KPI monitoring over serial AT commands.
 
 Development/test platform: **Robustel R5010 router**.
@@ -45,9 +47,7 @@ AT command catalog from current modem firmware:
     - EPS registration state
     - USB data stack mode (`AT+QCFG="usbnet"`; e.g. ECM/RNDIS/QMI)
     - Netdev status (`AT+QNETDEVSTATUS?`)
-    - EPS counters (`AT+QGDCNT?` RX/TX kB)
-    - EPS throughput estimate (DL/UL kbps, derived from counter deltas)
-    - Built-in warning when USB data stack indicates possible host-WAN contention for `AT+QPING`
+    - Built-in note when USB data stack (NDIS/QMI-like) may contend with modem traffic
   - SIM High-Level + PLMN Inspector section:
     - IMEI (`AT+CGSN`)
     - IMSI (`AT+CIMI`)
@@ -56,11 +56,11 @@ AT command catalog from current modem firmware:
     - Preferred PLMN count (`AT+CPOL?`)
     - Read-only SIM EF inspector via `AT+CRSM` for PLMN-related files
   - Live AT TX/RX console
-  - Modem ping test (`AT+QPING`)
+  - Host ICMP ping sweep (`ping` from the OS; default 10 probes to `8.8.8.8`), optional bind/source IPv4 on Windows, gauges + trend, optional repeat every 15 s
+  - iperf3 throughput test (TCP, DL/UL, bind interface, optional bitrate limit) with gauges and trend charts
   - VoLTE call test (`ATD...;` + `AT+CLCC` + `ATH` + `AT+CEER`) with user dial number and auto hangup after 10s
-  - Auto ping every 10s toggle
   - `Clear All Charts` control (also clears Data Service KPI display)
-  - Trend charts for Ping, RSRP, RSRQ, SINR, RSSI, State, Band, DL bandwidth, PCI, neighbour RSRP, neighbour PCI, intra-cell dominance
+  - Trend charts for iperf throughput, ICMP ping sweep, RSRP, RSRQ, SINR, RSSI, State, Band, DL bandwidth, PCI, neighbour RSRP, neighbour PCI, intra-cell dominance
   - Selectable chart window (60s to 60m)
   - Dynamic chart axis label shows time span (for example, `Time axis: last 10m`)
   - Optional `Time-roll gaps` mode to scroll by wall-clock time and show blank gaps when samples pause
@@ -171,7 +171,7 @@ $env:MD_KPI_POLL_HZ="2.0"
    - Use **PCI Lock** controls (`Read`, `Lock Current Cell`, `Lock Input`, `Unlock`) and confirm state/readback.
    - Check **Neighbour Cells RF KPI** values (strongest intra-frequency neighbour RSRP + PCI + EARFCN).
    - Check **Primary cell intra-cell dominance** value and trend behavior.
-   - Run **AT Ping Test** and confirm ping appears in AT Console and Ping Trend chart.
+   - Run **ICMP Ping Sweep** (and optional **repeat every 15 s**) and confirm gauges/trend update.
    - Watch RF, neighbour, dominance, State/Band/PCI, and Bandwidth charts update with live polling.
    - Use the **Chart window** selector to switch retention from `60s` up to `60m`.
    - Confirm RF charts show red threshold guide lines and auto-scroll over the selected window.
@@ -221,7 +221,9 @@ Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:8011/api/kpi/latest"
 - `GET /api/network/pci-lock`
 - `POST /api/network/pci-lock`
 - `POST /api/tools/modem-reset`
-- `POST /api/tools/ping-test`
+- `GET /api/tools/bind-interfaces` (Windows IPv4 adapters for bind dropdowns)
+- `POST /api/tools/iperf-test` (TCP iperf3 client; optional bind IP and bitrate limit)
+- `POST /api/tools/icmp-ping` (host OS ICMP ping sweep; optional Windows `-S` bind)
 - `POST /api/tools/volte-test`
 - `GET /api/sim/high-level`
 - `GET /api/sim/inspector`
@@ -237,7 +239,6 @@ The Data Service KPI panel is populated from periodic AT reads inside the KPI po
 - `AT+CEREG?` -> EPS registration status
 - `AT+QCFG="usbnet"` -> USB data-stack mode (ECM/RNDIS/QMI-style)
 - `AT+QNETDEVSTATUS?` -> network-device runtime status
-- `AT+QGDCNT?` -> RX/TX counters used to compute EPS DL/UL throughput estimate
 
 Values are exposed in `GET /api/kpi/latest` under `sample.data_service`.
 
@@ -279,31 +280,9 @@ UK-only scan scope:
 
 The backend reads existing `QNWPREFCFG` values, applies UK scope for the scan, then restores original values after completion.
 
-## QPING behavior and fields
+## ICMP ping sweep (host OS)
 
-`POST /api/tools/ping-test` parses Quectel `+QPING` URCs into:
-
-- Per-packet RTT samples (`times_ms`)
-- Summary values (`qping_summary`) when available
-- Status/error codes (`qping_status_codes`) such as `569`
-
-Response includes:
-
-- `sum_ms`, `min_ms`, `max_ms`
-- `avg_ms_packets` (from packet RTTs)
-- `avg_ms_summary` (from modem summary line)
-- `avg_ms` (best available average)
-- `precheck` block with:
-  - packet attach (`AT+CGATT?`)
-  - EPS registration (`AT+CEREG?`)
-  - CID state/IP (`AT+QIACT?`)
-  - optional one-shot CID reactivation attempt (`AT+QIACT=<cid>`)
-
-UI behavior:
-
-- Ping chart displays RTT samples only.
-- Status-only QPING codes are not plotted and are not shown in the user-facing ping summary text.
-- If `569` occurs while attach/registration/CID are healthy, UI warns about likely host data-path contention (common with active NDIS/QMI/RNDIS WAN usage).
+`POST /api/tools/icmp-ping` runs the OS `ping` command (not modem AT). Body defaults: `host` `8.8.8.8`, `count` `10`. On Windows, optional `bind_ipv4` maps to `ping -S`. Response includes per-reply RTTs, `avg_ms`, `min_ms`, `max_ms`, `jitter_ms`, and parsed stdout tail.
 
 ## SIM High-Level and Inspector
 

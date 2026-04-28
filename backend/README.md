@@ -1,5 +1,7 @@
 # MobileDriver backend (serial AT engine)
 
+**Version 1.0** (see root `README.md` for feature overview).
+
 ## Quick start
 
 ```powershell
@@ -32,7 +34,7 @@ $env:MD_BAUDRATE="115200"
 
 ## API
 
-- `GET /` live KPI page (Serial Port tools, modem reset, COPS + lock controls with runtime re-apply guard, roaming MNO selector [Vodafone/VMO2/EE/H3G/Auto], packet-data inhibit/allow controls, CA policy switch, NRDC switch, PCI lock controls, neighbour-cell KPI, intra-cell dominance KPI [serving EARFCN vs strongest intra-frequency neighbour], Data Service KPI [APN/PDP/CID1/attach/registration/usbnet/netdev/QGDCNT throughput], SIM High-Level + PLMN Inspector [IMEI/IMSI/SPN/COPS/CPOL], TX power KPI (when modem reports it), AT console, ping + trend charts, VoLTE call test, clear-all charts, selectable 60s-60m chart window with dynamic axis labels, optional time-roll gap mode, stable high-contrast `EARFCN/PCI` color mapping across trend charts (including State/Band), dominance trend gated by primary-cell availability, RF threshold lines, optional 10-sample RF smoothing)
+- `GET /` live KPI page (**v1.0** shown in header): Serial Port tools, modem reset, COPS + lock controls with runtime re-apply guard, roaming MNO selector [Vodafone/VMO2/EE/H3G/Auto], packet-data inhibit/allow controls, CA policy switch, NRDC switch, PCI lock controls, neighbour-cell KPI, intra-cell dominance KPI, Data Service KPI [APN/PDP/CID1/attach/registration/usbnet/netdev], SIM High-Level + PLMN Inspector, TX power KPI when reported, AT console, **iperf3** + **host ICMP ping sweep** (bind interfaces, trends, optional repeat every 15 s), VoLTE call test, clear-all charts, 60s–60m chart window, optional time-roll gap mode, `EARFCN/PCI` color mapping, RF threshold lines, optional RF smoothing
 - `GET /api/serial/status`
 - `GET /api/serial/ports`
 - `POST /api/at/send`
@@ -74,11 +76,12 @@ $env:MD_BAUDRATE="115200"
   - body example (unlock): `{ "lock": false }`
 - `POST /api/tools/modem-reset`
   - sends `AT+CFUN=1,1` and returns reset command status
-- `POST /api/tools/ping-test`
-  - Modem-side AT ping (`AT+QPING`)
-  - body: `{ "host": "8.8.8.8", "count": 10, "cid": 1 }`
-  - runs prechecks: `AT+CGATT?`, `AT+CEREG?`, `AT+QIACT?` and can auto-try `AT+QIACT=<cid>` once if CID is down
-  - returns parsed RTT stats: `times_ms`, `sum_ms`, `min_ms`, `max_ms`, `avg_ms_packets`, `avg_ms_summary`, `qping_summary`, `qping_status_codes`, `precheck`
+- `GET /api/tools/bind-interfaces`
+  - Windows: IPv4 adapters from `ipconfig` for iperf / ICMP bind dropdowns
+- `POST /api/tools/iperf-test`
+  - bundled `iperf3` TCP client (JSON `-J`); optional `bind_ip`, `bitrate_limit_mbps`, `direction`, etc.
+- `POST /api/tools/icmp-ping`
+  - host OS ICMP ping sweep; body defaults `host` `8.8.8.8`, `count` `10`; optional `bind_ipv4` (Windows `ping -S`)
 - `POST /api/tools/volte-test`
   - password-gated call test (`password: "nacelle"`)
   - body example: `{ "number": "+447700900123", "hold_sec": 10, "password": "nacelle" }`
@@ -102,14 +105,11 @@ Data Service KPI fields are available in `GET /api/kpi/latest` at `sample.data_s
 - `AT+CEREG?` (EPS registration)
 - `AT+QCFG="usbnet"` (USB data-stack mode, e.g. ECM/RNDIS/QMI-style)
 - `AT+QNETDEVSTATUS?` (network-device status)
-- `AT+QGDCNT?` (RX/TX counters and derived EPS DL/UL throughput estimate)
 
 UK-only COPS scan scope currently applies:
 
 - LTE bands: `1:3:7:8:20:28:32:38`
 - NR bands: `1:3:8:28:78`
-
-When `+QPING: 569` appears while prechecks are healthy, the UI flags likely host data-path contention (often seen when the modem is actively used as PC WAN through NDIS/QMI/RNDIS stack).
 
 VoLTE call testing uses the same unlock secret as data allow (`nacelle`).
 
