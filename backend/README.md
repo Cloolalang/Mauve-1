@@ -1,10 +1,15 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 1.4** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.4.0**).
+**Version 1.5** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.5.0**).
 
-Notes for **v1.4**:
+Notes for **v1.5**:
 
-- Modem AT failures (**`+CME`/`+CMS`/generic ERROR/TIMEOUT**) are decoded in **`backend/app/at_modem_errors.py`**; network endpoints include **`modem_detail`** plus clearer **`error`** strings. **`POST /api/network/data-gate`** returns accurate **`ok`**. **`POST /api/network/apn`** (**`reactivate`**) validates reattach (**CGATT**/**QIACT**).
+- Modem AT failures (**`+CME`/`+CMS`/generic ERROR/TIMEOUT**) are decoded in **`backend/app/at_modem_errors.py`** (**`+CME`** scanned across response lines); network endpoints include **`modem_detail`** plus clearer **`error`** strings. **`POST /api/network/data-gate`** returns accurate **`ok`** and **allow-data** retry path for **`AT+QIACT=1`**. **`POST /api/network/apn`** (**`reactivate`**) validates reattach (**CGATT**/**QIACT**); apn handler typo fix for **500** eliminated.
+- **Robustel** gateways: **modem mode** in the web UI → APN (**`AT+CGDCONT`**) → MNO, so the router stack does not override serial AT.
+
+Notes for **v1.4** (historical):
+
+- First release of decoded **`modem_detail`** on network/tool failures; **`POST /api/network/data-gate`** truthful **`ok`**; APN reattach validation; dashboard **`userFacingBackendError`** wiring.
 
 ## Quick start
 
@@ -40,7 +45,7 @@ $env:MD_BAUDRATE="115200"
 
 Failures from the modem (**`+CME ERROR`**, **`ERROR`**, **TIMEOUT**, etc.) surface as **`ok: false`**, **`error`**, and often **`modem_detail`** on **`/api/network/*`**, **`/api/network/apn`**, **`/api/tools/modem-reset`**, etc. (decoded in **`app/at_modem_errors.py`**).
 
-- `GET /` **5G ModemTestDriver** KPI page (**v1.4** in browser tab title and main heading): Serial Port tools, modem reset, COPS + lock controls with runtime re-apply guard, roaming MNO selector [Vodafone/VMO2/EE/H3G/Auto], packet-data inhibit/allow controls, CA policy switch, NRDC switch, neighbour-cell KPI, intra-cell dominance KPI, **LTE carrier re-selection KPI + dual-trace chart** (PCell EARFCN vs PCI rates), Data Service KPI [APN/PDP/CID1/attach/registration/usbnet/netdev], SIM High-Level + PLMN Inspector, TX power KPI when reported, AT console, **iperf3** + **host ICMP ping sweep** (bind interfaces, trends, optional repeat every 15 s), VoLTE call test, clear-all charts, 60s–60m chart window, optional time-roll gap mode, `EARFCN/PCI` color mapping, RF threshold lines, optional RF smoothing, **RF chart hover tooltips** (value + EARFCN/PCI per sample on RSRP/RSRQ/SINR/RSSI/dominance charts)
+- `GET /` **5G ModemTestDriver** KPI page (**v1.5** in browser tab title and main heading): Serial Port tools, modem reset, COPS + lock controls with runtime re-apply guard, roaming MNO selector [Vodafone/VMO2/EE/H3G/Auto], packet-data inhibit/allow controls, CA policy switch, NRDC switch, neighbour-cell KPI, intra-cell dominance KPI, **LTE carrier re-selection KPI + dual-trace chart** (PCell EARFCN vs PCI rates), Data Service KPI [APN/PDP/CID1/attach/registration/usbnet/netdev], SIM High-Level + PLMN Inspector, TX power KPI when reported, AT console, **iperf3** + **host ICMP ping sweep** (bind interfaces, trends, optional repeat every 15 s), VoLTE call test, clear-all charts, 60s–60m chart window, optional time-roll gap mode, `EARFCN/PCI` color mapping, RF threshold lines, optional RF smoothing, **RF chart hover tooltips** (value + EARFCN/PCI per sample on RSRP/RSRQ/SINR/RSSI/dominance charts)
 - `GET /api/serial/status`
 - `GET /api/serial/ports`
 - `POST /api/at/send`

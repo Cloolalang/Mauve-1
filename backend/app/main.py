@@ -25,7 +25,7 @@ from app.sim_usim_services import (
     label_usim_service,
 )
 
-APP_VERSION = "1.4"
+APP_VERSION = "1.5"
 
 
 def _serial_state_file_path() -> str:
@@ -1070,7 +1070,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="1.4.0",
+    version="1.5.0",
     lifespan=lifespan,
 )
 
@@ -4478,7 +4478,7 @@ async def network_apn_set(body: ApnSetBody) -> dict:
 
             apn_ok = bool(
                 set_ok
-                and (not body.reactivate or len(reatach_errs) == 0)
+                and (not body.reactivate or len(reattach_errs) == 0)
             )
             api_err_text = None if apn_ok else (modem_detail or "APN update failed.")
 
@@ -4523,18 +4523,37 @@ async def network_data_gate_set(body: DataGateBody) -> dict:
         # Allow packet data: ensure attach then activate primary CID 1.
         res_attach = await engine.send_command("AT+CGATT=1", timeout_sec=20.0)
         actions.append({"cmd": "AT+CGATT=1", "res": res_attach})
-        res_activate = await engine.send_command("AT+QIACT=1", timeout_sec=20.0)
+        if bool(res_attach.get("ok")):
+            await asyncio.sleep(0.4)
+        res_activate = await engine.send_command("AT+QIACT=1", timeout_sec=45.0)
         actions.append({"cmd": "AT+QIACT=1", "res": res_activate})
+        if bool(res_attach.get("ok")) and not bool(res_activate.get("ok")):
+            recover = await engine.send_command("AT+QIDEACT=1", timeout_sec=20.0)
+            actions.append({"cmd": "AT+QIDEACT=1", "res": recover, "note": "after failed QIACT=1"})
+            await asyncio.sleep(0.35)
+            res_activate = await engine.send_command("AT+QIACT=1", timeout_sec=45.0)
+            actions.append({"cmd": "AT+QIACT=1 (retry)", "res": res_activate})
     after = await network_data_gate_get()
 
-    cmds_ok = True
-    md_parts: list[str | None] = []
-    for a in actions:
-        rr = a.get("res") or {}
-        if not rr.get("ok", False):
-            cmds_ok = False
-            md_parts.append(describe_modem_send_result(rr))
-    modem_detail = combine_errors(*md_parts, sep=" | ")
+    cmds_ok: bool
+    md_parts: list[str | None]
+    if body.inhibit:
+        cmds_ok = True
+        md_parts = []
+        for a in actions:
+            rr = a.get("res") or {}
+            if not rr.get("ok", False):
+                cmds_ok = False
+                md_parts.append(describe_modem_send_result(rr))
+        modem_detail = combine_errors(*md_parts, sep=" | ")
+    else:
+        cmds_ok = bool(res_attach.get("ok") and res_activate.get("ok"))
+        md_parts = []
+        if not res_attach.get("ok"):
+            md_parts.append(describe_modem_send_result(res_attach))
+        if not res_activate.get("ok"):
+            md_parts.append(describe_modem_send_result(res_activate))
+        modem_detail = combine_errors(*md_parts, sep=" | ")
 
     desired_inhibited = bool(body.inhibit)
     achieved = bool(after.get("inhibited")) if desired_inhibited else not bool(after.get("inhibited"))

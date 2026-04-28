@@ -1,8 +1,15 @@
 # 5G ModemTestDriver
 
-**Version 1.4**
+**Version 1.5**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.4** is shown in the page header).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.5** is shown in the page header).
+
+**Changes in v1.5**
+
+- **`POST /api/network/apn`**: fixed **`500`** from a typo (`reatach_errs` / `reattach_errs`) when evaluating reattach results.
+- **`POST /api/network/data-gate`** (**allow packet data**): short settle after **`AT+CGATT=1`**, **`AT+QIACT=1`** timeout **45 s**, recovery attempt **`AT+QIDEACT=1`** then second **`AT+QIACT=1`** when **`CGATT`** **`OK`** but first activate fails; success reflects final attach/activate (**`modem_detail`** on failure).
+- **`app/at_modem_errors.py`**: decode **`+CME ERROR`** when it appears on **any** line before a trailing **`ERROR`**; add **`QIACT`** hints when PDP activate fails without a numbered CME.
+- **Docs/UI**: README notes **Robustel** gateways should use **modem mode** before **APN** then **MNO** (device web UI); removed the extra static yellow APN advisory box from the KPI page.
 
 **Changes in v1.4**
 
@@ -252,7 +259,7 @@ The JSON includes `sample.carrier_reselection` with `window_sec` (60), `primary_
 
 The Data Service KPI panel is populated from periodic AT reads inside the KPI poll loop:
 
-- **`POST /api/network/apn`** (password `"nacelle"` or your configured unlock; same gate as Allow Data) updates **`AT+CGDCONT`**, mirrors the same APN into Quectel **`AT+QICSGP`** for the internal PDP path when the firmware supports it, and optionally reattaches with **`AT+QIACT`**. If the context is active, **`AT+QIDEACT=<cid>`** may run first so the APN can be changed (this can briefly disturb the USB WAN path). Set **`reactivate": false`** to skip **`CGATT`/`QIACT`** and reconnect later via **Allow Data**. APN must be letters/digits/`.`/`-`/`_` only.
+- **`POST /api/network/apn`** (password `"nacelle"` or your configured unlock; same gate as Allow Data) updates **`AT+CGDCONT`**, mirrors the same APN into Quectel **`AT+QICSGP`** for the internal PDP path when the firmware supports it, and optionally reattaches with **`AT+QIACT`**. If the context is active, **`AT+QIDEACT=<cid>`** may run first so the APN can be changed (this can briefly disturb the USB WAN path). Set **`reactivate": false`** to skip **`CGATT`/`QIACT`** and reconnect later via **Allow Data**. APN must be letters/digits/`.`/`-`/`_` only. On **Robustel** gateways, use the router’s **modem mode** before changing APN, then select MNO—see the device web UI.
 
 - `AT+CGDCONT?` -> APN, PDP type, total PDP contexts
 - `AT+QIACT?` -> active PDP contexts, CID1 state/IP

@@ -42,6 +42,20 @@ def parse_cme_from_text(text: str) -> tuple[int | None, str]:
     return code, hint
 
 
+def _extract_cme_from_any_line(lines: list[str] | None) -> tuple[int, str] | None:
+    """If any echoed line contains +CME ERROR, return (code, hint); else None."""
+    if not lines:
+        return None
+    for raw in lines:
+        u = raw.strip().upper()
+        if "+CME ERROR" not in u:
+            continue
+        code, hint = parse_cme_from_text(raw)
+        if code is not None:
+            return code, hint or f"CME code {code}"
+    return None
+
+
 def parse_cms_from_text(text: str) -> tuple[int | None, str]:
     u = text.strip().upper()
     m = re.search(r"\+CMS\s+ERROR:\s*(\d+)", u)
@@ -78,8 +92,14 @@ def describe_modem_send_result(result: dict[str, Any] | None) -> str | None:
         return f"CMS ERROR {code} — {hint}" if code is not None else (hint or final)
 
     if final.upper() == "ERROR":
-        tail = ""
         lines = result.get("lines") or []
+        cme = _extract_cme_from_any_line(lines)
+        if cme:
+            code, hint = cme
+            suf = cmd_short(cmd)
+            return f"CME ERROR {code} — {hint}{suf}"
+
+        tail = ""
         joined = "\n".join(lines)
         mt = re.search(r"\+CME\s+ERROR:\s*\d+", joined.upper())
         if mt:
@@ -87,7 +107,9 @@ def describe_modem_send_result(result: dict[str, Any] | None) -> str | None:
             num = _extract_trailing_digits(ln)
             cme_hint = _CME_MESSAGES.get(num, "") if num is not None else ""
             tail = f" after {ln.strip()} — {cme_hint}" if cme_hint else f" ({ln.strip()})"
-        return f"AT ERROR{f' ({cmd[:40]}…)' if cmd and len(cmd) > 40 else (f' ({cmd})' if cmd else '')}{tail}"
+        base = f"AT ERROR{f' ({cmd[:40]}…)' if cmd and len(cmd) > 40 else (f' ({cmd})' if cmd else '')}{tail}"
+        qh = _qiact_hint(cmd)
+        return f"{base} {qh}".strip() if qh else base
 
     if final.startswith("WRITE_ERROR"):
         return final
@@ -99,6 +121,23 @@ def describe_modem_send_result(result: dict[str, Any] | None) -> str | None:
             return describe_modem_send_result({**result, "final": last, "ok": False})
 
     return f"Rejected: {final}" if final else "Modem rejected command (unknown final)."
+
+
+def cmd_short(command: str) -> str:
+    c = command.strip()
+    if not c:
+        return ""
+    return f' ({c[:48]}…)' if len(c) > 48 else f" ({c})"
+
+
+def _qiact_hint(command: str) -> str | None:
+    cu = (command or "").strip().upper()
+    if not cu or "QIACT" not in cu:
+        return None
+    return (
+        "Hint: PDP activate needs packet attach + a defined PDP profile for that CID (AT+CGDCONT), EPS "
+        "registration on packet service, and no conflicting QMI/router WAN owning the context."
+    )
 
 
 def _extract_trailing_digits(s: str) -> int | None:
