@@ -1,6 +1,10 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 1.3** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.3.0**).
+**Version 1.4** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.4.0**).
+
+Notes for **v1.4**:
+
+- Modem AT failures (**`+CME`/`+CMS`/generic ERROR/TIMEOUT**) are decoded in **`backend/app/at_modem_errors.py`**; network endpoints include **`modem_detail`** plus clearer **`error`** strings. **`POST /api/network/data-gate`** returns accurate **`ok`**. **`POST /api/network/apn`** (**`reactivate`**) validates reattach (**CGATT**/**QIACT**).
 
 ## Quick start
 
@@ -34,7 +38,9 @@ $env:MD_BAUDRATE="115200"
 
 ## API
 
-- `GET /` **5G ModemTestDriver** KPI page (**v1.3** in browser tab title and main heading): Serial Port tools, modem reset, COPS + lock controls with runtime re-apply guard, roaming MNO selector [Vodafone/VMO2/EE/H3G/Auto], packet-data inhibit/allow controls, CA policy switch, NRDC switch, neighbour-cell KPI, intra-cell dominance KPI, **LTE carrier re-selection KPI + dual-trace chart** (PCell EARFCN vs PCI rates), Data Service KPI [APN/PDP/CID1/attach/registration/usbnet/netdev], SIM High-Level + PLMN Inspector, TX power KPI when reported, AT console, **iperf3** + **host ICMP ping sweep** (bind interfaces, trends, optional repeat every 15 s), VoLTE call test, clear-all charts, 60s–60m chart window, optional time-roll gap mode, `EARFCN/PCI` color mapping, RF threshold lines, optional RF smoothing, **RF chart hover tooltips** (value + EARFCN/PCI per sample on RSRP/RSRQ/SINR/RSSI/dominance charts)
+Failures from the modem (**`+CME ERROR`**, **`ERROR`**, **TIMEOUT**, etc.) surface as **`ok: false`**, **`error`**, and often **`modem_detail`** on **`/api/network/*`**, **`/api/network/apn`**, **`/api/tools/modem-reset`**, etc. (decoded in **`app/at_modem_errors.py`**).
+
+- `GET /` **5G ModemTestDriver** KPI page (**v1.4** in browser tab title and main heading): Serial Port tools, modem reset, COPS + lock controls with runtime re-apply guard, roaming MNO selector [Vodafone/VMO2/EE/H3G/Auto], packet-data inhibit/allow controls, CA policy switch, NRDC switch, neighbour-cell KPI, intra-cell dominance KPI, **LTE carrier re-selection KPI + dual-trace chart** (PCell EARFCN vs PCI rates), Data Service KPI [APN/PDP/CID1/attach/registration/usbnet/netdev], SIM High-Level + PLMN Inspector, TX power KPI when reported, AT console, **iperf3** + **host ICMP ping sweep** (bind interfaces, trends, optional repeat every 15 s), VoLTE call test, clear-all charts, 60s–60m chart window, optional time-roll gap mode, `EARFCN/PCI` color mapping, RF threshold lines, optional RF smoothing, **RF chart hover tooltips** (value + EARFCN/PCI per sample on RSRP/RSRQ/SINR/RSSI/dominance charts)
 - `GET /api/serial/status`
 - `GET /api/serial/ports`
 - `POST /api/at/send`
@@ -58,10 +64,13 @@ $env:MD_BAUDRATE="115200"
 - `GET /api/network/mno`
   - returns current COPS view plus named profiles (Vodafone/VMO2/EE/H3G/Auto)
 - `POST /api/network/mno`
-  - body example: `{ "profile": "vodafone" }`
-  - uses manual/auto PLMN selection (`AT+COPS=4,2,"<PLMN>"`) for named MNOs
+  - body example: `{ "profile": "vodafone", "cops_manual_registration": 4 }` (optional `1` or `4`; **1** = manual hold PLMN for roaming selection)
+  - manual PLMN for named profiles: `AT+COPS=<1|4>,2,"<PLMN>"`; profile **auto**: `AT+COPS=0`
 - `GET /api/network/data-gate`
   - reads packet-data gate status (attach + active PDP contexts)
+- `POST /api/network/apn`
+  - body example: `{ "apn": "key", "cid": 1, "pdp_type": "IP", "password": "nacelle", "reactivate": true }`
+  - writes `AT+CGDCONT`, mirrors **`AT+QICSGP`** (Quectel), optionally `QIDEACT`/`QIACT`; wrong password → `403`
 - `POST /api/network/data-gate`
   - body example: `{ "inhibit": true }` to inhibit data
   - body example: `{ "inhibit": false, "password": "nacelle" }` to allow data

@@ -1,8 +1,15 @@
 # 5G ModemTestDriver
 
-**Version 1.3**
+**Version 1.4**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.3** is shown in the page header).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.4** is shown in the page header).
+
+**Changes in v1.4**
+
+- **Modem AT error reporting**: Responses from **`engine.send_command()`** are summarized for **`+CME ERROR`**, **`+CMS ERROR`**, generic **`ERROR`**, **TIMEOUT**, and related cases via **`app/at_modem_errors.py`** (`describe_modem_send_result`). Network APIs (**MNO**, **COPS** read/set/scan, **APN**, **data-gate**, **locks**, **modem reset**) return **`modem_detail`** (and enriched **`error`**) where the modem rejects or misbehaves, so **`+CME ERROR: 30`** and similar show human-readable hints (e.g. no network service) instead of opaque “apply failed”.
+- **`POST /api/network/data-gate`**: **`ok`** now reflects whether AT steps and the inferred inhibit/allowed state succeeded (no longer unconditionally `true` on failures).
+- **`POST /api/network/apn`** with **`reactivate: true`**: **`ok`** is false if **CGATT**/**QIACT** reattachment fails after a successful **`AT+CGDCONT`**.
+- **UI**: `userFacingBackendError()` surfaces **`modem_detail`** consistently in status messages across the embedded dashboard **`fetch`** paths.
 
 **Changes in v1.3**
 
@@ -49,7 +56,7 @@ AT command catalog from current modem firmware:
   - Neighbour Cells RF KPI section (strongest intra-frequency neighbour RSRP + PCI + EARFCN)
   - Mobility / LTE carrier re-selection KPI (PCell EARFCN vs intra-frequency PCI change rates, camped and RRC connected) with matching dual-trace chart
   - Data Service KPI section:
-    - APN
+    - APN (live read plus **Set APN** form using `AT+CGDCONT`, same unlock password as Allow Data)
     - PDP contexts (active/total)
     - CID1 state (UP/DOWN)
     - CID1 IP address
@@ -227,6 +234,7 @@ The JSON includes `sample.carrier_reselection` with `window_sec` (60), `primary_
 - `GET /api/network/cops/scan` (operator scan)
 - `GET /api/network/mno`
 - `POST /api/network/mno`
+- `POST /api/network/apn` (set `AT+CGDCONT` APN; unlock password; CID 1 default)
 - `GET /api/network/data-gate`
 - `POST /api/network/data-gate`
 - `GET /api/network/locks`
@@ -243,6 +251,8 @@ The JSON includes `sample.carrier_reselection` with `window_sec` (60), `primary_
 ## Data Service KPI details
 
 The Data Service KPI panel is populated from periodic AT reads inside the KPI poll loop:
+
+- **`POST /api/network/apn`** (password `"nacelle"` or your configured unlock; same gate as Allow Data) updates **`AT+CGDCONT`**, mirrors the same APN into Quectel **`AT+QICSGP`** for the internal PDP path when the firmware supports it, and optionally reattaches with **`AT+QIACT`**. If the context is active, **`AT+QIDEACT=<cid>`** may run first so the APN can be changed (this can briefly disturb the USB WAN path). Set **`reactivate": false`** to skip **`CGATT`/`QIACT`** and reconnect later via **Allow Data**. APN must be letters/digits/`.`/`-`/`_` only.
 
 - `AT+CGDCONT?` -> APN, PDP type, total PDP contexts
 - `AT+QIACT?` -> active PDP contexts, CID1 state/IP
@@ -264,8 +274,8 @@ Values are exposed in `GET /api/kpi/latest` under `sample.data_service`.
     - `Auto`
 
 - `POST /api/network/mno`
-  - body: `{ "profile": "vodafone|vmo2|ee|h3g|auto" }`
-  - Uses `AT+COPS=4,2,"<PLMN>"` for named profiles and `AT+COPS=0` for auto.
+  - body: `{ "profile": "vodafone|vmo2|ee|h3g|auto", "cops_manual_registration": 4 }` (optional second field, default **4**)
+  - Named UK PLMNs use `AT+COPS=<mode>,2,"<PLMN>"` with **mode 1** (manual, hold PLMN) or **mode 4** (manual with automatic fallback — previous default). Use **mode 1** when steering among UK networks on a roaming non-steered SIM; **`AT+COPS=0`** is used for **auto**.
 
 - `GET /api/network/data-gate`
   - Reads packet-attach and active PDP state.

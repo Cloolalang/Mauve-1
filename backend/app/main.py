@@ -16,15 +16,16 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from serial.tools import list_ports
 
-from app.kpi_service import KpiRuntime, kpi_poll_loop
+from app.kpi_service import KpiRuntime, _parse_cgdcont, kpi_poll_loop
 from app.serial_engine import SerialEngine
+from app.at_modem_errors import combine_errors, describe_modem_send_result
 from app.sim_usim_services import (
     SIM_EF_DESCRIPTIONS,
     SIM_INSPECTOR_LABEL_REFERENCE,
     label_usim_service,
 )
 
-APP_VERSION = "1.3"
+APP_VERSION = "1.4"
 
 
 def _serial_state_file_path() -> str:
@@ -177,11 +178,29 @@ class CopsSetBody(BaseModel):
 
 class MnoSelectBody(BaseModel):
     profile: str = Field(description="One of: vodafone, vmo2, ee, h3g, auto")
+    cops_manual_registration: int = Field(
+        default=4,
+        description="For named profiles: AT+COPS mode — 1 = manual (stay on selected PLMN); 4 = manual with automatic fallback (default). Ignored for profile=auto.",
+    )
 
 
 class DataGateBody(BaseModel):
     inhibit: bool = Field(description="True=inhibit packet data, False=allow packet data")
     password: str | None = Field(default=None, description="Required when inhibit=false")
+
+
+class ApnSetBody(BaseModel):
+    apn: str = Field(min_length=1, max_length=100, description="PDP APN string for AT+CGDCONT")
+    cid: int = Field(default=1, ge=1, le=15, description="PDP context ID (typically 1)")
+    pdp_type: str = Field(
+        default="IP",
+        description='PDP type passed to AT+CGDCONT, e.g. "IP", "IPV6", "IPV4V6"',
+    )
+    password: str | None = Field(default=None, description="Unlock password (same as data allow)")
+    reactivate: bool = Field(
+        default=True,
+        description="After CGDCONT, reattach data (CGATT/QIACT when needed). Disable to only write CGDCONT (+QICSGP) if the context is inactive.",
+    )
 
 
 class LockSetBody(BaseModel):
@@ -792,6 +811,34 @@ MNO_PROFILES: dict[str, dict[str, str | None]] = {
     "auto": {"label": "Auto", "plmn": None},
 }
 DATA_GATE_UNLOCK_PASSWORD = "nacelle"
+
+_ALLOWED_APN_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_")
+
+
+def _sanitize_apn_for_at(raw: str) -> str:
+    s = str(raw or "").strip()
+    if not s:
+        raise HTTPException(status_code=400, detail="APN must not be empty.")
+    if len(s) > 100:
+        raise HTTPException(status_code=400, detail="APN exceeds maximum length.")
+    if any(ch not in _ALLOWED_APN_CHARS for ch in s):
+        raise HTTPException(
+            status_code=400,
+            detail="APN may only contain letters, digits, dot, hyphen, and underscore.",
+        )
+    return s
+
+
+def _normalize_cgdcont_pdp_type(raw: str | None) -> str:
+    u = str(raw or "IP").strip().upper()
+    if u not in {"IP", "IPV6", "IPV4V6"}:
+        raise HTTPException(
+            status_code=400,
+            detail='pdp_type must be one of: "IP", "IPV6", "IPV4V6".',
+        )
+    return u
+
+
 UK_LTE_SCAN_BANDS = "1:3:7:8:20:28:32:38"
 UK_NR_SCAN_BANDS = "1:3:8:28:78"
 MNO_OPERATOR_ALIASES: dict[str, set[str]] = {
@@ -1023,7 +1070,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="1.3.0",
+    version="1.4.0",
     lifespan=lifespan,
 )
 
@@ -1111,6 +1158,29 @@ async def home() -> HTMLResponse:
       <div class="row"><span class="label">EPS Registration</span><span id="ds-reg">-</span></div>
       <div class="row"><span class="label">USB data stack</span><span id="ds-usbnet">-</span></div>
       <div class="row"><span class="label">Netdev status</span><span id="ds-netdev">-</span></div>
+      <div style="margin-top:12px;">
+        <div class="label">Set APN (AT+CGDCONT)</div>
+        <div style="margin-top:6px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <input id="ds-apn-set" placeholder="e.g. internet" style="flex:1; min-width:160px; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px;" />
+          <select id="ds-pdp-type" style="background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px;">
+            <option value="IP" selected>IP</option>
+            <option value="IPV4V6">IPV4V6</option>
+            <option value="IPV6">IPV6</option>
+          </select>
+          <button id="btn-ds-apn-apply" type="button">Apply APN</button>
+        </div>
+        <div style="margin-top:8px;">
+          <div class="label">Unlock password (same as Allow Data)</div>
+          <input id="ds-apn-password" type="password" placeholder="Enter password" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+        </div>
+        <div style="margin-top:8px; display:flex; align-items:flex-start; gap:8px;">
+          <input id="ds-apn-reactivate" type="checkbox" checked />
+          <span class="label" style="flex:1; font-size:11px;">
+            Reactivate packet data after change (AT+QIACT). Uncheck to only write APN; use Allow Data to reconnect. Deactivating PDP can briefly drop the USB data path (may look like a modem reset).
+          </span>
+        </div>
+        <div id="ds-apn-msg" class="label" style="margin-top:8px;">-</div>
+      </div>
       <div id="ds-warn" class="label" style="margin-top:8px;">-</div>
     </div>
 
@@ -1217,7 +1287,7 @@ async def home() -> HTMLResponse:
     </div>
 
     <div class="card">
-      <div class="label">Carrier re-selection rate — LTE PCell (camped and connected, /min)</div>
+      <div class="label">Primary Carrier re-selection rate — LTE PCell (camped and connected, /min)</div>
       <canvas id="carrier-resel-chart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
@@ -1261,6 +1331,13 @@ async def home() -> HTMLResponse:
           <option value="ee">EE</option>
           <option value="h3g">H3G</option>
           <option value="auto">Auto</option>
+        </select>
+      </div>
+      <div style="margin-top:8px;">
+        <div class="label">Manual COPS mode (VF / VM / EE / three only)</div>
+        <select id="mno-cops-mode" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" title="Non-steered roaming: mode 1 holds the PLMN; mode 4 can fall back automatically.">
+          <option value="4" selected>4 — Manual PLMN + automatic fallback</option>
+          <option value="1">1 — Manual PLMN hold (often better when roaming)</option>
         </select>
       </div>
       <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
@@ -1618,6 +1695,21 @@ async def home() -> HTMLResponse:
       return s;
     }
 
+    /** Prefer server *error*, append *modem_detail* only when distinct (CME/CMS hints). */
+    function userFacingBackendError(j, fallback) {
+      if (!j || typeof j !== "object") return fallback || "";
+      const md = typeof j.modem_detail === "string" ? j.modem_detail.trim() : "";
+      let er = "";
+      if (typeof j.error === "string") er = j.error.trim();
+      if (!er && typeof j.detail === "string") er = j.detail.trim();
+      if (!er && Array.isArray(j.detail)) {
+        er = j.detail.map((d) => `${d.loc || "?"} ${d.msg || ""}`).join("; ");
+      }
+      if (er && md && er.includes(md)) return er || fallback || "";
+      if (er && md) return `${er} — ${md}`;
+      return er || md || fallback || "";
+    }
+
     function pruneHistoryByAge(history, nowMs = Date.now()) {
       if (!Array.isArray(history) || history.length === 0) return;
       const cutoff = nowMs - chartWindowMs;
@@ -1937,7 +2029,7 @@ async def home() -> HTMLResponse:
       try {
         const r = await fetch("/api/network/mno");
         const j = await r.json();
-        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "MNO read failed");
+        if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "MNO read failed"));
         applyMnoState(j, msg);
       } catch (e) {
         el("mnomsg").textContent = `MNO read error: ${e.message || e}`;
@@ -1946,15 +2038,16 @@ async def home() -> HTMLResponse:
 
     async function applyMnoSelection() {
       const profile = String(el("mno-select").value || "auto");
+      const cops_manual_registration = Number(el("mno-cops-mode")?.value || "4");
       try {
         el("mnomsg").textContent = `Applying ${profile.toUpperCase()}...`;
         const r = await fetch("/api/network/mno", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ profile })
+          body: JSON.stringify({ profile, cops_manual_registration })
         });
         const j = await r.json();
-        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "MNO apply failed");
+        if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "MNO apply failed"));
         applyMnoState(j, `MNO profile applied: ${profile.toUpperCase()}`);
       } catch (e) {
         el("mnomsg").textContent = `MNO apply error: ${e.message || e}`;
@@ -1967,7 +2060,7 @@ async def home() -> HTMLResponse:
       try {
         const r = await fetch("/api/network/data-gate");
         const j = await r.json();
-        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "Data gate read failed");
+        if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "Data gate read failed"));
         applyDataGateState(j);
       } catch (e) {
         el("mnomsg").textContent = `Data gate read error: ${e.message || e}`;
@@ -1984,12 +2077,60 @@ async def home() -> HTMLResponse:
           body: JSON.stringify({ inhibit, password })
         });
         const j = await r.json();
-        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "Data gate update failed");
+        if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "Data gate update failed"));
         applyDataGateState(j.after || {}, inhibit ? "Packet data inhibited." : "Packet data allowed.");
       } catch (e) {
         el("mnomsg").textContent = `Data gate error: ${e.message || e}`;
       } finally {
         await readDataGate();
+      }
+    }
+
+    async function applyDsApn() {
+      const apn = String(el("ds-apn-set")?.value || "").trim();
+      const pdp_type = String(el("ds-pdp-type")?.value || "IP");
+      const password = String(el("ds-apn-password")?.value || "");
+      const msgEl = el("ds-apn-msg");
+      if (!apn) {
+        msgEl.textContent = "Enter an APN.";
+        msgEl.className = "label warn";
+        return;
+      }
+      if (!password) {
+        msgEl.textContent = "Enter unlock password.";
+        msgEl.className = "label warn";
+        return;
+      }
+      try {
+        msgEl.textContent = "Applying APN...";
+        msgEl.className = "label";
+        const reactivate = !!el("ds-apn-reactivate")?.checked;
+        const r = await fetch("/api/network/apn", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ apn, cid: 1, pdp_type, password, reactivate })
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          const d = j?.detail;
+          const errTxt =
+            typeof d === "string"
+              ? d
+              : Array.isArray(d)
+                ? d.map((x) => `${x.loc || "?"} ${x.msg || ""}`).join("; ")
+                : "";
+          throw new Error(
+            userFacingBackendError(j, errTxt || r.statusText || "APN update failed")
+          );
+        }
+        if (!j.ok) throw new Error(userFacingBackendError(j, "CGDCONT was rejected."));
+        msgEl.textContent = j.message || "APN updated.";
+        msgEl.className = "label ok";
+        el("ds-apn-password").value = "";
+        await pollFallback();
+      } catch (e) {
+        msgEl.textContent = `APN error: ${e.message || e}`;
+        msgEl.className = "label warn";
       }
     }
 
@@ -2072,7 +2213,7 @@ async def home() -> HTMLResponse:
       try {
         const r = await fetch("/api/sim/high-level");
         const j = await r.json();
-        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "SIM high-level read failed");
+        if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "SIM high-level read failed"));
         applySimHighLevel(j, "SIM high-level read OK");
       } catch (e) {
         el("simmsg").textContent = `SIM high-level read error: ${e.message || e}`;
@@ -2083,7 +2224,7 @@ async def home() -> HTMLResponse:
       try {
         const r = await fetch("/api/sim/inspector?verbose=1");
         const j = await r.json();
-        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "SIM inspector read failed");
+        if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "SIM inspector read failed"));
         applySimInspector(j, "SIM inspector read OK");
       } catch (e) {
         el("simmsg").textContent = `SIM inspector read error: ${e.message || e}`;
@@ -2237,7 +2378,7 @@ async def home() -> HTMLResponse:
         await fetch("/api/kpi/poll/stop", { method: "POST" });
         const r = await fetch("/api/tools/modem-reset", { method: "POST" });
         const j = await r.json();
-        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "Modem reset failed");
+        if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "Modem reset failed"));
         el("serialmsg").textContent = "Reset accepted. Waiting for modem recovery (up to 90s)...";
         const recovered = await waitForModemRecovery(90);
         if (recovered?.serial_open) {
@@ -2259,7 +2400,7 @@ async def home() -> HTMLResponse:
       try {
         const r = await fetch("/api/network/cops");
         const j = await r.json();
-        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "COPS read failed");
+        if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "COPS read failed"));
         applyCops(j, "COPS read OK");
       } catch (e) {
         el("copsmsg").textContent = `COPS read error: ${e.message || e}`;
@@ -2277,7 +2418,9 @@ async def home() -> HTMLResponse:
         const setFinal = j?.set?.final || "";
         const setLines = Array.isArray(j?.set?.lines) ? j.set.lines.join(" | ") : "";
         if (!r.ok || !j.ok) {
-          throw new Error(j.detail || j.error || `COPS set failed (${setFinal || "no final"}) ${setLines}`.trim());
+          throw new Error(
+            userFacingBackendError(j, `COPS set failed (${setFinal || "no final"}) ${setLines}`.trim())
+          );
         }
         applyCops(j, `COPS mode set to ${mode} (${setFinal || "OK"})`);
       } catch (e) {
@@ -2293,7 +2436,7 @@ async def home() -> HTMLResponse:
         el("copsmsg").textContent = `Scanning operators via AT+COPS=? (up to ~35s)${ukOnly ? " with UK LTE+NR bands" : ""}. KPI polling is paused during scan.`;
         const r = await fetch(`/api/network/cops/scan?uk_only=${ukOnly ? "1" : "0"}`);
         const j = await r.json();
-        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "COPS scan failed");
+        if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "COPS scan failed"));
         applyCopsScan(j, `COPS scan complete: ${Array.isArray(j.operators) ? j.operators.length : 0} operator(s)`);
       } catch (e) {
         el("copsmsg").textContent = `COPS scan error: ${e.message || e}`;
@@ -2306,7 +2449,7 @@ async def home() -> HTMLResponse:
       try {
         const r = await fetch("/api/network/locks");
         const j = await r.json();
-        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "Lock read failed");
+        if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "Lock read failed"));
         applyLocks(j, "Lock config read OK");
       } catch (e) {
         el("lockmsg").textContent = `Lock read error: ${e.message || e}`;
@@ -2342,7 +2485,7 @@ async def home() -> HTMLResponse:
           body: JSON.stringify(body)
         });
         const j = await r.json();
-        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "Lock set failed");
+        if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "Lock set failed"));
         applyLocks(j, "Locks applied and verified.");
       } catch (e) {
         el("lockmsg").textContent = `Lock set error: ${e.message || e}`;
@@ -2366,7 +2509,7 @@ async def home() -> HTMLResponse:
           body: JSON.stringify({ number, hold_sec: 10, password })
         });
         const j = await r.json();
-        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "VoLTE test failed");
+        if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "VoLTE test failed"));
         const setupMs = Number(j.setup_time_ms);
         const setupTxt = Number.isFinite(setupMs) ? `${Math.round(setupMs)} ms` : "-";
         const durS = Number(j.call_duration_s);
@@ -2838,7 +2981,7 @@ async def home() -> HTMLResponse:
       if (!all.length) {
         ctx.fillStyle = "#777";
         ctx.font = "12px Arial";
-        ctx.fillText("No carrier re-selection samples yet", 12, 24);
+        ctx.fillText("No primary carrier re-selection samples yet", 12, 24);
         return;
       }
 
@@ -3632,6 +3775,8 @@ async def home() -> HTMLResponse:
       el("ds-netdev").textContent = "-";
       el("ds-warn").textContent = "-";
       el("ds-warn").className = "label";
+      el("ds-apn-msg").textContent = "-";
+      el("ds-apn-msg").className = "label";
     }
 
     function clearAllCharts() {
@@ -3706,6 +3851,8 @@ async def home() -> HTMLResponse:
     el("btn-mno-apply").addEventListener("click", () => applyMnoSelection());
     el("btn-data-inhibit").addEventListener("click", () => setDataGate(true));
     el("btn-data-allow").addEventListener("click", () => setDataGate(false));
+    const btnDsApn = el("btn-ds-apn-apply");
+    if (btnDsApn) btnDsApn.addEventListener("click", () => applyDsApn());
     el("btn-sim-high-read").addEventListener("click", () => readSimHighLevel());
     el("btn-sim-inspect-read").addEventListener("click", () => readSimInspector());
     el("btn-volte-test").addEventListener("click", () => runVolteTest());
@@ -4011,6 +4158,7 @@ async def network_cops_set(body: CopsSetBody) -> dict:
             set_lines = set_res.get("lines", [])
 
             error_msg = None
+            modem_detail = describe_modem_send_result(set_res) if not set_ok else None
             if not set_ok:
                 tail = ""
                 if isinstance(set_lines, list) and set_lines:
@@ -4018,10 +4166,12 @@ async def network_cops_set(body: CopsSetBody) -> dict:
                 error_msg = f"COPS set failed ({set_final or 'no final'})"
                 if tail and tail.upper() not in ("OK", "ERROR"):
                     error_msg += f": {tail}"
+                error_msg = combine_errors(error_msg, modem_detail) or error_msg
 
             return {
                 "ok": set_ok,
                 "error": error_msg,
+                "modem_detail": modem_detail,
                 "set": set_res,
                 "cops": _parse_cops_lines(read_res.get("lines", [])),
                 "raw": read_res,
@@ -4080,11 +4230,14 @@ async def network_cops_scan(uk_only: bool = False) -> dict:
             ops = _parse_cops_scan_lines(res.get("lines", []))
             ok = bool(res.get("ok", False))
             err = None
+            modem_detail = describe_modem_send_result(res) if not ok else None
             if not ok:
-                err = f"COPS scan failed ({res.get('final') or 'no final'})"
+                base = f"COPS scan failed ({res.get('final') or 'no final'})"
+                err = combine_errors(base, modem_detail) or base
             return {
                 "ok": ok,
                 "error": err,
+                "modem_detail": modem_detail,
                 "uk_only": uk_only,
                 "scan_scope": (
                     f"LTE bands {UK_LTE_SCAN_BANDS}; NR bands {UK_NR_SCAN_BANDS}"
@@ -4150,6 +4303,12 @@ async def network_mno_set(body: MnoSelectBody) -> dict:
     if key not in MNO_PROFILES:
         raise HTTPException(status_code=400, detail="Invalid profile. Use: vodafone, vmo2, ee, h3g, auto.")
 
+    if key != "auto" and body.cops_manual_registration not in (1, 4):
+        raise HTTPException(
+            status_code=400,
+            detail="cops_manual_registration must be 1 (manual, hold PLMN) or 4 (manual + auto fallback).",
+        )
+
     cfg = MNO_PROFILES[key]
     resume_kpi = bool(kpi_runtime.poll_running)
     ok = False
@@ -4171,9 +4330,10 @@ async def network_mno_set(body: MnoSelectBody) -> dict:
                 err = None if ok else "Auto registration did not produce an operator within timeout."
             else:
                 plmn = str(cfg["plmn"])
-                # Use mode 4 (manual/auto) to avoid leaving modem permanently deregistered
-                # if selected PLMN is temporarily unavailable.
-                set_res = await engine.send_command(f'AT+COPS=4,2,"{plmn}"', timeout_sec=180.0)
+                cops_mode = int(body.cops_manual_registration)
+                # Mode 4: manual select with automatic fallback; mode 1: manual until loss (often better for roaming / non-steered SIM).
+
+                set_res = await engine.send_command(f'AT+COPS={cops_mode},2,"{plmn}"', timeout_sec=180.0)
                 polled = await _poll_cops_state(total_wait_sec=75.0, step_sec=2.5)
                 read_res = polled["res"]
                 cops = polled["cops"]
@@ -4196,10 +4356,18 @@ async def network_mno_set(body: MnoSelectBody) -> dict:
         finally:
             _resume_exclusive_modem_access(resume_kpi)
 
+    md_set = describe_modem_send_result(set_res) if isinstance(set_res, dict) and not set_res.get("ok") else None
+    md_rec = describe_modem_send_result(recover_res) if recover_res is not None and not recover_res.get("ok") else None
+    modem_detail = combine_errors(md_set, md_rec, sep=" | ")
+    if modem_detail:
+        err = combine_errors(err, modem_detail, sep=" — ") if err else modem_detail
+
     return {
         "ok": ok,
         "error": err,
+        "modem_detail": modem_detail,
         "selected_profile": key,
+        "cops_mode_used": None if key == "auto" else int(body.cops_manual_registration),
         "profile": {"label": cfg["label"], "plmn": cfg["plmn"]},
         "set": set_res,
         "cops": cops,
@@ -4224,6 +4392,119 @@ async def network_data_gate_get() -> dict:
     }
 
 
+@app.post("/api/network/apn")
+async def network_apn_set(body: ApnSetBody) -> dict:
+    """Set PDP APN via AT+CGDCONT (password-gated). Optionally QIDEACT, CGATT, QIACT."""
+    if (body.password or "") != DATA_GATE_UNLOCK_PASSWORD:
+        raise HTTPException(status_code=403, detail="Invalid password for APN change.")
+
+    apn = _sanitize_apn_for_at(body.apn)
+    pdp = _normalize_cgdcont_pdp_type(body.pdp_type)
+    cid = int(body.cid)
+
+    resume_kpi = bool(kpi_runtime.poll_running)
+    actions: list[dict] = []
+    reattach_errs: list[dict] = []
+
+    async with _modem_exclusive_lock:
+        await _pause_exclusive_modem_access()
+        try:
+            cgatt_before_res = await engine.send_command("AT+CGATT?", timeout_sec=4.0)
+            attached_before = _parse_cgatt_attached(cgatt_before_res.get("lines", []))
+            actions.append({"cmd": "AT+CGATT?", "res": cgatt_before_res})
+
+            qiact_res = await engine.send_command("AT+QIACT?", timeout_sec=4.0)
+            contexts = _parse_qiact_contexts(qiact_res.get("lines", []))
+            active_here = next((c for c in contexts if c.get("cid") == cid and c.get("active")), None)
+            did_ideact = False
+            if active_here:
+                ideact = await engine.send_command(f"AT+QIDEACT={cid}", timeout_sec=25.0)
+                actions.append({"cmd": f"AT+QIDEACT={cid}", "res": ideact})
+                did_ideact = True
+
+            cmd = f'AT+CGDCONT={cid},"{pdp}","{apn}"'
+            cgd_set = await engine.send_command(cmd, timeout_sec=15.0)
+            actions.append({"cmd": cmd, "res": cgd_set})
+            set_ok = bool(cgd_set.get("ok", False))
+
+            qic_cmd = f'AT+QICSGP={cid},1,"{apn}","","",0'
+            qic_res = await engine.send_command(qic_cmd, timeout_sec=15.0)
+            actions.append(
+                {
+                    "cmd": qic_cmd + " (Quectel PDP stack mirror; OK if modem supports)",
+                    "res": qic_res,
+                }
+            )
+
+            if body.reactivate and set_ok:
+                need_attach = bool(did_ideact or attached_before is not True)
+                if need_attach:
+                    att = await engine.send_command("AT+CGATT=1", timeout_sec=35.0)
+                    actions.append({"cmd": "AT+CGATT=1", "res": att})
+                    if not att.get("ok"):
+                        reattach_errs.append(att)
+                qi = await engine.send_command(f"AT+QIACT={cid}", timeout_sec=45.0)
+                actions.append({"cmd": f"AT+QIACT={cid}", "res": qi})
+                if not qi.get("ok"):
+                    reattach_errs.append(qi)
+
+            read_res = await engine.send_command("AT+CGDCONT?", timeout_sec=4.0)
+            contexts_parsed = _parse_cgdcont(read_res.get("lines", []))
+            primary = next((c for c in contexts_parsed if c.get("cid") == cid), None)
+
+            if not set_ok:
+                msg = "AT+CGDCONT did not complete successfully."
+            elif reattach_errs:
+                msg = (
+                    "APN saved (CGDCONT + mirror) but CGATT/QIACT reattachment did not complete successfully. "
+                    "Use Allow Data or retry reconnect."
+                )
+            elif body.reactivate:
+                msg = "APN updated (CGDCONT + Quectel QICSGP); packet data reattached (QIACT)."
+            elif did_ideact:
+                msg = (
+                    "APN stored; PDP context was deactivated to apply CGDCONT + QICSGP. "
+                    "Press Allow Data to reconnect with the new APN."
+                )
+            else:
+                msg = "APN stored (CGDCONT + QICSGP). Use Allow Data if you need an immediate reconnect."
+
+            md_parts = []
+            if not set_ok:
+                md_parts.append(describe_modem_send_result(cgd_set))
+            for rr in reattach_errs:
+                md_parts.append(describe_modem_send_result(rr))
+            modem_detail = combine_errors(*md_parts, sep=" | ")
+
+            apn_ok = bool(
+                set_ok
+                and (not body.reactivate or len(reatach_errs) == 0)
+            )
+            api_err_text = None if apn_ok else (modem_detail or "APN update failed.")
+
+            return {
+                "ok": apn_ok,
+                "error": api_err_text,
+                "modem_detail": modem_detail,
+                "apn": apn,
+                "cid": cid,
+                "pdp_type": pdp,
+                "primary_context": primary,
+                "cgdcont_contexts": contexts_parsed,
+                "reactivate_requested": bool(body.reactivate),
+                "did_pdp_detach": bool(did_ideact),
+                "message": msg,
+                "actions": actions,
+                "raw": {
+                    "cgatt_before": cgatt_before_res,
+                    "qiact_before": qiact_res,
+                    "cgdcont_read": read_res,
+                },
+            }
+        finally:
+            _resume_exclusive_modem_access(resume_kpi)
+
+
 @app.post("/api/network/data-gate")
 async def network_data_gate_set(body: DataGateBody) -> dict:
     if not body.inhibit:
@@ -4245,8 +4526,34 @@ async def network_data_gate_set(body: DataGateBody) -> dict:
         res_activate = await engine.send_command("AT+QIACT=1", timeout_sec=20.0)
         actions.append({"cmd": "AT+QIACT=1", "res": res_activate})
     after = await network_data_gate_get()
+
+    cmds_ok = True
+    md_parts: list[str | None] = []
+    for a in actions:
+        rr = a.get("res") or {}
+        if not rr.get("ok", False):
+            cmds_ok = False
+            md_parts.append(describe_modem_send_result(rr))
+    modem_detail = combine_errors(*md_parts, sep=" | ")
+
+    desired_inhibited = bool(body.inhibit)
+    achieved = bool(after.get("inhibited")) if desired_inhibited else not bool(after.get("inhibited"))
+    overall_ok = bool(cmds_ok and achieved)
+
+    err = None
+    if not overall_ok:
+        err = combine_errors(
+            "Data gate command(s) did not complete as expected." if not cmds_ok else "Data gate state mismatch after AT.",
+            modem_detail,
+            sep=" ",
+        )
+        if not err:
+            err = "Data gate update failed."
+
     return {
-        "ok": True,
+        "ok": overall_ok,
+        "error": err,
+        "modem_detail": modem_detail,
         "requested_inhibit": bool(body.inhibit),
         "before": before,
         "after": after,
@@ -4337,9 +4644,21 @@ async def network_locks_set(body: LockSetBody) -> dict:
         async with _desired_locks_lock:
             _desired_locks.update(normalized_requested)
 
+    modem_hints: list[str] = []
+    for k2, rr in set_results.items():
+        if isinstance(rr, dict) and not rr.get("ok"):
+            hint = describe_modem_send_result(rr)
+            if hint:
+                modem_hints.append(f"{k2}: {hint}")
+    modem_detail_l = " | ".join(modem_hints) if modem_hints else None
+    err_out = "; ".join(errors) if errors else None
+    if modem_detail_l:
+        err_out = combine_errors(err_out, modem_detail_l, sep=" — ")
+
     return {
         "ok": len(errors) == 0,
-        "error": "; ".join(errors) if errors else None,
+        "error": err_out if err_out else None,
+        "modem_detail": modem_detail_l,
         "set": set_results,
         "locks": locks,
         "desired_locks": normalized_requested if not errors else None,
@@ -4364,9 +4683,12 @@ async def tools_modem_reset() -> dict:
     # Give the modem a short grace period to detach/re-enumerate.
     await asyncio.sleep(1.5)
     status = await engine.status()
+    md_fail = describe_modem_send_result(cmd_res) if not accepted else None
+    fallback = f"Reset command rejected ({cmd_res.get('final', 'UNKNOWN')})"
     return {
         "ok": accepted,
-        "error": None if accepted else f"Reset command rejected ({cmd_res.get('final', 'UNKNOWN')})",
+        "error": None if accepted else (md_fail or fallback),
+        "modem_detail": md_fail,
         "cmd": cmd_res,
         "status": status,
     }
