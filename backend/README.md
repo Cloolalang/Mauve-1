@@ -1,8 +1,12 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 1.5** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.5.0**).
+**Version 1.6** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.6.0**).
 
-Notes for **v1.5**:
+Notes for **v1.6**:
+
+- **`GET /`**: Dashboard layout — compact **Serial Port** tile; **Access / Operator** includes **Registration Control (COPS)** inline; **Primary Cell** merges serving + RF + neighbour + dominance KPI rows; mobility card text trimmed.
+
+Notes for **v1.5** (historical):
 
 - Modem AT failures (**`+CME`/`+CMS`/generic ERROR/TIMEOUT**) are decoded in **`backend/app/at_modem_errors.py`** (**`+CME`** scanned across response lines); network endpoints include **`modem_detail`** plus clearer **`error`** strings. **`POST /api/network/data-gate`** returns accurate **`ok`** and **allow-data** retry path for **`AT+QIACT=1`**. **`POST /api/network/apn`** (**`reactivate`**) validates reattach (**CGATT**/**QIACT**); apn handler typo fix for **500** eliminated.
 - **Robustel** gateways: **modem mode** in the web UI → APN (**`AT+CGDCONT`**) → MNO, so the router stack does not override serial AT.
@@ -45,7 +49,7 @@ $env:MD_BAUDRATE="115200"
 
 Failures from the modem (**`+CME ERROR`**, **`ERROR`**, **TIMEOUT**, etc.) surface as **`ok: false`**, **`error`**, and often **`modem_detail`** on **`/api/network/*`**, **`/api/network/apn`**, **`/api/tools/modem-reset`**, etc. (decoded in **`app/at_modem_errors.py`**).
 
-- `GET /` **5G ModemTestDriver** KPI page (**v1.5** in browser tab title and main heading): Serial Port tools, modem reset, COPS + lock controls with runtime re-apply guard, roaming MNO selector [Vodafone/VMO2/EE/H3G/Auto], packet-data inhibit/allow controls, CA policy switch, NRDC switch, neighbour-cell KPI, intra-cell dominance KPI, **LTE carrier re-selection KPI + dual-trace chart** (PCell EARFCN vs PCI rates), Data Service KPI [APN/PDP/CID1/attach/registration/usbnet/netdev], SIM High-Level + PLMN Inspector, TX power KPI when reported, AT console, **iperf3** + **host ICMP ping sweep** (bind interfaces, trends, optional repeat every 15 s), VoLTE call test, clear-all charts, 60s–60m chart window, optional time-roll gap mode, `EARFCN/PCI` color mapping, RF threshold lines, optional RF smoothing, **RF chart hover tooltips** (value + EARFCN/PCI per sample on RSRP/RSRQ/SINR/RSSI/dominance charts)
+- `GET /` **5G ModemTestDriver** KPI page (**v1.6** in browser tab title and main heading): compact **Serial Port** tile; **Access / Operator** + **Registration Control (COPS)** combined; modem reset; lock controls + re-apply guard; roaming MNO [Vodafone/VMO2/EE/H3G/Auto]; data gate; CA/NRDC; **Primary Cell** (serving + RF + neighbour + dominance); **LTE carrier re-selection** KPI + dual-trace chart; Data Service KPI; SIM + PLMN; AT console; **iperf3** + ICMP sweep; VoLTE test; charts (window, gaps, thresholds, smoothing, hover tooltips)
 - `GET /api/serial/status`
 - `GET /api/serial/ports`
 - `POST /api/at/send`
@@ -69,8 +73,8 @@ Failures from the modem (**`+CME ERROR`**, **`ERROR`**, **TIMEOUT**, etc.) surfa
 - `GET /api/network/mno`
   - returns current COPS view plus named profiles (Vodafone/VMO2/EE/H3G/Auto)
 - `POST /api/network/mno`
-  - body example: `{ "profile": "vodafone", "cops_manual_registration": 4 }` (optional `1` or `4`; **1** = manual hold PLMN for roaming selection)
-  - manual PLMN for named profiles: `AT+COPS=<1|4>,2,"<PLMN>"`; profile **auto**: `AT+COPS=0`
+  - body example: `{ "profile": "vodafone", "cops_manual_registration": 4, "deregister_before_apply": true }` (**deregister_before_apply** default **true**: **`AT+COPS=2`** then manual PLMN; set **false** to skip)
+  - manual PLMN for named profiles: `AT+COPS=<1|4>,2,"<PLMN>"` (often preceded by `AT+COPS=2`); profile **auto**: `AT+COPS=0`
 - `GET /api/network/data-gate`
   - reads packet-data gate status (attach + active PDP contexts)
 - `POST /api/network/apn`

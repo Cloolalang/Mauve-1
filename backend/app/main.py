@@ -25,7 +25,7 @@ from app.sim_usim_services import (
     label_usim_service,
 )
 
-APP_VERSION = "1.5"
+APP_VERSION = "1.6"
 
 
 def _serial_state_file_path() -> str:
@@ -72,6 +72,19 @@ _desired_locks: dict[str, str] = {}
 _desired_locks_lock = asyncio.Lock()
 _lock_guard_paused: bool = False
 _modem_exclusive_lock = asyncio.Lock()
+
+
+def _exclusive_section_resume_kpi_snapshot() -> bool:
+    """
+    Whether to restart KPI after a modem exclusive section.
+    Uses poll_running and the live asyncio task: avoids missing resume when poll_running is briefly stale
+    (e.g. startup before kpi_poll_loop sets it) while a poll task is already scheduled.
+    """
+    global _kpi_task
+    if kpi_runtime.poll_running:
+        return True
+    t = _kpi_task
+    return t is not None and not t.done()
 
 
 async def _stop_kpi_poll_task_hard() -> None:
@@ -181,6 +194,10 @@ class MnoSelectBody(BaseModel):
     cops_manual_registration: int = Field(
         default=4,
         description="For named profiles: AT+COPS mode — 1 = manual (stay on selected PLMN); 4 = manual with automatic fallback (default). Ignored for profile=auto.",
+    )
+    deregister_before_apply: bool = Field(
+        default=True,
+        description="For named profiles: if True, send AT+COPS=2 (deregister from network) before manual PLMN selection so switches complete quickly on many routers/modems.",
     )
 
 
@@ -885,6 +902,18 @@ def _profile_key_from_cops_operator(operator: str | None) -> str | None:
     return None
 
 
+def _mno_label_for_numeric_plmn(plmn: str | None) -> str | None:
+    """Return profile label (e.g. EE) for a numeric PLMN like 23430, or None."""
+    p = str(plmn or "").strip()
+    if not p:
+        return None
+    for _name, cfg in MNO_PROFILES.items():
+        if str(cfg.get("plmn") or "") == p:
+            lab = cfg.get("label")
+            return str(lab).strip() if lab else None
+    return None
+
+
 def _parse_qspn(lines: list[str]) -> str | None:
     for raw in lines:
         if not raw.startswith("+QSPN:"):
@@ -1070,7 +1099,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="1.5.0",
+    version="1.6.0",
     lifespan=lifespan,
 )
 
@@ -1086,8 +1115,19 @@ async def home() -> HTMLResponse:
   <style>
     body { font-family: Arial, sans-serif; margin: 16px; background: #111; color: #f3f3f3; }
     h1 { margin: 0 0 12px 0; font-size: 22px; }
-    .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+    .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
     .card { border: 1px solid #333; border-radius: 10px; padding: 12px; background: #1b1b1b; }
+    .card-compact-tile {
+      align-self: start;
+      max-width: min(264px, 100%);
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      overflow-x: hidden;
+      overflow-y: auto;
+      padding: 10px;
+      box-sizing: border-box;
+    }
+    .card-compact-tile .row { margin-top: 6px; }
     .label { color: #9aa0a6; font-size: 12px; }
     .value { font-size: 20px; font-weight: 700; margin-top: 4px; }
     .row { display: flex; justify-content: space-between; margin-top: 8px; }
@@ -1126,7 +1166,7 @@ async def home() -> HTMLResponse:
   </div>
 
   <div class="grid" style="margin-top:12px;">
-    <div class="card">
+    <div class="card card-compact-tile">
       <div class="label">Serial Port</div>
       <div class="row"><span class="label">Current</span><span id="serial-current">-</span></div>
       <div class="row"><span class="label">Open</span><span id="serial-open">-</span></div>
@@ -1146,6 +1186,25 @@ async def home() -> HTMLResponse:
       <div class="row"><span class="label">Registration</span><span id="access-eps-scope">-</span></div>
       <div class="row"><span class="label">Modem FW</span><span id="modemfw">-</span></div>
       <div class="row"><span class="label">Updated</span><span id="updated">-</span></div>
+      <div class="label" style="margin-top:12px;">Registration Control (COPS)</div>
+      <div class="row"><span class="label">Mode</span><span id="copsmode">-</span></div>
+      <div class="row"><span class="label">COPS operator</span><span id="copsoperator">-</span></div>
+      <div class="row"><span class="label">AcT</span><span id="copsact">-</span></div>
+      <div style="margin-top:8px;">
+        <label style="display:flex; align-items:center; gap:8px;">
+          <input id="cops-scan-uk-only" type="checkbox" checked />
+          <span>UK-only scan bands (LTE+NR)</span>
+        </label>
+      </div>
+      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+        <button id="btn-cops-read">Read COPS</button>
+        <button id="btn-cops-scan">Scan Operators</button>
+        <button id="btn-cops-auto">Auto Register</button>
+        <button id="btn-cops-dereg">Deregister</button>
+      </div>
+      <div class="label" style="margin-top:8px;">Scan result</div>
+      <div id="copsscan" class="mono">-</div>
+      <div id="copsmsg" class="label" style="margin-top:8px;">-</div>
     </div>
 
     <div class="card">
@@ -1192,20 +1251,13 @@ async def home() -> HTMLResponse:
       <div class="row"><span class="label">DL/UL BW</span><span id="bwpair">-</span></div>
       <div class="row"><span class="label">EARFCN/PCI</span><span id="earfcnpci">-</span></div>
       <div class="row"><span class="label">Cell ID</span><span id="cellid">-</span></div>
-    </div>
-
-    <div class="card">
-      <div class="label">Primary Cell RF KPI</div>
+      <div class="label" style="margin-top:10px;">Primary cell RF KPI</div>
       <div class="row"><span class="label">RSRP</span><span id="rsrp">-</span></div>
       <div class="row"><span class="label">RSRQ</span><span id="rsrq">-</span></div>
       <div class="row"><span class="label">SINR (QSINR PRX)</span><span id="sinr">-</span></div>
       <div class="row"><span class="label">RSSI</span><span id="rssi">-</span></div>
-      <div class="row"><span class="label">TX Power</span><span id="txpwr">-</span></div>
       <div class="row"><span class="label">Primary cell intra-cell dominance</span><span id="dominance">-</span></div>
-    </div>
-
-    <div class="card">
-      <div class="label">Neighbour Cells RF KPI</div>
+      <div class="label" style="margin-top:10px;">Neighbour Cells RF KPI</div>
       <div class="row"><span class="label">1st strongest neighbour RSRP</span><span id="nrsrp1">-</span></div>
       <div class="row"><span class="label">1st strongest neighbour PCI</span><span id="npci1">-</span></div>
       <div class="row"><span class="label">1st strongest neighbour EARFCN (intra)</span><span id="nearfcn1">-</span></div>
@@ -1213,9 +1265,6 @@ async def home() -> HTMLResponse:
 
     <div class="card">
       <div class="label">Mobility · LTE carrier re-selection (camped and RRC connected)</div>
-      <div class="label" style="margin-top:4px; font-size:11px; max-width:42em;">
-        Rolling 60s counts from AT+QENG LTE PCell EARFCN/PCI changes between polls (includes NOCONN/camped and CONNECT handovers/reselections).
-      </div>
       <div class="row" style="margin-top:8px;"><span class="label">Intra-freq PCI re-selections / min</span><span id="idle-pci-rate">-</span></div>
       <div class="row"><span class="label">Primary EARFCN re-selections / min</span><span id="idle-earfcn-rate">-</span></div>
     </div>
@@ -1298,28 +1347,6 @@ async def home() -> HTMLResponse:
     </div>
 
     <div class="card">
-      <div class="label">Registration Control (COPS)</div>
-      <div class="row"><span class="label">Mode</span><span id="copsmode">-</span></div>
-      <div class="row"><span class="label">Operator</span><span id="copsoperator">-</span></div>
-      <div class="row"><span class="label">AcT</span><span id="copsact">-</span></div>
-      <div style="margin-top:8px;">
-        <label style="display:flex; align-items:center; gap:8px;">
-          <input id="cops-scan-uk-only" type="checkbox" checked />
-          <span>UK-only scan bands (LTE+NR)</span>
-        </label>
-      </div>
-      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
-        <button id="btn-cops-read">Read COPS</button>
-        <button id="btn-cops-scan">Scan Operators</button>
-        <button id="btn-cops-auto">Auto Register</button>
-        <button id="btn-cops-dereg">Deregister</button>
-      </div>
-      <div class="label" style="margin-top:8px;">Scan result</div>
-      <div id="copsscan" class="mono">-</div>
-      <div id="copsmsg" class="label" style="margin-top:8px;">-</div>
-    </div>
-
-    <div class="card">
       <div class="label">Roaming MNO + Data Gate</div>
       <div class="row"><span class="label">Selected profile</span><span id="mno-selected">-</span></div>
       <div class="row"><span class="label">Current PLMN</span><span id="mno-current-plmn">-</span></div>
@@ -1339,6 +1366,12 @@ async def home() -> HTMLResponse:
           <option value="4" selected>4 — Manual PLMN + automatic fallback</option>
           <option value="1">1 — Manual PLMN hold (often better when roaming)</option>
         </select>
+        <div style="margin-top:8px; display:flex; align-items:flex-start; gap:8px;">
+          <input id="mno-skip-dereg" type="checkbox" />
+          <span class="label" style="flex:1; font-size:11px;">
+            Skip pre-step deregister (AT+COPS=2). Leaving this unchecked sends deregister before manual PLMN — usually needed for fast, reliable switches.
+          </span>
+        </div>
       </div>
       <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
         <button id="btn-mno-read">Read MNO</button>
@@ -1591,15 +1624,6 @@ async def home() -> HTMLResponse:
       if (!Number.isFinite(n) || n < 0) return "-";
       if (n < 1000) return `${n.toFixed(1)} kbps`;
       return `${(n / 1000).toFixed(2)} Mbps`;
-    };
-    const fmtTxPower = (v) => {
-      if (v === null || v === undefined) return "-";
-      const n = Number(v);
-      if (!Number.isFinite(n)) return "-";
-      // Some firmware reports TX power in deci-dBm (e.g. 230 -> 23.0 dBm).
-      const dbm = Math.abs(n) > 70 ? n / 10 : n;
-      const shown = Math.abs(dbm % 1) < 0.05 ? dbm.toFixed(0) : dbm.toFixed(1);
-      return `${shown} dBm`;
     };
     const CELL_COLOR_PALETTE = [
       "#e6194b", // red
@@ -1919,7 +1943,6 @@ async def home() -> HTMLResponse:
       el("rsrq").textContent = fmt(lte.rsrq, " dB");
       el("sinr").textContent = fmt(qsinr.prx, " dB");
       el("rssi").textContent = fmt(lte.rssi, " dBm");
-      el("txpwr").textContent = fmtTxPower(lte.tx_power);
       const dominance = (lte.rsrp === null || lte.rsrp === undefined || nb.strongest_rsrp === null || nb.strongest_rsrp === undefined)
         ? null
         : Number(lte.rsrp) - Number(nb.strongest_rsrp);
@@ -2039,12 +2062,13 @@ async def home() -> HTMLResponse:
     async function applyMnoSelection() {
       const profile = String(el("mno-select").value || "auto");
       const cops_manual_registration = Number(el("mno-cops-mode")?.value || "4");
+      const deregister_before_apply = profile === "auto" ? true : !el("mno-skip-dereg")?.checked;
       try {
         el("mnomsg").textContent = `Applying ${profile.toUpperCase()}...`;
         const r = await fetch("/api/network/mno", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ profile, cops_manual_registration })
+          body: JSON.stringify({ profile, cops_manual_registration, deregister_before_apply })
         });
         const j = await r.json();
         if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "MNO apply failed"));
@@ -4183,7 +4207,7 @@ async def network_cops_set(body: CopsSetBody) -> dict:
 @app.get("/api/network/cops/scan")
 async def network_cops_scan(uk_only: bool = False) -> dict:
     # Operator scan monopolizes AT for ~35s; pause KPI + lock-guard so nothing else sends.
-    resume_kpi = bool(kpi_runtime.poll_running)
+    resume_kpi = _exclusive_section_resume_kpi_snapshot()
     original_lte_band: str | None = None
     original_nr_band: str | None = None
     nr_band_key_used: str | None = None
@@ -4310,13 +4334,14 @@ async def network_mno_set(body: MnoSelectBody) -> dict:
         )
 
     cfg = MNO_PROFILES[key]
-    resume_kpi = bool(kpi_runtime.poll_running)
+    resume_kpi = _exclusive_section_resume_kpi_snapshot()
     ok = False
     err: str | None = None
     set_res: dict = {}
     read_res: dict = {}
     cops: dict = {}
     recover_res: dict | None = None
+    dereg_res: dict | None = None
 
     async with _modem_exclusive_lock:
         await _pause_exclusive_modem_access()
@@ -4332,8 +4357,16 @@ async def network_mno_set(body: MnoSelectBody) -> dict:
                 plmn = str(cfg["plmn"])
                 cops_mode = int(body.cops_manual_registration)
                 # Mode 4: manual select with automatic fallback; mode 1: manual until loss (often better for roaming / non-steered SIM).
+                if body.deregister_before_apply:
+                    dereg_res = await engine.send_command("AT+COPS=2", timeout_sec=45.0)
+                    # Clear previous manual registration before new PLMN; required on many modems/router stacks.
+                    await asyncio.sleep(2.5)
 
-                set_res = await engine.send_command(f'AT+COPS={cops_mode},2,"{plmn}"', timeout_sec=180.0)
+                # Operator selection can legitimately exceed 3 minutes (poor RF, PLMN roaming).
+                cops_set_timeout = 360.0
+                set_res = await engine.send_command(
+                    f'AT+COPS={cops_mode},2,"{plmn}"', timeout_sec=cops_set_timeout
+                )
                 polled = await _poll_cops_state(total_wait_sec=75.0, step_sec=2.5)
                 read_res = polled["res"]
                 cops = polled["cops"]
@@ -4343,11 +4376,46 @@ async def network_mno_set(body: MnoSelectBody) -> dict:
                 err = None
                 recover_res = None
                 if not ok:
-                    err = (
-                        f"MNO select did not settle on {plmn} within timeout "
-                        f"(current={cops.get('operator') or '-'} mode={cops.get('mode') if cops else '-'}"
-                        f"{f' profile={current_profile}' if current_profile else ''})"
+                    want_label = str(cfg.get("label") or key)
+                    cop = cops.get("operator")
+                    cm = cops.get("mode") if cops else "-"
+                    cur_name = _mno_label_for_numeric_plmn(str(cop)) if cop else None
+                    tail_prof = f", profile≈{current_profile}" if current_profile else ""
+                    snap_tail = (
+                        f" Snapshot from follow-up polls: operator={cop or '-'}, COPS mode={cm}{tail_prof}."
                     )
+                    sr_ok = bool(set_res.get("ok"))
+                    fin_raw = str(set_res.get("final") or "").strip()
+                    fin_u = fin_raw.upper()
+                    if not sr_ok:
+                        # Distinguish command timeout/no OK from "registered on wrong PLMN".
+                        if fin_u == "TIMEOUT":
+                            err = (
+                                f"AT+COPS (manual PLMN {plmn}, mode={cops_mode}) did not return OK "
+                                "before the serial timeout (typically several minutes)."
+                                + snap_tail
+                                + " The modem may still be searching; retry with better RF, or firmware may need longer."
+                            )
+                        else:
+                            dm = describe_modem_send_result(set_res)
+                            err = (dm or "AT+COPS was rejected.") + snap_tail
+                    elif sr_ok and cop and not target_hit:
+                        got = f"{cop}" + (f" ({cur_name})" if cur_name else "") + tail_prof
+                        err = (
+                            f"Requested {want_label} (PLMN {plmn}); modem registered on {got} (COPS mode {cm}) before the wait ended. "
+                            "Try COPS mode 4 (manual + auto fallback), Auto, or relax RAT/band locks; "
+                            "the network or SIM may refuse that PLMN until coverage/steering allows it."
+                        )
+                    elif sr_ok and not cop:
+                        err = (
+                            f"{want_label} (PLMN {plmn}): AT+COPS OK but no operator in COPS? before timeout. "
+                            "Retry or check registration / flight mode."
+                        )
+                    else:
+                        err = (
+                            f"MNO select did not settle on {plmn} within poll window "
+                            f"(current={cop or '-'} mode={cm}{tail_prof})"
+                        )
                     # Auto-recover so user is not stranded in a de-registered state.
                     recover_res = await engine.send_command("AT+COPS=0", timeout_sec=120.0)
                     recovered = await _poll_cops_state(total_wait_sec=45.0, step_sec=2.0)
@@ -4358,9 +4426,14 @@ async def network_mno_set(body: MnoSelectBody) -> dict:
 
     md_set = describe_modem_send_result(set_res) if isinstance(set_res, dict) and not set_res.get("ok") else None
     md_rec = describe_modem_send_result(recover_res) if recover_res is not None and not recover_res.get("ok") else None
-    modem_detail = combine_errors(md_set, md_rec, sep=" | ")
+    md_dereg = describe_modem_send_result(dereg_res) if dereg_res is not None and not dereg_res.get("ok") else None
+    modem_detail = combine_errors(md_set, md_dereg, md_rec, sep=" | ")
+    # Avoid repeating the AT+COPS failure text: err usually already incorporates set_res semantics.
     if modem_detail:
-        err = combine_errors(err, modem_detail, sep=" — ") if err else modem_detail
+        if not err:
+            err = modem_detail
+        elif md_rec and md_rec.strip() not in err:
+            err = combine_errors(err, md_rec.strip(), sep=" — ")
 
     return {
         "ok": ok,
@@ -4371,7 +4444,14 @@ async def network_mno_set(body: MnoSelectBody) -> dict:
         "profile": {"label": cfg["label"], "plmn": cfg["plmn"]},
         "set": set_res,
         "cops": cops,
-        "raw": {"read": read_res, "recover_auto": recover_res},
+        "raw": {
+            "read": read_res,
+            "recover_auto": recover_res,
+            "deregister": dereg_res,
+        },
+        "deregister_before_apply_used": (
+            False if key == "auto" else bool(body.deregister_before_apply)
+        ),
     }
 
 
@@ -4402,7 +4482,7 @@ async def network_apn_set(body: ApnSetBody) -> dict:
     pdp = _normalize_cgdcont_pdp_type(body.pdp_type)
     cid = int(body.cid)
 
-    resume_kpi = bool(kpi_runtime.poll_running)
+    resume_kpi = _exclusive_section_resume_kpi_snapshot()
     actions: list[dict] = []
     reattach_errs: list[dict] = []
 

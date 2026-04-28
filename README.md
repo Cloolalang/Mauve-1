@@ -1,8 +1,12 @@
 # 5G ModemTestDriver
 
-**Version 1.5**
+**Version 1.6**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.5** is shown in the page header).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.6** is shown in the page header).
+
+**Changes in v1.6**
+
+- **`GET /` (KPI page)**: Layout cleanup — compact **Serial Port** tile only; **Access / Operator** card combines live operator/registration/fw summary with **Registration Control (COPS)** (read / scan / auto register / deregister); **Primary Cell** card groups identity, RF KPIs, intra-cell dominance, and **Neighbour Cells RF KPI** together; optional **TX power** line removed from UI; mobility card drops the verbose “rolling 60s…” explanatory paragraph (underlying KPI/API unchanged).
 
 **Changes in v1.5**
 
@@ -52,16 +56,15 @@ AT command catalog from current modem firmware:
 - Serves the live KPI page at `/` (**5G ModemTestDriver**) with:
   - Serial Port tools (refresh ports, auto-select likely Quectel AT port, reconnect, remembers last successful port)
   - Modem reset button (`AT+CFUN=1,1`) with auto-recovery attempts
-  - Registration control (`AT+COPS` auto/deregister)
-  - Operator scan (`AT+COPS=?`) with optional UK-only LTE+NR band scope
+  - Registration control (`AT+COPS` auto/deregister) and scan (`AT+COPS=?`, optional UK-only LTE+NR band scope), colocated under **Access / Operator**
   - Roaming MNO selector (Vodafone / VMO2 / EE / H3G / Auto) using manual PLMN selection
   - Data gate controls to inhibit/allow packet data (deactivate/activate PDP context)
   - RAT / band lock control (`AT+QNWPREFCFG` for mode, LTE bands, NR bands)
   - Runtime lock guard that re-applies desired RAT/band/NRDC settings if modem drifts
   - CA policy switch for LTE (single-band vs multi/all)
   - NRDC on/off switch
-  - Neighbour Cells RF KPI section (strongest intra-frequency neighbour RSRP + PCI + EARFCN)
-  - Mobility / LTE carrier re-selection KPI (PCell EARFCN vs intra-frequency PCI change rates, camped and RRC connected) with matching dual-trace chart
+  - Neighbour Cells RF KPI (strongest intra-frequency neighbour RSRP + PCI + EARFCN) under **Primary Cell**
+  - Mobility / LTE carrier re-selection KPI (PCell EARFCN vs intra-frequency PCI rates) with dual-trace chart
   - Data Service KPI section:
     - APN (live read plus **Set APN** form using `AT+CGDCONT`, same unlock password as Allow Data)
     - PDP contexts (active/total)
@@ -100,7 +103,6 @@ AT command catalog from current modem firmware:
   - Optional RF smoothing toggle (rolling average of last 10 samples) for RSRP/RSRQ/SINR/RSSI/dominance
   - **RF trend hover tooltips**: on the RSRP / RSRQ / SINR / RSSI / intra-cell dominance canvases, moving the pointer near a plotted sample shows a tooltip with the metric value and **EARFCN/PCI** for that sample (same cell key used for segment colouring).
   - Primary Cell bandwidth KPI (`DL/UL BW`)
-  - Primary Cell TX power KPI (`QENG` tail field, when reported by modem)
   - Primary cell intra-cell dominance KPI (`Primary RSRP - strongest intra-frequency neighbour RSRP` on serving EARFCN)
 - Exposes REST and WebSocket endpoints for control and integration
 
@@ -188,7 +190,7 @@ $env:MD_KPI_POLL_HZ="2.0"
 3. Optional UI checks:
    - In **Serial Port**, use **Refresh Ports** and **Auto-select AT Port**, then **Reconnect** after USB replug.
    - Use **Reset Modem** and allow up to ~90s for re-enumeration/recovery.
-   - Use **Read COPS / Auto Register / Deregister** in Registration Control.
+   - Under **Access / Operator**, use **Read COPS / Auto Register / Deregister**.
    - Use **Read Locks / Apply Locks** in RAT / Band Lock and confirm readback values.
    - If lock values drift during runtime, verify they are automatically re-applied by the lock guard.
    - Validate **CA policy** behavior: CA ON uses multi/all LTE bands, CA OFF uses a single LTE band.
@@ -281,8 +283,9 @@ Values are exposed in `GET /api/kpi/latest` under `sample.data_service`.
     - `Auto`
 
 - `POST /api/network/mno`
-  - body: `{ "profile": "vodafone|vmo2|ee|h3g|auto", "cops_manual_registration": 4 }` (optional second field, default **4**)
-  - Named UK PLMNs use `AT+COPS=<mode>,2,"<PLMN>"` with **mode 1** (manual, hold PLMN) or **mode 4** (manual with automatic fallback — previous default). Use **mode 1** when steering among UK networks on a roaming non-steered SIM; **`AT+COPS=0`** is used for **auto**.
+  - body: `{ "profile": "vodafone|vmo2|ee|h3g|auto", "cops_manual_registration": 4, "deregister_before_apply": true }` (defaults: **4**, **true**)
+  - Named UK PLMNs: by default sends **`AT+COPS=2`** (deregister), short pause, then **`AT+COPS=<mode>,2,"<PLMN>"`** — many modems need deregister before switching manual PLMN quickly. Set **`deregister_before_apply`: `false`** only if you intentionally skip that step.
+  - **`AT+COPS=<mode>,2,"…​"** with **mode 1** or **4**; use **mode 1** when steering among UK networks on a roaming non-steered SIM; **`AT+COPS=0`** for **auto**.
 
 - `GET /api/network/data-gate`
   - Reads packet-attach and active PDP state.
