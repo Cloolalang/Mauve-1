@@ -3,10 +3,78 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.serial_engine import SerialEngine
+
+# Rolling window for LTE serving-cell identity change counts (EARFCN/PCI deltas between polls).
+# Applies in camped / idle-style reporting and in RRC_CONNECTED (CONNECT) whenever AT+QENG exposes LTE PCell.
+CARRIER_RESEL_WINDOW_SEC = 60.0
+
+
+def _prune_ts_window(ts_deque: deque[float], now: float, window_sec: float) -> None:
+    cutoff = now - window_sec
+    while ts_deque and ts_deque[0] < cutoff:
+        ts_deque.popleft()
+
+
+@dataclass
+class CarrierReselTracker:
+    """Tracks LTE PCell EARFCN vs PCI changes between KPI polls (AT+QENG ``servingcell``)."""
+
+    earfcn_change_ts: deque[float] = field(default_factory=deque)
+    pci_intr_change_ts: deque[float] = field(default_factory=deque)
+    last_earfcn: int | None = None
+    last_pci: int | None = None
+
+
+def _carrier_reselection_step(
+    tracker: CarrierReselTracker,
+    serving: dict[str, Any] | None,
+    now: float,
+) -> dict[str, Any]:
+    """
+    Count identity transitions over a rolling window:
+    - Primary EARFCN change: LTE carrier frequency changed (inter-frequency / new anchor).
+    - Intra-frequency PCI change: same EARFCN, different PCI (reselection on same carrier).
+
+    Covers NOCONN/camped and CONNECT (RRC_Connected) snapshots; requires parseable LTE PCell identity.
+    """
+    _prune_ts_window(tracker.earfcn_change_ts, now, CARRIER_RESEL_WINDOW_SEC)
+    _prune_ts_window(tracker.pci_intr_change_ts, now, CARRIER_RESEL_WINDOW_SEC)
+
+    lte = serving.get("lte") if isinstance(serving, dict) else None
+    ear = lte.get("earfcn") if isinstance(lte, dict) else None
+    pci = lte.get("pcid") if isinstance(lte, dict) else None
+
+    def _ok_cell_id(v: Any) -> bool:
+        return isinstance(v, int) and not isinstance(v, bool)
+
+    if not _ok_cell_id(ear) or not _ok_cell_id(pci):
+        # Keep last_* across transient blanks (e.g. CONNECT layout quirks, NSA/NR gaps) so mobility
+        # still registers when identity returns; does not fabricate events this poll.
+        return {
+            "window_sec": int(CARRIER_RESEL_WINDOW_SEC),
+            "primary_earfcn_reselections_per_min": len(tracker.earfcn_change_ts),
+            "intra_freq_pci_reselections_per_min": len(tracker.pci_intr_change_ts),
+        }
+
+    if tracker.last_earfcn is not None and tracker.last_pci is not None:
+        if ear != tracker.last_earfcn:
+            tracker.earfcn_change_ts.append(now)
+        elif pci != tracker.last_pci:
+            tracker.pci_intr_change_ts.append(now)
+
+    tracker.last_earfcn = ear
+    tracker.last_pci = pci
+
+    return {
+        "window_sec": int(CARRIER_RESEL_WINDOW_SEC),
+        "primary_earfcn_reselections_per_min": len(tracker.earfcn_change_ts),
+        "intra_freq_pci_reselections_per_min": len(tracker.pci_intr_change_ts),
+    }
 
 
 def _parse_csv_payload(line: str) -> list[str]:
@@ -102,9 +170,9 @@ def _parse_four_path_metric(lines: list[str], prefix: str) -> dict[str, Any] | N
 
 def _parse_qeng_servingcell(lines: list[str]) -> dict[str, Any] | None:
     # Handle common shapes:
-    # 1) +QENG: "servingcell","NOCONN","LTE",...
-    # 2) +QENG: "servingcell","NOCONN"
-    #    +QENG: "LTE",...
+    # 1) +QENG: "servingcell","NOCONN"|"CONNECT"|…,"LTE",...
+    # 2) +QENG: "servingcell","NOCONN"|"CONNECT"
+    #    +QENG: "LTE",...   (PCell usually first; skip extra LTE lines = SCells)
     #    +QENG: "NR5G-NSA",...
     parsed: dict[str, Any] = {}
     joined = "\n".join(lines)
@@ -115,18 +183,25 @@ def _parse_qeng_servingcell(lines: list[str]) -> dict[str, Any] | None:
         if m.group(2):
             parsed["mode"] = m.group(2)
 
-    lte_line = None
+    lte_line_preferred: str | None = None
+    lte_line_fallback: str | None = None
     nsa_line = None
     sa_line = None
     for line in lines:
-        if line.startswith('+QENG: "servingcell"') and '"LTE"' in line:
-            lte_line = line
-        elif line.startswith('+QENG: "LTE"'):
-            lte_line = line
-        elif line.startswith('+QENG:"NR5G-NSA"') or line.startswith('+QENG: "NR5G-NSA"'):
+        raw = line.strip()
+        if not raw.startswith("+QENG:"):
+            continue
+        low = raw.lower()
+        if lte_line_preferred is None and "servingcell" in low and re.search(r'"LTE"', raw, re.I):
+            lte_line_preferred = line
+        elif lte_line_fallback is None and re.match(r"^\+QENG:\s*\"LTE\"", raw, re.I):
+            lte_line_fallback = line
+        elif raw.startswith('+QENG:"NR5G-NSA"') or raw.startswith('+QENG: "NR5G-NSA"'):
             nsa_line = line
         elif '"NR5G-SA"' in line:
             sa_line = line
+
+    lte_line = lte_line_preferred or lte_line_fallback
 
     if lte_line:
         payload = lte_line.split(":", 1)[1].strip()
@@ -134,10 +209,13 @@ def _parse_qeng_servingcell(lines: list[str]) -> dict[str, Any] | None:
         # Shape A: "servingcell",state,"LTE",is_tdd,...
         # Shape B: "LTE",is_tdd,...
         base = 0
-        if len(p) >= 4 and "servingcell" in p[0].lower():
+        if len(p) >= 4 and "servingcell" in (p[0] or "").lower():
             base = 2
-        # "LTE",is_tdd,MCC,MNC,cellID,PCID,earfcn,band,UL_bw,DL_bw,TAC,RSRP,RSRQ,RSSI,SINR,...
-        if len(p) >= (15 + base):
+        # "LTE",is_tdd,MCC,MNC,cellID,PCID,earfcn,band,UL_bw,DL_bw,<TAC/skipped>,RSRP,RSRQ,RSSI,SINR,...
+        # CONNECT responses sometimes omit trailing RF fields — always parse PCID/EARFCN when present.
+        min_full = 15 + base
+        min_id = 7 + base
+        if len(p) >= min_full:
             parsed["lte"] = {
                 "rat": p[0 + base],
                 "duplex": p[1 + base],
@@ -156,6 +234,24 @@ def _parse_qeng_servingcell(lines: list[str]) -> dict[str, Any] | None:
                 # Typical tail in many Quectel LTE QENG formats:
                 # ...,<RSRP>,<RSRQ>,<RSSI>,<SINR>,<CQI>,<TX_power>,<SRXLEV>
                 "tx_power": _safe_int(p[16 + base]) if len(p) > (16 + base) else None,
+            }
+        elif len(p) >= min_id:
+            parsed["lte"] = {
+                "rat": p[0 + base],
+                "duplex": p[1 + base] if len(p) > 1 + base else None,
+                "mcc": _safe_int(p[2 + base]) if len(p) > 2 + base else None,
+                "mnc": _safe_int(p[3 + base]) if len(p) > 3 + base else None,
+                "cell_id_hex": p[4 + base] if len(p) > 4 + base else None,
+                "pcid": _safe_int(p[5 + base]),
+                "earfcn": _safe_int(p[6 + base]),
+                "band": _safe_int(p[7 + base]) if len(p) > 7 + base else None,
+                "ul_bw": _decode_lte_bw_mhz(p[8 + base]) if len(p) > 8 + base else None,
+                "dl_bw": _decode_lte_bw_mhz(p[9 + base]) if len(p) > 9 + base else None,
+                "rsrp": _safe_int(p[11 + base]) if len(p) > 11 + base else None,
+                "rsrq": _safe_int(p[12 + base]) if len(p) > 12 + base else None,
+                "rssi": _safe_int(p[13 + base]) if len(p) > 13 + base else None,
+                "sinr_raw": _safe_int(p[14 + base]) if len(p) > 14 + base else None,
+                "tx_power": _safe_int(p[16 + base]) if len(p) > 16 + base else None,
             }
 
     if nsa_line:
@@ -261,23 +357,53 @@ def _parse_cereg(lines: list[str]) -> dict[str, Any] | None:
     return None
 
 
+_QIACT_LINE_RE = re.compile(
+    # Quectel: +QIACT: <cid>,<context_state>,<IP_version>,<address>
+    # context_state: 0=deactivated, 1=activated
+    # IP_version: 1=IPv4, 2=IPv6, 3=IPv4v6 (do NOT use this field as "active")
+    r'\+QIACT:\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*"([^"]*)"',
+    re.IGNORECASE,
+)
+
+
 def _parse_qiact(lines: list[str]) -> list[dict[str, Any]]:
+    """Parse AT+QIACT? lines. Activation is field 2; field 3 is IP version (IPv4/IPv6/v6v4)."""
     out: list[dict[str, Any]] = []
     for raw in lines:
         if not raw.startswith("+QIACT:"):
             continue
+        m = _QIACT_LINE_RE.search(raw)
+        if m:
+            cid = _safe_int(m.group(1))
+            ctx_state = _safe_int(m.group(2))
+            ip_ver = _safe_int(m.group(3))
+            addr = (m.group(4) or "").strip() or None
+            if cid is None:
+                continue
+            out.append(
+                {
+                    "cid": cid,
+                    "active": ctx_state == 1,
+                    "ip_version": ip_ver,
+                    "ip": addr,
+                }
+            )
+            continue
+        # Fallback: comma-split (IPv4-only lines without commas inside quotes).
         payload = raw.split(":", 1)[1].strip()
         parts = _parse_csv_payload(payload)
         if len(parts) < 4:
             continue
         cid = _safe_int(parts[0])
-        state = _safe_int(parts[2])
+        ctx_state = _safe_int(parts[1])
+        ip_ver = _safe_int(parts[2])
         if cid is None:
             continue
         out.append(
             {
                 "cid": cid,
-                "active": state == 1,
+                "active": ctx_state == 1,
+                "ip_version": ip_ver,
                 "ip": parts[3] or None,
             }
         )
@@ -349,130 +475,153 @@ class KpiRuntime:
     modem_fw_at: float = 0.0
     data_service: dict[str, Any] = field(default_factory=dict)
     data_service_at: float = 0.0
+    carrier_resel: CarrierReselTracker = field(default_factory=CarrierReselTracker)
 
 
 async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
     runtime.poll_running = True
-    while runtime.poll_running:
-        started = time.time()
-        try:
-            now = time.time()
-            need_fw = (now - runtime.modem_fw_at) > 60.0 or not runtime.modem_fw
-            if need_fw:
-                cgmr = await engine.send_command("AT+CGMR", timeout_sec=2.0)
-                fw = _parse_cgmr(cgmr.get("lines", []))
-                if fw:
-                    runtime.modem_fw = fw
-                runtime.modem_fw_at = now
+    try:
+        while runtime.poll_running:
+            started = time.time()
+            try:
+                now = time.time()
+                need_fw = (now - runtime.modem_fw_at) > 60.0 or not runtime.modem_fw
+                if need_fw:
+                    cgmr = await engine.send_command("AT+CGMR", timeout_sec=2.0)
+                    fw = _parse_cgmr(cgmr.get("lines", []))
+                    if fw:
+                        runtime.modem_fw = fw
+                    runtime.modem_fw_at = now
 
-            qeng = await engine.send_command('AT+QENG="servingcell"', timeout_sec=2.0)
-            qnwinfo = await engine.send_command("AT+QNWINFO", timeout_sec=1.5)
-            net = _parse_qnwinfo(qnwinfo.get("lines", []))
-            in_service = bool(
-                net
-                and str(net.get("service", "")).upper() != "NO SERVICE"
-                and str(net.get("act", "")).upper() not in ("", "NONE")
-            )
+                qeng = await engine.send_command('AT+QENG="servingcell"', timeout_sec=2.0)
+                qnwinfo = await engine.send_command("AT+QNWINFO", timeout_sec=1.5)
+                net = _parse_qnwinfo(qnwinfo.get("lines", []))
+                in_service = bool(
+                    net
+                    and str(net.get("service", "")).upper() != "NO SERVICE"
+                    and str(net.get("act", "")).upper() not in ("", "NONE")
+                )
 
-            if in_service:
-                qrsrp = await engine.send_command("AT+QRSRP", timeout_sec=1.5)
-                qrsrq = await engine.send_command("AT+QRSRQ", timeout_sec=1.5)
-                qsinr = await engine.send_command("AT+QSINR", timeout_sec=1.5)
-                qeng_nb = await engine.send_command('AT+QENG="neighbourcell"', timeout_sec=2.0)
-            else:
-                # Avoid command spam/errors when modem is deregistered/no-service.
-                qrsrp = {"ok": False, "command": "AT+QRSRP", "final": "SKIPPED_NO_SERVICE", "lines": []}
-                qrsrq = {"ok": False, "command": "AT+QRSRQ", "final": "SKIPPED_NO_SERVICE", "lines": []}
-                qsinr = {"ok": False, "command": "AT+QSINR", "final": "SKIPPED_NO_SERVICE", "lines": []}
-                qeng_nb = {"ok": False, "command": 'AT+QENG="neighbourcell"', "final": "SKIPPED_NO_SERVICE", "lines": []}
+                if in_service:
+                    qrsrp = await engine.send_command("AT+QRSRP", timeout_sec=1.5)
+                    qrsrq = await engine.send_command("AT+QRSRQ", timeout_sec=1.5)
+                    qsinr = await engine.send_command("AT+QSINR", timeout_sec=1.5)
+                    qeng_nb = await engine.send_command('AT+QENG="neighbourcell"', timeout_sec=2.0)
+                else:
+                    # Avoid command spam/errors when modem is deregistered/no-service.
+                    qrsrp = {"ok": False, "command": "AT+QRSRP", "final": "SKIPPED_NO_SERVICE", "lines": []}
+                    qrsrq = {"ok": False, "command": "AT+QRSRQ", "final": "SKIPPED_NO_SERVICE", "lines": []}
+                    qsinr = {"ok": False, "command": "AT+QSINR", "final": "SKIPPED_NO_SERVICE", "lines": []}
+                    qeng_nb = {"ok": False, "command": 'AT+QENG="neighbourcell"', "final": "SKIPPED_NO_SERVICE", "lines": []}
 
-            refresh_ds = (now - runtime.data_service_at) > 5.0 or not runtime.data_service
+                refresh_ds = (now - runtime.data_service_at) > 5.0 or not runtime.data_service
 
-            if refresh_ds:
-                cgatt = await engine.send_command("AT+CGATT?", timeout_sec=1.5)
-                cereg = await engine.send_command("AT+CEREG?", timeout_sec=1.5)
-                cgdcont = await engine.send_command("AT+CGDCONT?", timeout_sec=2.0)
-                qiact = await engine.send_command("AT+QIACT?", timeout_sec=2.0)
-                qcfg_usbnet = await engine.send_command('AT+QCFG="usbnet"', timeout_sec=2.0)
-                qnetdev = await engine.send_command("AT+QNETDEVSTATUS?", timeout_sec=2.0)
+                if refresh_ds:
+                    cgatt = await engine.send_command("AT+CGATT?", timeout_sec=1.5)
+                    cereg = await engine.send_command("AT+CEREG?", timeout_sec=1.5)
+                    cgdcont = await engine.send_command("AT+CGDCONT?", timeout_sec=2.0)
+                    qiact = await engine.send_command("AT+QIACT?", timeout_sec=2.0)
+                    qcfg_usbnet = await engine.send_command('AT+QCFG="usbnet"', timeout_sec=2.0)
+                    qnetdev = await engine.send_command("AT+QNETDEVSTATUS?", timeout_sec=2.0)
 
-                cgatt_v = _parse_cgatt(cgatt.get("lines", []))
-                cereg_v = _parse_cereg(cereg.get("lines", [])) or {}
-                contexts = _parse_cgdcont(cgdcont.get("lines", []))
-                active = _parse_qiact(qiact.get("lines", []))
-                usbnet_mode = _parse_qcfg_usbnet(qcfg_usbnet.get("lines", []))
-                qnetdev_status = _parse_qnetdevstatus(qnetdev.get("lines", []))
-                active_by_cid = {x.get("cid"): x for x in active if isinstance(x.get("cid"), int)}
-                primary_ctx = next((c for c in contexts if c.get("cid") == 1), contexts[0] if contexts else {})
-                cid1 = active_by_cid.get(1) or {}
+                    cgatt_v = _parse_cgatt(cgatt.get("lines", []))
+                    cereg_v = _parse_cereg(cereg.get("lines", [])) or {}
+                    contexts = _parse_cgdcont(cgdcont.get("lines", []))
+                    active = _parse_qiact(qiact.get("lines", []))
+                    usbnet_mode = _parse_qcfg_usbnet(qcfg_usbnet.get("lines", []))
+                    qnetdev_status = _parse_qnetdevstatus(qnetdev.get("lines", []))
+                    active_by_cid = {x.get("cid"): x for x in active if isinstance(x.get("cid"), int)}
+                    primary_ctx = next((c for c in contexts if c.get("cid") == 1), contexts[0] if contexts else {})
+                    cid1 = active_by_cid.get(1) or {}
 
-                runtime.data_service = {
-                    "apn": primary_ctx.get("apn"),
-                    "pdp_type": primary_ctx.get("pdp_type"),
-                    "pdp_contexts": len(contexts),
-                    "active_pdp_contexts": sum(1 for x in active if x.get("active")),
-                    "packet_attached": cgatt_v == 1 if cgatt_v is not None else None,
-                    "eps_reg_stat": cereg_v.get("stat"),
-                    "eps_registered": cereg_v.get("stat") in (1, 5) if cereg_v.get("stat") is not None else None,
-                    "cid1_active": cid1.get("active"),
-                    "cid1_ip": cid1.get("ip"),
-                    "usbnet_mode": usbnet_mode,
-                    "usbnet_mode_label": _usbnet_mode_label(usbnet_mode),
-                    "qnetdev_status": qnetdev_status,
-                }
-                runtime.data_service_at = now
+                    _creg_stat = cereg_v.get("stat")
+                    # 3GPP TS 27.007 +CEREG stat: 1=home, 5=roaming (when registered on EPS).
+                    _eps_scope: str | None = (
+                        "roaming"
+                        if _creg_stat == 5
+                        else "home"
+                        if _creg_stat == 1
+                        else None
+                    )
+                    runtime.data_service = {
+                        "apn": primary_ctx.get("apn"),
+                        "pdp_type": primary_ctx.get("pdp_type"),
+                        "pdp_contexts": len(contexts),
+                        "active_pdp_contexts": sum(1 for x in active if x.get("active")),
+                        "packet_attached": cgatt_v == 1 if cgatt_v is not None else None,
+                        "eps_reg_stat": _creg_stat,
+                        "eps_registered": _creg_stat in (1, 5) if _creg_stat is not None else None,
+                        "eps_roaming": True if _creg_stat == 5 else False if _creg_stat == 1 else None,
+                        "eps_reg_scope": _eps_scope,
+                        "cid1_active": cid1.get("active"),
+                        "cid1_ip": cid1.get("ip"),
+                        "usbnet_mode": usbnet_mode,
+                        "usbnet_mode_label": _usbnet_mode_label(usbnet_mode),
+                        "qnetdev_status": qnetdev_status,
+                    }
+                    runtime.data_service_at = now
 
-            serving = _parse_qeng_servingcell(qeng.get("lines", []))
-            serving_pci = None
-            serving_earfcn = None
-            if isinstance(serving, dict):
-                lte = serving.get("lte")
-                if isinstance(lte, dict):
-                    serving_pci = lte.get("pcid")
-                    serving_earfcn = lte.get("earfcn")
+                serving = _parse_qeng_servingcell(qeng.get("lines", []))
+                serving_pci = None
+                serving_earfcn = None
+                if isinstance(serving, dict):
+                    lte = serving.get("lte")
+                    if isinstance(lte, dict):
+                        serving_pci = lte.get("pcid")
+                        serving_earfcn = lte.get("earfcn")
 
-            parsed = {
-                "sample_ts": time.time(),
-                "servingcell": serving,
-                "network": net,
-                "modem": {
-                    "firmware": runtime.modem_fw,
-                    "firmware_updated_at": runtime.modem_fw_at or None,
-                },
-                "data_service": runtime.data_service,
-                "qrsrp": _parse_four_path_metric(qrsrp.get("lines", []), "+QRSRP:"),
-                "qrsrq": _parse_four_path_metric(qrsrq.get("lines", []), "+QRSRQ:"),
-                "qsinr": _parse_four_path_metric(qsinr.get("lines", []), "+QSINR:"),
-                "neighbour": {
-                    **(
-                        (lambda n: {"strongest_rsrp": n["rsrp"], "strongest_pci": n["pci"], "strongest_earfcn": n.get("earfcn")})(n)
-                        if (
-                            n := _parse_qeng_strongest_neighbour(
-                                qeng_nb.get("lines", []), serving_pci=serving_pci, serving_earfcn=serving_earfcn
+                sample_ts = time.time()
+                carrier_resel = _carrier_reselection_step(
+                    runtime.carrier_resel,
+                    serving if isinstance(serving, dict) else None,
+                    sample_ts,
+                )
+
+                parsed = {
+                    "sample_ts": sample_ts,
+                    "servingcell": serving,
+                    "network": net,
+                    "modem": {
+                        "firmware": runtime.modem_fw,
+                        "firmware_updated_at": runtime.modem_fw_at or None,
+                    },
+                    "data_service": runtime.data_service,
+                    "qrsrp": _parse_four_path_metric(qrsrp.get("lines", []), "+QRSRP:"),
+                    "qrsrq": _parse_four_path_metric(qrsrq.get("lines", []), "+QRSRQ:"),
+                    "qsinr": _parse_four_path_metric(qsinr.get("lines", []), "+QSINR:"),
+                    "neighbour": {
+                        **(
+                            (lambda n: {"strongest_rsrp": n["rsrp"], "strongest_pci": n["pci"], "strongest_earfcn": n.get("earfcn")})(n)
+                            if (
+                                n := _parse_qeng_strongest_neighbour(
+                                    qeng_nb.get("lines", []), serving_pci=serving_pci, serving_earfcn=serving_earfcn
+                                )
                             )
-                        )
-                        else {"strongest_rsrp": None, "strongest_pci": None, "strongest_earfcn": None}
-                    ),
-                },
-                "raw": {
-                    "cgmr": cgmr if need_fw else None,
-                    "qeng": qeng,
-                    "qeng_neighbourcell": qeng_nb,
-                    "qnwinfo": qnwinfo,
-                    "qrsrp": qrsrp,
-                    "qrsrq": qrsrq,
-                    "qsinr": qsinr,
-                },
-            }
-            async with runtime.lock:
-                runtime.snapshot = parsed
-                runtime.last_error = None
-        except Exception as exc:  # noqa: BLE001
-            async with runtime.lock:
-                runtime.last_error = str(exc)
+                            else {"strongest_rsrp": None, "strongest_pci": None, "strongest_earfcn": None}
+                        ),
+                    },
+                    "carrier_reselection": carrier_resel,
+                    "raw": {
+                        "cgmr": cgmr if need_fw else None,
+                        "qeng": qeng,
+                        "qeng_neighbourcell": qeng_nb,
+                        "qnwinfo": qnwinfo,
+                        "qrsrp": qrsrp,
+                        "qrsrq": qrsrq,
+                        "qsinr": qsinr,
+                    },
+                }
+                async with runtime.lock:
+                    runtime.snapshot = parsed
+                    runtime.last_error = None
+            except Exception as exc:  # noqa: BLE001
+                async with runtime.lock:
+                    runtime.last_error = str(exc)
 
-        elapsed = time.time() - started
-        interval = max(0.2, 1.0 / max(0.1, runtime.poll_hz))
-        wait_sec = max(0.0, interval - elapsed)
-        await asyncio.sleep(wait_sec)
+            elapsed = time.time() - started
+            interval = max(0.2, 1.0 / max(0.1, runtime.poll_hz))
+            wait_sec = max(0.0, interval - elapsed)
+            await asyncio.sleep(wait_sec)
+    finally:
+        runtime.poll_running = False
 

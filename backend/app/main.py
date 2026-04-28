@@ -18,8 +18,13 @@ from serial.tools import list_ports
 
 from app.kpi_service import KpiRuntime, kpi_poll_loop
 from app.serial_engine import SerialEngine
+from app.sim_usim_services import (
+    SIM_EF_DESCRIPTIONS,
+    SIM_INSPECTOR_LABEL_REFERENCE,
+    label_usim_service,
+)
 
-APP_VERSION = "1.0"
+APP_VERSION = "1.3"
 
 
 def _serial_state_file_path() -> str:
@@ -64,6 +69,40 @@ ws_clients: list[WebSocket] = []
 _instance_lock_file = None
 _desired_locks: dict[str, str] = {}
 _desired_locks_lock = asyncio.Lock()
+_lock_guard_paused: bool = False
+_modem_exclusive_lock = asyncio.Lock()
+
+
+async def _stop_kpi_poll_task_hard() -> None:
+    """Clear KPI polling and wait for the poll task to exit (no overlapping AT)."""
+    global _kpi_task
+    kpi_runtime.poll_running = False
+    t = _kpi_task
+    if t is not None and not t.done():
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+    _kpi_task = None
+
+
+async def _pause_exclusive_modem_access() -> None:
+    """Pause lock-guard AT traffic and stop KPI poll task until resume."""
+    global _lock_guard_paused
+    _lock_guard_paused = True
+    await _stop_kpi_poll_task_hard()
+
+
+def _resume_exclusive_modem_access(resume_kpi: bool) -> None:
+    """Allow lock guard and optionally restart KPI polling."""
+    global _lock_guard_paused, _kpi_task
+    _lock_guard_paused = False
+    if not resume_kpi:
+        return
+    kpi_runtime.poll_running = True
+    if _kpi_task is None or _kpi_task.done():
+        _kpi_task = asyncio.create_task(kpi_poll_loop(engine, kpi_runtime))
 
 
 def _lock_file_path() -> str:
@@ -150,12 +189,6 @@ class LockSetBody(BaseModel):
     lte_band: str | None = Field(default=None, description='QNWPREFCFG lte_band string')
     nr5g_band: str | None = Field(default=None, description='QNWPREFCFG nr5g_band or nsa_nr5g_band string')
     nrdc_mode: int | None = Field(default=None, description='QNWPREFCFG nrdc_mode (0=off,1=on)')
-
-
-class PciLockSetBody(BaseModel):
-    lock: bool = Field(description="True=lock, False=unlock")
-    earfcn: int | None = Field(default=None, ge=0)
-    pci: int | None = Field(default=None, ge=0)
 
 
 class VolteTestBody(BaseModel):
@@ -686,6 +719,8 @@ async def _apply_lock_requests(requested: dict[str, str]) -> dict[str, dict]:
 async def _lock_guard_loop() -> None:
     while True:
         await asyncio.sleep(12.0)
+        if _lock_guard_paused:
+            continue
         async with _desired_locks_lock:
             wanted = dict(_desired_locks)
         if not wanted:
@@ -702,37 +737,6 @@ async def _lock_guard_loop() -> None:
         except Exception:
             # Non-fatal: guard should keep trying.
             continue
-
-
-def _parse_qnwlock_common4g(lines: list[str]) -> dict | None:
-    for raw in lines:
-        if not raw.startswith("+QNWLOCK:"):
-            continue
-        payload = raw.split(":", 1)[1].strip()
-        parts = [p.strip().strip('"') for p in payload.split(",")]
-        if len(parts) < 4:
-            continue
-        if parts[0].lower() != "common/4g":
-            continue
-        try:
-            mode = int(parts[1])
-        except Exception:  # noqa: BLE001
-            mode = None
-        try:
-            earfcn = int(parts[2])
-        except Exception:  # noqa: BLE001
-            earfcn = None
-        try:
-            pci = int(parts[3])
-        except Exception:  # noqa: BLE001
-            pci = None
-        return {
-            "mode": mode,
-            "earfcn": earfcn,
-            "pci": pci,
-            "locked": mode == 1,
-        }
-    return None
 
 
 def _parse_cgatt_attached(lines: list[str]) -> bool | None:
@@ -1019,7 +1023,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="0.2.0",
+    version="1.3.0",
     lifespan=lifespan,
 )
 
@@ -1092,6 +1096,7 @@ async def home() -> HTMLResponse:
     <div class="card">
       <div class="label">Access / Operator</div>
       <div class="row"><span class="label">Operator</span><span id="operator">-</span></div>
+      <div class="row"><span class="label">Registration</span><span id="access-eps-scope">-</span></div>
       <div class="row"><span class="label">Modem FW</span><span id="modemfw">-</span></div>
       <div class="row"><span class="label">Updated</span><span id="updated">-</span></div>
     </div>
@@ -1134,6 +1139,15 @@ async def home() -> HTMLResponse:
       <div class="row"><span class="label">1st strongest neighbour RSRP</span><span id="nrsrp1">-</span></div>
       <div class="row"><span class="label">1st strongest neighbour PCI</span><span id="npci1">-</span></div>
       <div class="row"><span class="label">1st strongest neighbour EARFCN (intra)</span><span id="nearfcn1">-</span></div>
+    </div>
+
+    <div class="card">
+      <div class="label">Mobility · LTE carrier re-selection (camped and RRC connected)</div>
+      <div class="label" style="margin-top:4px; font-size:11px; max-width:42em;">
+        Rolling 60s counts from AT+QENG LTE PCell EARFCN/PCI changes between polls (includes NOCONN/camped and CONNECT handovers/reselections).
+      </div>
+      <div class="row" style="margin-top:8px;"><span class="label">Intra-freq PCI re-selections / min</span><span id="idle-pci-rate">-</span></div>
+      <div class="row"><span class="label">Primary EARFCN re-selections / min</span><span id="idle-earfcn-rate">-</span></div>
     </div>
 
     <div class="card">
@@ -1199,6 +1213,12 @@ async def home() -> HTMLResponse:
     <div class="card">
       <div class="label">Neighbour PCI Trend</div>
       <canvas id="nbpcichart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Carrier re-selection rate — LTE PCell (camped and connected, /min)</div>
+      <canvas id="carrier-resel-chart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
@@ -1316,27 +1336,6 @@ async def home() -> HTMLResponse:
     </div>
 
     <div class="card">
-      <div class="label">PCI Lock (QNWLOCK common/4g)</div>
-      <div class="row"><span class="label">Lock state</span><span id="pcilock-state">-</span></div>
-      <div class="row"><span class="label">Locked EARFCN/PCI</span><span id="pcilock-pair">-</span></div>
-      <div style="margin-top:8px;">
-        <div class="label">EARFCN:</div>
-        <input id="input-pcilock-earfcn" placeholder="6300" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
-      </div>
-      <div style="margin-top:8px;">
-        <div class="label">PCI:</div>
-        <input id="input-pcilock-pci" placeholder="106" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
-      </div>
-      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
-        <button id="btn-pcilock-read">Read PCI Lock</button>
-        <button id="btn-pcilock-lock-current">Lock Current Cell</button>
-        <button id="btn-pcilock-lock-input">Lock Input</button>
-        <button id="btn-pcilock-unlock">Unlock</button>
-      </div>
-      <div id="pcilock-msg" class="label" style="margin-top:8px;">-</div>
-    </div>
-
-    <div class="card">
       <div class="label">SIM High-Level + PLMN Inspector</div>
       <div class="row"><span class="label">IMEI</span><span id="sim-imei">-</span></div>
       <div class="row"><span class="label">IMSI</span><span id="sim-imsi">-</span></div>
@@ -1348,7 +1347,7 @@ async def home() -> HTMLResponse:
         <button id="btn-sim-inspect-read">Read SIM Inspector</button>
       </div>
       <div id="simmsg" class="label" style="margin-top:8px;">-</div>
-      <pre id="siminspect" class="mono" style="max-height:180px; overflow:auto; margin-top:8px;">-</pre>
+      <pre id="siminspect" class="mono" style="max-height:420px; overflow:auto; margin-top:8px;">-</pre>
     </div>
 
     <div class="card">
@@ -1577,6 +1576,8 @@ async def home() -> HTMLResponse:
     const bwHistory = [];
     const pciHistory = [];
     const neighbourHistory = { rsrp: [], pci: [] };
+    const carrierReselPciHistory = [];
+    const carrierReselEarfcnHistory = [];
     const categoryHistory = { state: [], band: [] };
     let chartWindowMs = 60 * 1000;
     const RF_SMOOTH_WINDOW = 10;
@@ -1585,6 +1586,15 @@ async def home() -> HTMLResponse:
     let currentPollHz = 2.0;
     let primaryCellDataAvailable = false;
     let lastTrendSampleTs = null;
+    let rfChartTooltipEl = null;
+    const RF_HOVER_CANVAS_IDS = ["rsrpchart", "rsrqchart", "sinrchart", "rssichart", "dominancechart"];
+    const RF_CHART_TITLE_BY_ID = {
+      rsrpchart: "RSRP",
+      rsrqchart: "RSRQ",
+      sinrchart: "SINR",
+      rssichart: "RSSI",
+      dominancechart: "Intra-cell dominance"
+    };
     const copsModeName = (m) => {
       if (m === 0) return "0 (Auto)";
       if (m === 1) return "1 (Manual)";
@@ -1624,6 +1634,8 @@ async def home() -> HTMLResponse:
       pruneHistoryByAge(bwHistory, nowMs);
       pruneHistoryByAge(pciHistory, nowMs);
       Object.values(neighbourHistory).forEach((h) => pruneHistoryByAge(h, nowMs));
+      pruneHistoryByAge(carrierReselPciHistory, nowMs);
+      pruneHistoryByAge(carrierReselEarfcnHistory, nowMs);
       Object.values(categoryHistory).forEach((h) => pruneHistoryByAge(h, nowMs));
     }
 
@@ -1652,6 +1664,7 @@ async def home() -> HTMLResponse:
       drawBwChart();
       drawPciChart();
       drawNeighbourCharts();
+      drawCarrierReselChart();
       drawCategoryCharts();
     }
 
@@ -1704,12 +1717,34 @@ async def home() -> HTMLResponse:
       const qrsrq = sample.qrsrq || {};
       const qsinr = sample.qsinr || {};
       const nb = sample.neighbour || {};
+      const idleMob = sample.carrier_reselection || {};
       const inService =
         String(net.service || "").toUpperCase() !== "NO SERVICE" &&
         !!net.act &&
         String(net.act).toUpperCase() !== "NONE";
 
       el("operator").textContent = formatOperatorName(net.operator);
+
+      const epsScope = ds.eps_reg_scope;
+      const epsStat = ds.eps_reg_stat;
+      const epsTip =
+        "EPS registration from AT+CEREG (3GPP: stat 1 = home PLMN, 5 = roaming). Refreshes with Data Service KPI (~5s).";
+      const scopeEl = el("access-eps-scope");
+      scopeEl.title = epsTip;
+      if (epsScope === "home") {
+        scopeEl.textContent = "Home network";
+        scopeEl.className = "ok";
+      } else if (epsScope === "roaming") {
+        scopeEl.textContent = "Roaming";
+        scopeEl.className = "warn";
+      } else if (epsStat !== null && epsStat !== undefined && `${epsStat}`.length) {
+        scopeEl.textContent = `Not home/roaming (${epsStat})`;
+        scopeEl.className = "";
+      } else {
+        scopeEl.textContent = "-";
+        scopeEl.className = "";
+      }
+
       el("band").textContent = net.band || "-";
       el("modemfw").textContent = modem.firmware || "-";
       el("ds-apn").textContent = ds.apn || "-";
@@ -1779,6 +1814,16 @@ async def home() -> HTMLResponse:
       el("nrsrp1").textContent = fmt(nb.strongest_rsrp, " dBm");
       el("npci1").textContent = fmt(nb.strongest_pci);
       el("nearfcn1").textContent = fmt(nb.strongest_earfcn);
+      if (idleMob.intra_freq_pci_reselections_per_min === undefined || idleMob.intra_freq_pci_reselections_per_min === null) {
+        el("idle-pci-rate").textContent = "-";
+      } else {
+        el("idle-pci-rate").textContent = String(idleMob.intra_freq_pci_reselections_per_min);
+      }
+      if (idleMob.primary_earfcn_reselections_per_min === undefined || idleMob.primary_earfcn_reselections_per_min === null) {
+        el("idle-earfcn-rate").textContent = "-";
+      } else {
+        el("idle-earfcn-rate").textContent = String(idleMob.primary_earfcn_reselections_per_min);
+      }
       el("rsrq").textContent = fmt(lte.rsrq, " dB");
       el("sinr").textContent = fmt(qsinr.prx, " dB");
       el("rssi").textContent = fmt(lte.rssi, " dBm");
@@ -1803,6 +1848,7 @@ async def home() -> HTMLResponse:
         addNeighbourSample("pci", nb.strongest_pci, trendTs);
         addCategorySample("state", srv.state || "-", trendTs);
         addCategorySample("band", net.band || "-", trendTs);
+        addCarrierReselSamples(idleMob, trendTs);
       }
       const hz = Number(payload?.poll_hz);
       if (Number.isFinite(hz) && hz > 0) currentPollHz = hz;
@@ -1862,21 +1908,6 @@ async def home() -> HTMLResponse:
         ratSel.value = v.mode_pref;
       }
       if (msg) el("lockmsg").textContent = msg;
-    }
-
-    function applyPciLock(data, msg = "") {
-      const p = data?.pci_lock || {};
-      const locked = !!p.locked;
-      el("pcilock-state").textContent = locked ? "LOCKED" : "UNLOCKED";
-      el("pcilock-state").className = locked ? "warn" : "ok";
-      const earfcn = p.earfcn;
-      const pci = p.pci;
-      if (earfcn === null || earfcn === undefined || pci === null || pci === undefined) {
-        el("pcilock-pair").textContent = "-";
-      } else {
-        el("pcilock-pair").textContent = `${earfcn}/${pci}`;
-      }
-      if (msg) el("pcilock-msg").textContent = msg;
     }
 
     function applyMnoState(data, msg = "") {
@@ -1976,16 +2007,23 @@ async def home() -> HTMLResponse:
 
     function applySimInspector(data, msg = "") {
       const d = data?.decoded || {};
+      const verbose = !!data?.verbose;
       const lines = [];
+      if (verbose && data?.label_reference) {
+        lines.push(`Reference: ${data.label_reference}`);
+        lines.push("");
+      }
       const pushPlmnFile = (key, title) => {
         const f = d?.[key] || {};
         const entries = Array.isArray(f?.entries) ? f.entries : [];
         lines.push(`${title} (${f?.fileid || "-"}) count=${entries.length}`);
+        if (verbose && f?.description) lines.push(`  Note: ${f.description}`);
         entries.slice(0, 12).forEach((e) => {
           const act = e?.act_hex ? ` act=${e.act_hex}` : "";
           lines.push(`  - ${e?.plmn || "-"}${act}`);
         });
         if (entries.length > 12) lines.push(`  ... ${entries.length - 12} more`);
+        if (verbose) lines.push("");
       };
       pushPlmnFile("ef_plmnwact", "EF_PLMNwAcT");
       pushPlmnFile("ef_oplmnwact", "EF_OPLMNwAcT");
@@ -1993,19 +2031,39 @@ async def home() -> HTMLResponse:
       pushPlmnFile("ef_fplmn", "EF_FPLMN");
       const adMncLen = d?.ef_ad?.mnc_length;
       lines.push(`EF_AD (${d?.ef_ad?.fileid || "-"}) mnc_length=${adMncLen === null || adMncLen === undefined ? "-" : adMncLen}`);
+      if (verbose && d?.ef_ad?.description) lines.push(`  Note: ${d.ef_ad.description}`);
       const hplmnTimer = d?.ef_hplmn?.hplmn_search_timer_min;
       lines.push(`EF_HPLMN (${d?.ef_hplmn?.fileid || "-"}) timer_min=${hplmnTimer === null || hplmnTimer === undefined ? "-" : hplmnTimer}`);
+      if (verbose && d?.ef_hplmn?.description) lines.push(`  Note: ${d.ef_hplmn.description}`);
       const ustCount = d?.ef_ust?.enabled_services_count;
       lines.push(`EF_UST (${d?.ef_ust?.fileid || "-"}) enabled_services=${ustCount === null || ustCount === undefined ? "-" : ustCount}`);
-      const ustList = Array.isArray(d?.ef_ust?.enabled_services) ? d.ef_ust.enabled_services : [];
-      if (ustList.length) lines.push(`  - UST service IDs: ${ustList.slice(0, 40).join(", ")}${ustList.length > 40 ? " ..." : ""}`);
-      const hplmnHex = d?.ef_hplmn?.hex || "";
+      if (verbose && d?.ef_ust?.description) lines.push(`  Note: ${d.ef_ust.description}`);
+      const ustVerbose = Array.isArray(d?.ef_ust?.enabled_services_verbose) ? d.ef_ust.enabled_services_verbose : [];
+      if (ustVerbose.length) {
+        ustVerbose.forEach((row) => {
+          const n = row?.service_no;
+          const lb = row?.label || "";
+          lines.push(`  - n°${n}: ${lb}`);
+        });
+      } else {
+        const ustList = Array.isArray(d?.ef_ust?.enabled_services) ? d.ef_ust.enabled_services : [];
+        if (ustList.length) lines.push(`  - service IDs: ${ustList.slice(0, 48).join(", ")}${ustList.length > 48 ? " ..." : ""}`);
+      }
+      if (verbose) lines.push("");
       const spdiHex = d?.ef_spdi?.hex || "";
       lines.push(`EF_SPDI (${d?.ef_spdi?.fileid || "-"}) hex=${spdiHex || "-"}`);
+      if (verbose && d?.ef_spdi?.description) lines.push(`  Note: ${d.ef_spdi.description}`);
       lines.push(`EF_PNN (${d?.ef_pnn?.fileid || "-"}) hex=${d?.ef_pnn?.hex || "-"}`);
+      if (verbose && d?.ef_pnn?.description) lines.push(`  Note: ${d.ef_pnn.description}`);
       lines.push(`EF_OPL (${d?.ef_opl?.fileid || "-"}) hex=${d?.ef_opl?.hex || "-"}`);
+      if (verbose && d?.ef_opl?.description) lines.push(`  Note: ${d.ef_opl.description}`);
       lines.push(`EF_EPSLOCI (${d?.ef_epsloci?.fileid || "-"}) hex=${d?.ef_epsloci?.hex || "-"}`);
+      if (verbose && d?.ef_epsloci?.hex_byte_length != null) {
+        lines.push(`  (${d.ef_epsloci.hex_byte_length} byte(s) hex payload)`);
+      }
+      if (verbose && d?.ef_epsloci?.description) lines.push(`  Note: ${d.ef_epsloci.description}`);
       lines.push(`EF_5GSLOCI (${d?.ef_5gsloci?.fileid || "-"}) hex=${d?.ef_5gsloci?.hex || "-"} sw=${d?.ef_5gsloci?.sw1 || "-"},${d?.ef_5gsloci?.sw2 || "-"}`);
+      if (verbose && d?.ef_5gsloci?.description) lines.push(`  Note: ${d.ef_5gsloci.description}`);
       el("siminspect").textContent = lines.length ? lines.join("\\n") : "-";
       if (msg) el("simmsg").textContent = msg;
     }
@@ -2023,7 +2081,7 @@ async def home() -> HTMLResponse:
 
     async function readSimInspector() {
       try {
-        const r = await fetch("/api/sim/inspector");
+        const r = await fetch("/api/sim/inspector?verbose=1");
         const j = await r.json();
         if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "SIM inspector read failed");
         applySimInspector(j, "SIM inspector read OK");
@@ -2288,46 +2346,6 @@ async def home() -> HTMLResponse:
         applyLocks(j, "Locks applied and verified.");
       } catch (e) {
         el("lockmsg").textContent = `Lock set error: ${e.message || e}`;
-      }
-    }
-
-    async function readPciLock() {
-      try {
-        const r = await fetch("/api/network/pci-lock");
-        const j = await r.json();
-        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "PCI lock read failed");
-        applyPciLock(j, "PCI lock read OK");
-      } catch (e) {
-        el("pcilock-msg").textContent = `PCI lock read error: ${e.message || e}`;
-      }
-    }
-
-    async function setPciLock(lock, useCurrent = false) {
-      const body = { lock };
-      if (useCurrent) {
-        if (!Number.isFinite(currentServingEarfcn) || !Number.isFinite(currentServingPci)) {
-          el("pcilock-msg").textContent = "Current serving EARFCN/PCI not available.";
-          return;
-        }
-        body.earfcn = currentServingEarfcn;
-        body.pci = currentServingPci;
-      } else {
-        const e = (el("input-pcilock-earfcn").value || "").trim();
-        const p = (el("input-pcilock-pci").value || "").trim();
-        if (e) body.earfcn = Number(e);
-        if (p) body.pci = Number(p);
-      }
-      try {
-        const r = await fetch("/api/network/pci-lock", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body)
-        });
-        const j = await r.json();
-        if (!r.ok || !j.ok) throw new Error(j.detail || j.error || "PCI lock set failed");
-        applyPciLock(j, lock ? "PCI lock applied." : "PCI unlock applied.");
-      } catch (e) {
-        el("pcilock-msg").textContent = `PCI lock set error: ${e.message || e}`;
       }
     }
 
@@ -2791,6 +2809,118 @@ async def home() -> HTMLResponse:
       drawCategoryCharts();
     }
 
+    function addCarrierReselSamples(idleMob, tsSec) {
+      const t = tsSec ? Number(tsSec) * 1000 : Date.now();
+      const pci = Number(idleMob?.intra_freq_pci_reselections_per_min);
+      const ear = Number(idleMob?.primary_earfcn_reselections_per_min);
+      if (Number.isFinite(pci)) {
+        carrierReselPciHistory.push({ t, v: pci });
+        pruneHistoryByAge(carrierReselPciHistory, t);
+      }
+      if (Number.isFinite(ear)) {
+        carrierReselEarfcnHistory.push({ t, v: ear });
+        pruneHistoryByAge(carrierReselEarfcnHistory, t);
+      }
+      drawCarrierReselChart();
+    }
+
+    function drawCarrierReselChart() {
+      const canvas = el("carrier-resel-chart");
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#101010";
+      ctx.fillRect(0, 0, w, h);
+
+      const all = [...carrierReselPciHistory, ...carrierReselEarfcnHistory];
+      if (!all.length) {
+        ctx.fillStyle = "#777";
+        ctx.font = "12px Arial";
+        ctx.fillText("No carrier re-selection samples yet", 12, 24);
+        return;
+      }
+
+      const values = all.map((p) => Number(p?.v)).filter((x) => Number.isFinite(x));
+      const minV = Math.min(...values);
+      const maxV = Math.max(...values);
+      const pad = Math.max(0.25, (maxV - minV) * 0.15);
+      const yMin = Math.max(0, minV - pad);
+      const yMax = maxV + pad;
+      const span = Math.max(1e-6, yMax - yMin);
+
+      ctx.strokeStyle = "#2a2a2a";
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = 10 + (i * (h - 20)) / 4;
+        ctx.beginPath();
+        ctx.moveTo(44, y);
+        ctx.lineTo(w - 12, y);
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = "#aaa";
+      ctx.font = "11px Arial";
+      ctx.fillText(`${yMax.toFixed(1)} /min`, 4, 14);
+      ctx.fillText(`${yMin.toFixed(1)} /min`, 4, h - 8);
+
+      const x0 = 44;
+      const x1 = w - 12;
+      const y0 = h - 12;
+      const y1 = 10;
+      const nowMs = Date.now();
+      const windowStartMs = nowMs - chartWindowMs;
+      const xFor = (p) => {
+        const tt = Number(p?.t);
+        if (!Number.isFinite(tt)) return x0;
+        const ratio = Math.max(0, Math.min(1, (tt - windowStartMs) / chartWindowMs));
+        return x0 + ratio * (x1 - x0);
+      };
+      const yFor = (v) => y0 - ((v - yMin) / span) * (y0 - y1);
+
+      const drawSeries = (samples, lineColor, pointColor) => {
+        if (!samples.length) return;
+        const sorted = [...samples].sort((a, b) => Number(a.t) - Number(b.t));
+        ctx.strokeStyle = lineColor;
+        ctx.lineWidth = 2;
+        for (let i = 1; i < sorted.length; i++) {
+          const p0 = sorted[i - 1];
+          const p1 = sorted[i];
+          const xA = xFor(p0);
+          const yA = yFor(p0.v);
+          const xB = xFor(p1);
+          const yB = yFor(p1.v);
+          ctx.beginPath();
+          ctx.moveTo(xA, yA);
+          ctx.lineTo(xB, yB);
+          ctx.stroke();
+        }
+        ctx.fillStyle = pointColor;
+        sorted.forEach((p) => {
+          const x = xFor(p);
+          const y = yFor(p.v);
+          ctx.beginPath();
+          ctx.arc(x, y, 2.1, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      };
+
+      // Pink (EARFCN) first, light blue (PCI) on top for readability when values coincide.
+      drawSeries(carrierReselEarfcnHistory, "#ff8ec8", "#ffc8e4");
+      drawSeries(carrierReselPciHistory, "#87ceeb", "#c8ecff");
+
+      ctx.font = "11px Arial";
+      ctx.fillStyle = "#87ceeb";
+      ctx.fillRect(w - 118, 8, 10, 3);
+      ctx.fillStyle = "#dff4ff";
+      ctx.fillText("PCI /min", w - 104, 12);
+      ctx.fillStyle = "#ff8ec8";
+      ctx.fillRect(w - 118, 20, 10, 3);
+      ctx.fillStyle = "#ffe8f2";
+      ctx.fillText("EARFCN /min", w - 104, 24);
+    }
+
     function drawIperfChart() {
       const canvas = el("iperfchart");
       if (!canvas) return;
@@ -3116,6 +3246,7 @@ async def home() -> HTMLResponse:
       ctx.fillRect(0, 0, w, h);
 
       if (!samples.length) {
+        canvas._metricHover = null;
         ctx.fillStyle = "#777";
         ctx.font = "12px Arial";
         ctx.fillText("No samples yet", 12, 24);
@@ -3204,6 +3335,139 @@ async def home() -> HTMLResponse:
         ctx.arc(x, y, 2.1, 0, Math.PI * 2);
         ctx.fill();
       });
+
+      canvas._metricHover = {
+        canvasId,
+        samples,
+        unitLabel,
+        x0,
+        x1,
+        y0,
+        y1,
+        yMin,
+        yMax,
+        span,
+        gapBreakMs,
+        chartNowMs: nowMs,
+        cwMs: chartWindowMs,
+        gapMode: chartGapModeEnabled
+      };
+    }
+
+    function metricHoverXFor(p, i, h) {
+      const { x0, x1, samples, cwMs, chartNowMs, gapMode } = h;
+      const n = samples.length;
+      const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
+      const windowStartMs = chartNowMs - cwMs;
+      if (!gapMode) return x0 + i * xStep;
+      const t = Number(p?.t);
+      if (!Number.isFinite(t)) return x0 + i * xStep;
+      const ratio = Math.max(0, Math.min(1, (t - windowStartMs) / cwMs));
+      return x0 + ratio * (x1 - x0);
+    }
+
+    function ensureRfChartTooltipEl() {
+      if (rfChartTooltipEl) return rfChartTooltipEl;
+      rfChartTooltipEl = document.createElement("div");
+      rfChartTooltipEl.id = "rf-chart-tooltip";
+      rfChartTooltipEl.setAttribute("role", "tooltip");
+      rfChartTooltipEl.style.cssText = [
+        "position:fixed",
+        "display:none",
+        "z-index:99999",
+        "pointer-events:none",
+        "background:#252525",
+        "border:1px solid #444",
+        "border-radius:6px",
+        "padding:6px 10px",
+        "font:12px Consolas,monospace",
+        "color:#eee",
+        "box-shadow:0 2px 8px rgba(0,0,0,0.45)",
+        "white-space:pre-line",
+        "max-width:280px",
+        "line-height:1.35"
+      ].join(";");
+      document.body.appendChild(rfChartTooltipEl);
+      return rfChartTooltipEl;
+    }
+
+    function hideRfChartTooltip() {
+      if (rfChartTooltipEl) rfChartTooltipEl.style.display = "none";
+    }
+
+    function showRfChartTooltip(clientX, clientY, title, valueStr, unitLabel, cellKey) {
+      const tip = ensureRfChartTooltipEl();
+      const ck =
+        cellKey !== null && cellKey !== undefined && String(cellKey).trim() !== ""
+          ? String(cellKey).trim()
+          : "—";
+      tip.textContent = `${title}\\n${valueStr} ${unitLabel}\\nEARFCN/PCI: ${ck}`;
+      tip.style.display = "block";
+      const pad = 14;
+      let left = clientX + pad;
+      let top = clientY + pad;
+      const tw = tip.offsetWidth;
+      const th = tip.offsetHeight;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      if (left + tw > vw - 8) left = vw - tw - 8;
+      if (top + th > vh - 8) top = vh - th - 8;
+      tip.style.left = `${Math.max(8, left)}px`;
+      tip.style.top = `${Math.max(8, top)}px`;
+    }
+
+    function handleRfMetricChartHoverMove(ev) {
+      const canvas = ev.currentTarget;
+      if (!canvas || !RF_HOVER_CANVAS_IDS.includes(canvas.id)) return;
+      const hover = canvas._metricHover;
+      if (!hover || !Array.isArray(hover.samples) || hover.samples.length === 0) {
+        hideRfChartTooltip();
+        return;
+      }
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const mx = (ev.clientX - rect.left) * scaleX;
+      const my = (ev.clientY - rect.top) * scaleY;
+      const { samples, y0, y1, yMin, span } = hover;
+      let best = null;
+      let bestD = Infinity;
+      const hitR = 22;
+      const hitR2 = hitR * hitR;
+      for (let i = 0; i < samples.length; i++) {
+        const p = samples[i];
+        const x = metricHoverXFor(p, i, hover);
+        const y = y0 - ((p.v - yMin) / span) * (y0 - y1);
+        const dx = mx - x;
+        const dy = my - y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < bestD) {
+          bestD = d2;
+          best = { p, v: Number(p?.v) };
+        }
+      }
+      if (!best || bestD > hitR2) {
+        hideRfChartTooltip();
+        return;
+      }
+      const title = RF_CHART_TITLE_BY_ID[canvas.id] || canvas.id;
+      const shown =
+        Number.isFinite(best.v) ? (Math.abs(best.v % 1) < 0.05 ? best.v.toFixed(1) : best.v.toFixed(2)) : "-";
+      showRfChartTooltip(ev.clientX, ev.clientY, title, shown, hover.unitLabel || "", best.p?.c);
+    }
+
+    function handleRfMetricChartHoverLeave() {
+      hideRfChartTooltip();
+    }
+
+    function installRfChartHoverListeners() {
+      for (const id of RF_HOVER_CANVAS_IDS) {
+        const canvas = el(id);
+        if (!canvas || canvas._rfHoverInstalled) continue;
+        canvas._rfHoverInstalled = true;
+        canvas.addEventListener("mousemove", handleRfMetricChartHoverMove);
+        canvas.addEventListener("mouseleave", handleRfMetricChartHoverLeave);
+      }
     }
 
     function drawRfCharts() {
@@ -3389,6 +3653,8 @@ async def home() -> HTMLResponse:
       pciHistory.length = 0;
       neighbourHistory.rsrp.length = 0;
       neighbourHistory.pci.length = 0;
+      carrierReselPciHistory.length = 0;
+      carrierReselEarfcnHistory.length = 0;
       categoryHistory.state.length = 0;
       categoryHistory.band.length = 0;
       drawIperfChart();
@@ -3399,6 +3665,7 @@ async def home() -> HTMLResponse:
       drawBwChart();
       drawPciChart();
       drawNeighbourCharts();
+      drawCarrierReselChart();
       drawCategoryCharts();
       clearDataServiceKpi();
     }
@@ -3435,10 +3702,6 @@ async def home() -> HTMLResponse:
     el("btn-cops-dereg").addEventListener("click", () => setCops(2));
     el("btn-lock-read").addEventListener("click", () => readLocks());
     el("btn-lock-set").addEventListener("click", () => setLocks());
-    el("btn-pcilock-read").addEventListener("click", () => readPciLock());
-    el("btn-pcilock-lock-current").addEventListener("click", () => setPciLock(true, true));
-    el("btn-pcilock-lock-input").addEventListener("click", () => setPciLock(true, false));
-    el("btn-pcilock-unlock").addEventListener("click", () => setPciLock(false, false));
     el("btn-mno-read").addEventListener("click", () => readMnoState("MNO state read OK"));
     el("btn-mno-apply").addEventListener("click", () => applyMnoSelection());
     el("btn-data-inhibit").addEventListener("click", () => setDataGate(true));
@@ -3485,7 +3748,6 @@ async def home() -> HTMLResponse:
     refreshSerialPorts(true);
     readCops();
     readLocks();
-    readPciLock();
     readMnoState();
     readDataGate();
     readSimHighLevel();
@@ -3493,6 +3755,7 @@ async def home() -> HTMLResponse:
     updateChartGapButton();
     redrawAllCharts();
     loadBindInterfaces();
+    installRfChartHoverListeners();
   </script>
 </body>
 </html>"""
@@ -3570,7 +3833,7 @@ async def sim_high_level() -> dict:
 
 
 @app.get("/api/sim/inspector")
-async def sim_inspector() -> dict:
+async def sim_inspector(verbose: bool = False) -> dict:
     # Read-only EF inspection via CRSM.
     files = [
         ("ef_plmnwact", "EF_PLMNwAcT", 28512),
@@ -3624,17 +3887,37 @@ async def sim_inspector() -> dict:
                 "fileid": fileid,
                 "enabled_services_count": len(enabled),
                 "enabled_services": enabled,
+                "enabled_services_verbose": [
+                    {"service_no": sid, "label": label_usim_service(sid)} for sid in enabled
+                ],
                 **crsm,
             }
         else:
             # Keep raw hex for files that require BER-TLV-specific decoding.
             decoded[key] = {"name": name, "fileid": fileid, **crsm}
 
-    return {
+        if verbose:
+            desc = SIM_EF_DESCRIPTIONS.get(key)
+            if desc:
+                decoded[key]["description"] = desc
+
+    if verbose:
+        eo = decoded.get("ef_epsloci")
+        if isinstance(eo, dict):
+            hx = eo.get("hex") or ""
+            clean = re.sub(r"[^0-9A-Fa-f]", "", str(hx)).upper()
+            if clean:
+                eo["hex_byte_length"] = len(clean) // 2
+
+    out: dict = {
         "ok": True,
+        "verbose": verbose,
         "decoded": decoded,
         "raw": raw,
     }
+    if verbose:
+        out["label_reference"] = SIM_INSPECTOR_LABEL_REFERENCE
+    return out
 
 
 @app.post("/api/serial/reopen")
@@ -3715,38 +3998,42 @@ async def network_cops_set(body: CopsSetBody) -> dict:
     if body.mode not in (0, 2):
         raise HTTPException(status_code=400, detail="Only mode 0 (auto) and 2 (deregister) are enabled in this UI.")
 
-    # Operator registration can take long time on live networks.
-    set_timeout = 180.0 if body.mode == 0 else 45.0
-    set_res = await engine.send_command(f"AT+COPS={body.mode}", timeout_sec=set_timeout)
-    read_res = await engine.send_command("AT+COPS?", timeout_sec=4.0)
-    set_ok = bool(set_res.get("ok", False))
-    set_final = str(set_res.get("final", ""))
-    set_lines = set_res.get("lines", [])
+    resume_kpi = bool(kpi_runtime.poll_running)
+    async with _modem_exclusive_lock:
+        await _pause_exclusive_modem_access()
+        try:
+            # Operator registration can take long time on live networks.
+            set_timeout = 180.0 if body.mode == 0 else 45.0
+            set_res = await engine.send_command(f"AT+COPS={body.mode}", timeout_sec=set_timeout)
+            read_res = await engine.send_command("AT+COPS?", timeout_sec=4.0)
+            set_ok = bool(set_res.get("ok", False))
+            set_final = str(set_res.get("final", ""))
+            set_lines = set_res.get("lines", [])
 
-    error_msg = None
-    if not set_ok:
-        tail = ""
-        if isinstance(set_lines, list) and set_lines:
-            tail = set_lines[-1]
-        error_msg = f"COPS set failed ({set_final or 'no final'})"
-        if tail and tail.upper() not in ("OK", "ERROR"):
-            error_msg += f": {tail}"
+            error_msg = None
+            if not set_ok:
+                tail = ""
+                if isinstance(set_lines, list) and set_lines:
+                    tail = set_lines[-1]
+                error_msg = f"COPS set failed ({set_final or 'no final'})"
+                if tail and tail.upper() not in ("OK", "ERROR"):
+                    error_msg += f": {tail}"
 
-    return {
-        "ok": set_ok,
-        "error": error_msg,
-        "set": set_res,
-        "cops": _parse_cops_lines(read_res.get("lines", [])),
-        "raw": read_res,
-    }
+            return {
+                "ok": set_ok,
+                "error": error_msg,
+                "set": set_res,
+                "cops": _parse_cops_lines(read_res.get("lines", [])),
+                "raw": read_res,
+            }
+        finally:
+            _resume_exclusive_modem_access(resume_kpi)
 
 
 @app.get("/api/network/cops/scan")
 async def network_cops_scan(uk_only: bool = False) -> dict:
-    # Operator scan can be slow on live networks and can monopolize
-    # the AT command path. Pause KPI polling to keep queue healthy.
-    global _kpi_task
-    resume_poll = bool(kpi_runtime.poll_running)
+    # Operator scan monopolizes AT for ~35s; pause KPI + lock-guard so nothing else sends.
+    resume_kpi = bool(kpi_runtime.poll_running)
     original_lte_band: str | None = None
     original_nr_band: str | None = None
     nr_band_key_used: str | None = None
@@ -3761,90 +4048,86 @@ async def network_cops_scan(uk_only: bool = False) -> dict:
     nsa_nr5g_band_read_res: dict | None = None
     lte_band_restore_error: str | None = None
     nr_band_restore_error: str | None = None
-    if resume_poll:
-        kpi_runtime.poll_running = False
-        await asyncio.sleep(0.25)
 
-    try:
-        if uk_only:
-            lte_band_read_res = await engine.send_command('AT+QNWPREFCFG="lte_band"', timeout_sec=5.0)
-            original_lte_band = _parse_qnwprefcfg_value(lte_band_read_res.get("lines", []), "lte_band")
-            if original_lte_band and original_lte_band != UK_LTE_SCAN_BANDS:
-                lte_band_set_res = await engine.send_command(
-                    f'AT+QNWPREFCFG="lte_band",{UK_LTE_SCAN_BANDS}',
+    async with _modem_exclusive_lock:
+        await _pause_exclusive_modem_access()
+        try:
+            if uk_only:
+                lte_band_read_res = await engine.send_command('AT+QNWPREFCFG="lte_band"', timeout_sec=5.0)
+                original_lte_band = _parse_qnwprefcfg_value(lte_band_read_res.get("lines", []), "lte_band")
+                if original_lte_band and original_lte_band != UK_LTE_SCAN_BANDS:
+                    lte_band_set_res = await engine.send_command(
+                        f'AT+QNWPREFCFG="lte_band",{UK_LTE_SCAN_BANDS}',
+                        timeout_sec=8.0,
+                    )
+                    lte_band_changed = bool(lte_band_set_res.get("ok", False))
+
+                nr5g_band_read_res = await engine.send_command('AT+QNWPREFCFG="nr5g_band"', timeout_sec=5.0)
+                nsa_nr5g_band_read_res = await engine.send_command('AT+QNWPREFCFG="nsa_nr5g_band"', timeout_sec=5.0)
+                original_nr_band = _parse_qnwprefcfg_value(nr5g_band_read_res.get("lines", []), "nr5g_band")
+                nr_band_key_used = "nr5g_band"
+                if not original_nr_band:
+                    original_nr_band = _parse_qnwprefcfg_value(nsa_nr5g_band_read_res.get("lines", []), "nsa_nr5g_band")
+                    nr_band_key_used = "nsa_nr5g_band"
+                if original_nr_band and original_nr_band != UK_NR_SCAN_BANDS:
+                    nr_band_set_res = await engine.send_command(
+                        f'AT+QNWPREFCFG="{nr_band_key_used}",{UK_NR_SCAN_BANDS}',
+                        timeout_sec=8.0,
+                    )
+                    nr_band_changed = bool(nr_band_set_res.get("ok", False))
+
+            res = await engine.send_command("AT+COPS=?", timeout_sec=35.0)
+            ops = _parse_cops_scan_lines(res.get("lines", []))
+            ok = bool(res.get("ok", False))
+            err = None
+            if not ok:
+                err = f"COPS scan failed ({res.get('final') or 'no final'})"
+            return {
+                "ok": ok,
+                "error": err,
+                "uk_only": uk_only,
+                "scan_scope": (
+                    f"LTE bands {UK_LTE_SCAN_BANDS}; NR bands {UK_NR_SCAN_BANDS}"
+                    if uk_only
+                    else "default modem scope"
+                ),
+                "operators": ops,
+                "raw": {
+                    "scan": res,
+                    "lte_band_read": lte_band_read_res,
+                    "lte_band_set": lte_band_set_res,
+                    "nr5g_band_read": nr5g_band_read_res,
+                    "nsa_nr5g_band_read": nsa_nr5g_band_read_res,
+                    "nr_band_key_used": nr_band_key_used,
+                    "nr_band_set": nr_band_set_res,
+                },
+            }
+        finally:
+            if uk_only and lte_band_changed and original_lte_band:
+                lte_band_restore_res = await engine.send_command(
+                    f'AT+QNWPREFCFG="lte_band",{original_lte_band}',
                     timeout_sec=8.0,
                 )
-                lte_band_changed = bool(lte_band_set_res.get("ok", False))
-
-            nr5g_band_read_res = await engine.send_command('AT+QNWPREFCFG="nr5g_band"', timeout_sec=5.0)
-            nsa_nr5g_band_read_res = await engine.send_command('AT+QNWPREFCFG="nsa_nr5g_band"', timeout_sec=5.0)
-            original_nr_band = _parse_qnwprefcfg_value(nr5g_band_read_res.get("lines", []), "nr5g_band")
-            nr_band_key_used = "nr5g_band"
-            if not original_nr_band:
-                original_nr_band = _parse_qnwprefcfg_value(nsa_nr5g_band_read_res.get("lines", []), "nsa_nr5g_band")
-                nr_band_key_used = "nsa_nr5g_band"
-            if original_nr_band and original_nr_band != UK_NR_SCAN_BANDS:
-                nr_band_set_res = await engine.send_command(
-                    f'AT+QNWPREFCFG="{nr_band_key_used}",{UK_NR_SCAN_BANDS}',
+                if not lte_band_restore_res.get("ok", False):
+                    lte_band_restore_error = (
+                        f"Failed restoring lte_band to {original_lte_band} "
+                        f"({lte_band_restore_res.get('final') or 'no final'})"
+                    )
+            if uk_only and nr_band_changed and original_nr_band and nr_band_key_used:
+                nr_band_restore_res = await engine.send_command(
+                    f'AT+QNWPREFCFG="{nr_band_key_used}",{original_nr_band}',
                     timeout_sec=8.0,
                 )
-                nr_band_changed = bool(nr_band_set_res.get("ok", False))
-
-        res = await engine.send_command("AT+COPS=?", timeout_sec=35.0)
-        ops = _parse_cops_scan_lines(res.get("lines", []))
-        ok = bool(res.get("ok", False))
-        err = None
-        if not ok:
-            err = f"COPS scan failed ({res.get('final') or 'no final'})"
-        return {
-            "ok": ok,
-            "error": err,
-            "uk_only": uk_only,
-            "scan_scope": (
-                f"LTE bands {UK_LTE_SCAN_BANDS}; NR bands {UK_NR_SCAN_BANDS}"
-                if uk_only
-                else "default modem scope"
-            ),
-            "operators": ops,
-            "raw": {
-                "scan": res,
-                "lte_band_read": lte_band_read_res,
-                "lte_band_set": lte_band_set_res,
-                "nr5g_band_read": nr5g_band_read_res,
-                "nsa_nr5g_band_read": nsa_nr5g_band_read_res,
-                "nr_band_key_used": nr_band_key_used,
-                "nr_band_set": nr_band_set_res,
-            },
-        }
-    finally:
-        if uk_only and lte_band_changed and original_lte_band:
-            lte_band_restore_res = await engine.send_command(
-                f'AT+QNWPREFCFG="lte_band",{original_lte_band}',
-                timeout_sec=8.0,
-            )
-            if not lte_band_restore_res.get("ok", False):
-                lte_band_restore_error = (
-                    f"Failed restoring lte_band to {original_lte_band} "
-                    f"({lte_band_restore_res.get('final') or 'no final'})"
+                if not nr_band_restore_res.get("ok", False):
+                    nr_band_restore_error = (
+                        f"Failed restoring {nr_band_key_used} to {original_nr_band} "
+                        f"({nr_band_restore_res.get('final') or 'no final'})"
+                    )
+            if lte_band_restore_error or nr_band_restore_error:
+                kpi_runtime.last_error = " | ".join(
+                    [x for x in [lte_band_restore_error, nr_band_restore_error] if x]
                 )
-        if uk_only and nr_band_changed and original_nr_band and nr_band_key_used:
-            nr_band_restore_res = await engine.send_command(
-                f'AT+QNWPREFCFG="{nr_band_key_used}",{original_nr_band}',
-                timeout_sec=8.0,
-            )
-            if not nr_band_restore_res.get("ok", False):
-                nr_band_restore_error = (
-                    f"Failed restoring {nr_band_key_used} to {original_nr_band} "
-                    f"({nr_band_restore_res.get('final') or 'no final'})"
-                )
-        if lte_band_restore_error or nr_band_restore_error:
-            kpi_runtime.last_error = " | ".join(
-                [x for x in [lte_band_restore_error, nr_band_restore_error] if x]
-            )
-        if resume_poll:
-            kpi_runtime.poll_running = True
-            if _kpi_task is None or _kpi_task.done():
-                _kpi_task = asyncio.create_task(kpi_poll_loop(engine, kpi_runtime))
+            _resume_exclusive_modem_access(resume_kpi)
 
 
 @app.get("/api/network/mno")
@@ -3868,46 +4151,51 @@ async def network_mno_set(body: MnoSelectBody) -> dict:
         raise HTTPException(status_code=400, detail="Invalid profile. Use: vodafone, vmo2, ee, h3g, auto.")
 
     cfg = MNO_PROFILES[key]
-    if key == "auto":
-        set_res = await engine.send_command("AT+COPS=0", timeout_sec=180.0)
-        polled = await _poll_cops_state(total_wait_sec=60.0, step_sec=2.0)
-        read_res = polled["res"]
-        cops = polled["cops"]
-        ok = bool(set_res.get("ok", False) and cops.get("operator"))
-        err = None if ok else "Auto registration did not produce an operator within timeout."
-        return {
-            "ok": ok,
-            "error": err,
-            "selected_profile": key,
-            "profile": {"label": cfg["label"], "plmn": cfg["plmn"]},
-            "set": set_res,
-            "cops": cops,
-            "raw": {"read": read_res},
-        }
-    else:
-        plmn = str(cfg["plmn"])
-        # Use mode 4 (manual/auto) to avoid leaving modem permanently deregistered
-        # if selected PLMN is temporarily unavailable.
-        set_res = await engine.send_command(f'AT+COPS=4,2,"{plmn}"', timeout_sec=180.0)
-        polled = await _poll_cops_state(total_wait_sec=75.0, step_sec=2.5)
-        read_res = polled["res"]
-        cops = polled["cops"]
-        current_profile = _profile_key_from_cops_operator(cops.get("operator"))
-        target_hit = bool(str(cops.get("operator") or "") == plmn or current_profile == key)
-        ok = bool(set_res.get("ok", False) and target_hit)
-        err = None
-        recover_res = None
-        if not ok:
-            err = (
-                f"MNO select did not settle on {plmn} within timeout "
-                f"(current={cops.get('operator') or '-'} mode={cops.get('mode') if cops else '-'}"
-                f"{f' profile={current_profile}' if current_profile else ''})"
-            )
-            # Auto-recover so user is not stranded in a de-registered state.
-            recover_res = await engine.send_command("AT+COPS=0", timeout_sec=120.0)
-            recovered = await _poll_cops_state(total_wait_sec=45.0, step_sec=2.0)
-            read_res = recovered["res"]
-            cops = recovered["cops"]
+    resume_kpi = bool(kpi_runtime.poll_running)
+    ok = False
+    err: str | None = None
+    set_res: dict = {}
+    read_res: dict = {}
+    cops: dict = {}
+    recover_res: dict | None = None
+
+    async with _modem_exclusive_lock:
+        await _pause_exclusive_modem_access()
+        try:
+            if key == "auto":
+                set_res = await engine.send_command("AT+COPS=0", timeout_sec=180.0)
+                polled = await _poll_cops_state(total_wait_sec=60.0, step_sec=2.0)
+                read_res = polled["res"]
+                cops = polled["cops"]
+                ok = bool(set_res.get("ok", False) and cops.get("operator"))
+                err = None if ok else "Auto registration did not produce an operator within timeout."
+            else:
+                plmn = str(cfg["plmn"])
+                # Use mode 4 (manual/auto) to avoid leaving modem permanently deregistered
+                # if selected PLMN is temporarily unavailable.
+                set_res = await engine.send_command(f'AT+COPS=4,2,"{plmn}"', timeout_sec=180.0)
+                polled = await _poll_cops_state(total_wait_sec=75.0, step_sec=2.5)
+                read_res = polled["res"]
+                cops = polled["cops"]
+                current_profile = _profile_key_from_cops_operator(cops.get("operator"))
+                target_hit = bool(str(cops.get("operator") or "") == plmn or current_profile == key)
+                ok = bool(set_res.get("ok", False) and target_hit)
+                err = None
+                recover_res = None
+                if not ok:
+                    err = (
+                        f"MNO select did not settle on {plmn} within timeout "
+                        f"(current={cops.get('operator') or '-'} mode={cops.get('mode') if cops else '-'}"
+                        f"{f' profile={current_profile}' if current_profile else ''})"
+                    )
+                    # Auto-recover so user is not stranded in a de-registered state.
+                    recover_res = await engine.send_command("AT+COPS=0", timeout_sec=120.0)
+                    recovered = await _poll_cops_state(total_wait_sec=45.0, step_sec=2.0)
+                    read_res = recovered["res"]
+                    cops = recovered["cops"]
+        finally:
+            _resume_exclusive_modem_access(resume_kpi)
+
     return {
         "ok": ok,
         "error": err,
@@ -4056,49 +4344,6 @@ async def network_locks_set(body: LockSetBody) -> dict:
         "locks": locks,
         "desired_locks": normalized_requested if not errors else None,
         "raw": lock_state["raw"],
-    }
-
-
-@app.get("/api/network/pci-lock")
-async def network_pci_lock_get() -> dict:
-    res = await engine.send_command('AT+QNWLOCK="common/4g"', timeout_sec=4.0)
-    lock = _parse_qnwlock_common4g(res.get("lines", []))
-    return {
-        "ok": res.get("ok", False),
-        "pci_lock": lock or {"locked": False, "earfcn": None, "pci": None},
-        "raw": res,
-    }
-
-
-@app.post("/api/network/pci-lock")
-async def network_pci_lock_set(body: PciLockSetBody) -> dict:
-    before = await engine.send_command('AT+QNWLOCK="common/4g"', timeout_sec=4.0)
-    before_lock = _parse_qnwlock_common4g(before.get("lines", [])) or {}
-
-    earfcn = body.earfcn if body.earfcn is not None else before_lock.get("earfcn")
-    pci = body.pci if body.pci is not None else before_lock.get("pci")
-    if earfcn is None:
-        earfcn = 0
-    if pci is None:
-        pci = 0
-    mode = 1 if body.lock else 0
-
-    set_res = await engine.send_command(f'AT+QNWLOCK="common/4g",{mode},{earfcn},{pci}', timeout_sec=12.0)
-    after = await engine.send_command('AT+QNWLOCK="common/4g"', timeout_sec=4.0)
-    after_lock = _parse_qnwlock_common4g(after.get("lines", [])) or {"locked": False, "earfcn": None, "pci": None}
-
-    ok = False
-    if body.lock:
-        ok = bool(after_lock.get("locked") and after_lock.get("earfcn") == earfcn and after_lock.get("pci") == pci)
-    else:
-        ok = not bool(after_lock.get("locked"))
-
-    return {
-        "ok": ok,
-        "error": None if ok else f"PCI lock verify failed (set final={set_res.get('final', 'UNKNOWN')})",
-        "set": set_res,
-        "pci_lock": after_lock,
-        "raw": {"before": before, "after": after},
     }
 
 

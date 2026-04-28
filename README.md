@@ -1,8 +1,18 @@
 # 5G ModemTestDriver
 
-**Version 1.0**
+**Version 1.3**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.0** is shown in the page header).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.3** is shown in the page header).
+
+**Changes in v1.3**
+
+- **LTE carrier re-selection KPI** (mobility proxy): rolling 60 s windows count **primary EARFCN** changes and **intra-frequency PCI** changes on the LTE PCell from `AT+QENG="servingcell"`, exposed as events per minute in `GET /api/kpi/latest` under `sample.carrier_reselection` (`primary_earfcn_reselections_per_min`, `intra_freq_pci_reselections_per_min`). Intended for **camped (NOCONN) and RRC connected (CONNECT)** snapshots when the modem reports LTE PCell identity; NR SA–only periods without an LTE anchor do not drive these LTE counters.
+- **UI**: KPI card **Mobility · LTE carrier re-selection** plus a **dual-trace trend chart** (light blue = PCI / min, pink = EARFCN / min) with the same chart window and clear-all behavior as other trends.
+- **Parsing**: more resilient Quectel QENG LTE extraction (CONNECT/shorter lines, optional-space `+QENG:"LTE"`, case-insensitive `"LTE"`, prefer `servingcell`+LTE line then first standalone LTE line for PCell). Baseline identity is retained across transient missing LTE fields so connected-mode gaps do not zero out tracking.
+
+**Changes in v1.2**
+
+- Removed the **PCI lock** UI panel and **`/api/network/pci-lock`** endpoints (`AT+QNWLOCK "common/4g"`); use AT console if you still need to experiment with cell lock on supported firmware.
 
 Development/test platform: **Robustel R5010 router**.
 
@@ -36,8 +46,8 @@ AT command catalog from current modem firmware:
   - Runtime lock guard that re-applies desired RAT/band/NRDC settings if modem drifts
   - CA policy switch for LTE (single-band vs multi/all)
   - NRDC on/off switch
-  - PCI lock controls (`AT+QNWLOCK "common/4g"`) including lock current/input and unlock
   - Neighbour Cells RF KPI section (strongest intra-frequency neighbour RSRP + PCI + EARFCN)
+  - Mobility / LTE carrier re-selection KPI (PCell EARFCN vs intra-frequency PCI change rates, camped and RRC connected) with matching dual-trace chart
   - Data Service KPI section:
     - APN
     - PDP contexts (active/total)
@@ -60,7 +70,7 @@ AT command catalog from current modem firmware:
   - iperf3 throughput test (TCP, DL/UL, bind interface, optional bitrate limit) with gauges and trend charts
   - VoLTE call test (`ATD...;` + `AT+CLCC` + `ATH` + `AT+CEER`) with user dial number and auto hangup after 10s
   - `Clear All Charts` control (also clears Data Service KPI display)
-  - Trend charts for iperf throughput, ICMP ping sweep, RSRP, RSRQ, SINR, RSSI, State, Band, DL bandwidth, PCI, neighbour RSRP, neighbour PCI, intra-cell dominance
+  - Trend charts for iperf throughput, ICMP ping sweep, RSRP, RSRQ, SINR, RSSI, State, Band, DL bandwidth, PCI, neighbour RSRP, neighbour PCI, intra-cell dominance, LTE carrier re-selection (PCI and EARFCN rates)
   - Selectable chart window (60s to 60m)
   - Dynamic chart axis label shows time span (for example, `Time axis: last 10m`)
   - Optional `Time-roll gaps` mode to scroll by wall-clock time and show blank gaps when samples pause
@@ -74,6 +84,7 @@ AT command catalog from current modem firmware:
     - RSSI max `-25 dBm`
     - Intra-cell dominance min `6 dB`
   - Optional RF smoothing toggle (rolling average of last 10 samples) for RSRP/RSRQ/SINR/RSSI/dominance
+  - **RF trend hover tooltips**: on the RSRP / RSRQ / SINR / RSSI / intra-cell dominance canvases, moving the pointer near a plotted sample shows a tooltip with the metric value and **EARFCN/PCI** for that sample (same cell key used for segment colouring).
   - Primary Cell bandwidth KPI (`DL/UL BW`)
   - Primary Cell TX power KPI (`QENG` tail field, when reported by modem)
   - Primary cell intra-cell dominance KPI (`Primary RSRP - strongest intra-frequency neighbour RSRP` on serving EARFCN)
@@ -168,13 +179,13 @@ $env:MD_KPI_POLL_HZ="2.0"
    - If lock values drift during runtime, verify they are automatically re-applied by the lock guard.
    - Validate **CA policy** behavior: CA ON uses multi/all LTE bands, CA OFF uses a single LTE band.
    - Toggle **NRDC** and confirm the readback state changes.
-   - Use **PCI Lock** controls (`Read`, `Lock Current Cell`, `Lock Input`, `Unlock`) and confirm state/readback.
    - Check **Neighbour Cells RF KPI** values (strongest intra-frequency neighbour RSRP + PCI + EARFCN).
    - Check **Primary cell intra-cell dominance** value and trend behavior.
    - Run **ICMP Ping Sweep** (and optional **repeat every 15 s**) and confirm gauges/trend update.
    - Watch RF, neighbour, dominance, State/Band/PCI, and Bandwidth charts update with live polling.
    - Use the **Chart window** selector to switch retention from `60s` up to `60m`.
    - Confirm RF charts show red threshold guide lines and auto-scroll over the selected window.
+   - Hover near points on the RF trend charts (RSRP/RSRQ/SINR/RSSI/dominance) to verify the tooltip shows the value and **EARFCN/PCI** for that sample.
    - Optional: enable **RF smoothing** and verify 10-sample rolling average behavior.
    - Use **Clear All Charts** and confirm all chart histories reset.
 4. Check serial status:
@@ -197,6 +208,8 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8011/api/at/send" `
 Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:8011/api/kpi/latest"
 ```
 
+The JSON includes `sample.carrier_reselection` with `window_sec` (60), `primary_earfcn_reselections_per_min`, and `intra_freq_pci_reselections_per_min` when the KPI poll has parsed LTE PCell identity from QENG.
+
 ## API quick reference
 
 - `GET /` live KPI + charts page
@@ -218,8 +231,6 @@ Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:8011/api/kpi/latest"
 - `POST /api/network/data-gate`
 - `GET /api/network/locks`
 - `POST /api/network/locks`
-- `GET /api/network/pci-lock`
-- `POST /api/network/pci-lock`
 - `POST /api/tools/modem-reset`
 - `GET /api/tools/bind-interfaces` (Windows IPv4 adapters for bind dropdowns)
 - `POST /api/tools/iperf-test` (TCP iperf3 client; optional bind IP and bitrate limit)

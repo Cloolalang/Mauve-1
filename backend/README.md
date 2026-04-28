@@ -1,6 +1,6 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 1.0** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver**.
+**Version 1.3** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.3.0**).
 
 ## Quick start
 
@@ -34,7 +34,7 @@ $env:MD_BAUDRATE="115200"
 
 ## API
 
-- `GET /` **5G ModemTestDriver** KPI page (**v1.0** in browser tab title and main heading): Serial Port tools, modem reset, COPS + lock controls with runtime re-apply guard, roaming MNO selector [Vodafone/VMO2/EE/H3G/Auto], packet-data inhibit/allow controls, CA policy switch, NRDC switch, PCI lock controls, neighbour-cell KPI, intra-cell dominance KPI, Data Service KPI [APN/PDP/CID1/attach/registration/usbnet/netdev], SIM High-Level + PLMN Inspector, TX power KPI when reported, AT console, **iperf3** + **host ICMP ping sweep** (bind interfaces, trends, optional repeat every 15 s), VoLTE call test, clear-all charts, 60s–60m chart window, optional time-roll gap mode, `EARFCN/PCI` color mapping, RF threshold lines, optional RF smoothing
+- `GET /` **5G ModemTestDriver** KPI page (**v1.3** in browser tab title and main heading): Serial Port tools, modem reset, COPS + lock controls with runtime re-apply guard, roaming MNO selector [Vodafone/VMO2/EE/H3G/Auto], packet-data inhibit/allow controls, CA policy switch, NRDC switch, neighbour-cell KPI, intra-cell dominance KPI, **LTE carrier re-selection KPI + dual-trace chart** (PCell EARFCN vs PCI rates), Data Service KPI [APN/PDP/CID1/attach/registration/usbnet/netdev], SIM High-Level + PLMN Inspector, TX power KPI when reported, AT console, **iperf3** + **host ICMP ping sweep** (bind interfaces, trends, optional repeat every 15 s), VoLTE call test, clear-all charts, 60s–60m chart window, optional time-roll gap mode, `EARFCN/PCI` color mapping, RF threshold lines, optional RF smoothing, **RF chart hover tooltips** (value + EARFCN/PCI per sample on RSRP/RSRQ/SINR/RSSI/dominance charts)
 - `GET /api/serial/status`
 - `GET /api/serial/ports`
 - `POST /api/at/send`
@@ -70,10 +70,6 @@ $env:MD_BAUDRATE="115200"
 - `POST /api/network/locks`
   - body example: `{ "rat_mode": "AUTO", "lte_band": "0", "nr5g_band": "78:77", "nrdc_mode": 1 }`
   - `lte_band="0"` is treated as "all LTE bands" even if modem readback expands to an explicit list
-- `GET /api/network/pci-lock` (read `QNWLOCK "common/4g"` state)
-- `POST /api/network/pci-lock`
-  - body example (lock): `{ "lock": true, "earfcn": 6300, "pci": 106 }`
-  - body example (unlock): `{ "lock": false }`
 - `POST /api/tools/modem-reset`
   - sends `AT+CFUN=1,1` and returns reset command status
 - `GET /api/tools/bind-interfaces`
@@ -91,10 +87,11 @@ $env:MD_BAUDRATE="115200"
   - returns parsed summary + raw command outputs
 - `GET /api/sim/inspector`
   - read-only SIM EF inspection via `AT+CRSM=176,...`
+  - optional query: **`verbose=1`** — adds short EF descriptions, EF_EPSLOCI byte length, and `label_reference` (TS 31.102 numbering note); KPI UI requests verbose reads by default
   - includes PLMN/mobility-oriented files:
     - `EF_PLMNwAcT`, `EF_OPLMNwAcT`, `EF_HPLMN`, `EF_FPLMN`, `EF_SPDI`
     - `EF_AD`, `EF_EHPLMN`, `EF_UST`, `EF_PNN`, `EF_OPL`, `EF_EPSLOCI`, `EF_5GSLOCI` (where accessible)
-  - decodes PLMN lists, MNC length hint, HPLMN timer, and enabled UST service IDs where applicable
+  - decodes PLMN lists, MNC length hint, HPLMN timer, and **`EF_UST` enabled bits as USIM service n° plus labels** (`decoded.ef_ust.enabled_services_verbose`, aligned with 3GPP TS 31.102 Annex E Rel‑19-style numbering)
 - `WS /ws/kpi` (live KPI snapshots)
 
 Data Service KPI fields are available in `GET /api/kpi/latest` at `sample.data_service` and are derived from:
@@ -126,3 +123,5 @@ KPI snapshot check:
 ```powershell
 Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:8011/api/kpi/latest"
 ```
+
+`sample.carrier_reselection` (v1.3+): rolling-window LTE PCell mobility counts from QENG (`primary_earfcn_reselections_per_min`, `intra_freq_pci_reselections_per_min`, `window_sec`).
