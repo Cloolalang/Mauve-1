@@ -17,6 +17,7 @@ cd backend
 ```
 
 Default serial target is `COM49 @ 115200`.
+Default KPI poll rate is `2.0 Hz`.
 
 AT command catalog from current modem `AT+CLAC` capture:
 
@@ -31,7 +32,7 @@ $env:MD_BAUDRATE="115200"
 
 ## API
 
-- `GET /` live KPI page (Serial Port tools, modem reset, COPS + lock controls with runtime re-apply guard, roaming MNO selector [Vodafone/VMO2/EE/H3G/Auto], packet-data inhibit/allow controls, CA policy switch, NRDC switch, PCI lock controls, neighbour-cell KPI, intra-cell dominance KPI [serving EARFCN vs strongest intra-frequency neighbour], Data Service KPI [APN/PDP/CID1/attach/registration/usbnet/netdev/QGDCNT throughput], SIM High-Level + PLMN Inspector [IMEI/IMSI/SPN/COPS/CPOL], TX power KPI (when modem reports it), AT console, ping + trend charts, VoLTE call test, clear-all charts, 60s sliding chart window, RF threshold lines, optional 10-sample RF smoothing)
+- `GET /` live KPI page (Serial Port tools, modem reset, COPS + lock controls with runtime re-apply guard, roaming MNO selector [Vodafone/VMO2/EE/H3G/Auto], packet-data inhibit/allow controls, CA policy switch, NRDC switch, PCI lock controls, neighbour-cell KPI, intra-cell dominance KPI [serving EARFCN vs strongest intra-frequency neighbour], Data Service KPI [APN/PDP/CID1/attach/registration/usbnet/netdev/QGDCNT throughput], SIM High-Level + PLMN Inspector [IMEI/IMSI/SPN/COPS/CPOL], TX power KPI (when modem reports it), AT console, ping + trend charts, VoLTE call test, clear-all charts, selectable 60s-60m chart window with dynamic axis labels, optional time-roll gap mode, stable high-contrast `EARFCN/PCI` color mapping across trend charts (including State/Band), dominance trend gated by primary-cell availability, RF threshold lines, optional 10-sample RF smoothing)
 - `GET /api/serial/status`
 - `GET /api/serial/ports`
 - `POST /api/at/send`
@@ -41,7 +42,7 @@ $env:MD_BAUDRATE="115200"
   - body: `{ "port": "COM49", "baudrate": 115200 }`
 - `GET /api/kpi/latest`
 - `POST /api/kpi/poll`
-  - body: `{ "poll_hz": 1.0 }`
+  - body: `{ "poll_hz": 2.0 }`
 - `POST /api/kpi/poll/start`
 - `POST /api/kpi/poll/stop`
 - `GET /api/network/cops` (read registration/operator status)
@@ -66,6 +67,7 @@ $env:MD_BAUDRATE="115200"
 - `GET /api/network/locks` (read QNWPREFCFG RAT/LTE/NR lock state)
 - `POST /api/network/locks`
   - body example: `{ "rat_mode": "AUTO", "lte_band": "0", "nr5g_band": "78:77", "nrdc_mode": 1 }`
+  - `lte_band="0"` is treated as "all LTE bands" even if modem readback expands to an explicit list
 - `GET /api/network/pci-lock` (read `QNWLOCK "common/4g"` state)
 - `POST /api/network/pci-lock`
   - body example (lock): `{ "lock": true, "earfcn": 6300, "pci": 106 }`

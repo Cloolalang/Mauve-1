@@ -7,6 +7,7 @@ Development/test platform: **Robustel R5010 router**.
 Current default setup:
 - Serial: `COM49`
 - Baud: `115200`
+- KPI poll: `2.0 Hz`
 - Local server: `http://127.0.0.1:8011`
 
 AT command catalog from current modem firmware:
@@ -60,7 +61,12 @@ AT command catalog from current modem firmware:
   - Auto ping every 10s toggle
   - `Clear All Charts` control (also clears Data Service KPI display)
   - Trend charts for Ping, RSRP, RSRQ, SINR, RSSI, State, Band, DL bandwidth, PCI, neighbour RSRP, neighbour PCI, intra-cell dominance
-  - 60-second sliding chart window (auto-scroll, avoids over-compression)
+  - Selectable chart window (60s to 60m)
+  - Dynamic chart axis label shows time span (for example, `Time axis: last 10m`)
+  - Optional `Time-roll gaps` mode to scroll by wall-clock time and show blank gaps when samples pause
+  - Serving-cell color mapping on KPI trend lines using current `EARFCN/PCI` with a stable high-contrast palette (historical segments keep prior cell colors)
+  - State and Band trend charts now use the same per-cell color-changing segmented plotting as RF/BW/PCI charts
+  - Intra-cell dominance trend is hidden when primary serving-cell data is unavailable
   - Thin red threshold lines on RF charts:
     - RSRP min `-105 dBm`
     - RSRQ min `-15 dB`
@@ -147,7 +153,7 @@ Set environment variables before start:
 ```powershell
 $env:MD_SERIAL_PORT="COM49"
 $env:MD_BAUDRATE="115200"
-$env:MD_KPI_POLL_HZ="1.0"
+$env:MD_KPI_POLL_HZ="2.0"
 ```
 
 ## Getting started
@@ -167,7 +173,8 @@ $env:MD_KPI_POLL_HZ="1.0"
    - Check **Primary cell intra-cell dominance** value and trend behavior.
    - Run **AT Ping Test** and confirm ping appears in AT Console and Ping Trend chart.
    - Watch RF, neighbour, dominance, State/Band/PCI, and Bandwidth charts update with live polling.
-   - Confirm RF charts show red threshold guide lines and auto-scroll over a 60s window.
+   - Use the **Chart window** selector to switch retention from `60s` up to `60m`.
+   - Confirm RF charts show red threshold guide lines and auto-scroll over the selected window.
    - Optional: enable **RF smoothing** and verify 10-sample rolling average behavior.
    - Use **Clear All Charts** and confirm all chart histories reset.
 4. Check serial status:

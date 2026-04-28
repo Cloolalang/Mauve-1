@@ -51,7 +51,7 @@ DEFAULT_PORT = os.getenv("MD_SERIAL_PORT", str(_last_serial.get("port") or "COM4
 DEFAULT_BAUD = int(os.getenv("MD_BAUDRATE", str(_last_serial.get("baudrate") or "115200")))
 
 engine = SerialEngine(port=DEFAULT_PORT, baudrate=DEFAULT_BAUD)
-kpi_runtime = KpiRuntime(poll_hz=float(os.getenv("MD_KPI_POLL_HZ", "1.0")))
+kpi_runtime = KpiRuntime(poll_hz=float(os.getenv("MD_KPI_POLL_HZ", "2.0")))
 _kpi_task: asyncio.Task[None] | None = None
 _ws_push_task: asyncio.Task[None] | None = None
 _lock_guard_task: asyncio.Task[None] | None = None
@@ -124,7 +124,7 @@ class ReopenBody(BaseModel):
 
 
 class KpiPollBody(BaseModel):
-    poll_hz: float = Field(default=1.0, ge=0.1, le=5.0)
+    poll_hz: float = Field(default=2.0, ge=0.1, le=5.0)
 
 
 class CopsSetBody(BaseModel):
@@ -377,10 +377,19 @@ def _normalize_lock_value(key: str, value: str | None) -> str:
 
 
 def _lock_value_matches(key: str, want: str, current: dict[str, str | None]) -> bool:
+    def _band_match_all_ok(wanted: str, got: str) -> bool:
+        # Modems often echo "all bands" as either literal 0 or an expanded list.
+        if wanted == "0":
+            return bool(got)
+        return wanted == got
+
     if key == "nr5g_band":
         got_nr = _normalize_lock_value("nr5g_band", current.get("nr5g_band"))
         got_nsa = _normalize_lock_value("nsa_nr5g_band", current.get("nsa_nr5g_band"))
-        return want == got_nr or want == got_nsa
+        return _band_match_all_ok(want, got_nr) or _band_match_all_ok(want, got_nsa)
+    if key in {"lte_band", "nsa_nr5g_band"}:
+        got = _normalize_lock_value(key, current.get(key))
+        return _band_match_all_ok(want, got)
     got = _normalize_lock_value(key, current.get(key))
     return want == got
 
@@ -835,6 +844,19 @@ async def home() -> HTMLResponse:
   <div id="status" class="label" style="margin-top:8px;">Connecting...</div>
   <div style="margin-top:10px; display:flex; gap:14px; align-items:center; flex-wrap:wrap;">
     <button id="btn-clear-charts">Clear All Charts</button>
+    <button id="btn-chart-gap-mode">Time-roll gaps: OFF</button>
+    <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6;">
+      Chart window
+      <select id="chart-window-select" style="background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:3px 6px;">
+        <option value="60">60s</option>
+        <option value="120">2m</option>
+        <option value="300">5m</option>
+        <option value="600">10m</option>
+        <option value="900">15m</option>
+        <option value="1800">30m</option>
+        <option value="3600">60m</option>
+      </select>
+    </label>
     <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6;">
       <input id="rf-smooth-toggle" type="checkbox" />
       RF smoothing (rolling avg, last 10 samples)
@@ -909,67 +931,67 @@ async def home() -> HTMLResponse:
     <div class="card">
       <div class="label">RSRP Trend (dBm)</div>
       <canvas id="rsrpchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
     <div class="card">
       <div class="label">RSRQ Trend (dB)</div>
       <canvas id="rsrqchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
     <div class="card">
-      <div class="label">SINR Trend (QSINR PRX)</div>
+      <div class="label">SNIR Trend (dB)</div>
       <canvas id="sinrchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
     <div class="card">
       <div class="label">RSSI Trend (dBm)</div>
       <canvas id="rssichart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
     <div class="card">
       <div class="label">Intra-cell Dominance Trend (dB)</div>
       <canvas id="dominancechart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
     <div class="card">
       <div class="label">Bandwidth Trend (DL BW)</div>
       <canvas id="bwchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
     <div class="card">
       <div class="label">State Trend</div>
       <canvas id="statechart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
     <div class="card">
       <div class="label">Band Trend</div>
       <canvas id="bandchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
     <div class="card">
       <div class="label">PCI Trend</div>
       <canvas id="pcichart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
     <div class="card">
       <div class="label">Neighbour RSRP Trend (dBm)</div>
       <canvas id="nbrsrpchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
     <div class="card">
       <div class="label">Neighbour PCI Trend</div>
       <canvas id="nbpcichart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label" style="margin-top:6px;">Last 60 samples</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
     <div class="card">
@@ -1161,7 +1183,7 @@ async def home() -> HTMLResponse:
     <div class="card">
       <div class="label">Ping Trend (ms)</div>
       <canvas id="pingchart" width="420" height="180" style="width:100%; height:180px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label" style="margin-top:6px;">Last 30 ping samples</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
     <div class="card" style="grid-column: 1 / -1;">
@@ -1189,6 +1211,36 @@ async def home() -> HTMLResponse:
       const shown = Math.abs(dbm % 1) < 0.05 ? dbm.toFixed(0) : dbm.toFixed(1);
       return `${shown} dBm`;
     };
+    const CELL_COLOR_PALETTE = [
+      "#e6194b", // red
+      "#4363d8", // blue
+      "#3cb44b", // green
+      "#f58231", // orange
+      "#911eb4", // purple
+      "#46f0f0", // cyan
+      "#ffe119", // yellow
+      "#f032e6", // magenta
+      "#008080", // teal-dark
+      "#9a6324", // brown
+      "#3a86ff", // bright blue
+      "#808000", // olive
+      "#800000", // maroon
+      "#aaffc3", // mint
+      "#000000"  // black
+    ];
+    const cellColorMap = new Map();
+    let nextColorSeed = 0;
+    const colorForCellKey = (cellKey, fallback = "#4da3ff") => {
+      const s = String(cellKey || "").trim();
+      if (!s) return fallback;
+      if (cellColorMap.has(s)) return cellColorMap.get(s) || fallback;
+      // Step through palette with a prime-like jump to reduce adjacent similarity.
+      const idx = (nextColorSeed * 7 + 3) % CELL_COLOR_PALETTE.length;
+      nextColorSeed += 1;
+      const c = CELL_COLOR_PALETTE[idx] || fallback;
+      cellColorMap.set(s, c);
+      return c;
+    };
     let autoPingTimer = null;
     let pingBusy = false;
     let serialBaud = 115200;
@@ -1202,9 +1254,12 @@ async def home() -> HTMLResponse:
     const pciHistory = [];
     const neighbourHistory = { rsrp: [], pci: [] };
     const categoryHistory = { state: [], band: [] };
-    const CHART_WINDOW_MS = 60 * 1000;
+    let chartWindowMs = 60 * 1000;
     const RF_SMOOTH_WINDOW = 10;
     let rfSmoothingEnabled = false;
+    let chartGapModeEnabled = false;
+    let currentPollHz = 2.0;
+    let primaryCellDataAvailable = false;
     let lastTrendSampleTs = null;
     const copsModeName = (m) => {
       if (m === 0) return "0 (Auto)";
@@ -1231,8 +1286,64 @@ async def home() -> HTMLResponse:
 
     function pruneHistoryByAge(history, nowMs = Date.now()) {
       if (!Array.isArray(history) || history.length === 0) return;
-      const cutoff = nowMs - CHART_WINDOW_MS;
+      const cutoff = nowMs - chartWindowMs;
       while (history.length && Number(history[0]?.t || 0) < cutoff) history.shift();
+    }
+
+    function pruneAllHistory(nowMs = Date.now()) {
+      pruneHistoryByAge(pingHistory, nowMs);
+      Object.values(rfHistory).forEach((h) => pruneHistoryByAge(h, nowMs));
+      pruneHistoryByAge(bwHistory, nowMs);
+      pruneHistoryByAge(pciHistory, nowMs);
+      Object.values(neighbourHistory).forEach((h) => pruneHistoryByAge(h, nowMs));
+      Object.values(categoryHistory).forEach((h) => pruneHistoryByAge(h, nowMs));
+    }
+
+    function formatAxisDuration(ms) {
+      const sec = Math.max(1, Math.round(Number(ms || 0) / 1000));
+      if (sec < 60) return `${sec}s`;
+      const min = Math.round(sec / 60);
+      if (min < 60) return `${min}m`;
+      const hrs = Math.round(min / 60);
+      return `${hrs}h`;
+    }
+
+    function updateChartAxisLabels() {
+      const txt = `Time axis: last ${formatAxisDuration(chartWindowMs)}`;
+      document.querySelectorAll(".chart-axis-label").forEach((node) => {
+        node.textContent = txt;
+      });
+    }
+
+    function redrawAllCharts() {
+      drawPingChart();
+      drawRfCharts();
+      drawBwChart();
+      drawPciChart();
+      drawNeighbourCharts();
+      drawCategoryCharts();
+    }
+
+    function updateChartGapButton() {
+      const b = el("btn-chart-gap-mode");
+      if (!b) return;
+      b.textContent = chartGapModeEnabled ? "Time-roll gaps: ON" : "Time-roll gaps: OFF";
+    }
+
+    function setChartGapMode(enabled) {
+      chartGapModeEnabled = !!enabled;
+      updateChartGapButton();
+      pruneAllHistory(Date.now());
+      redrawAllCharts();
+    }
+
+    function applyChartWindowSec(seconds) {
+      const s = Number(seconds);
+      if (!Number.isFinite(s) || s < 60 || s > 3600) return;
+      chartWindowMs = Math.round(s * 1000);
+      updateChartAxisLabels();
+      pruneAllHistory(Date.now());
+      redrawAllCharts();
     }
 
     function smoothSeries(samples, windowSize) {
@@ -1245,7 +1356,7 @@ async def home() -> HTMLResponse:
         rollingSum += v;
         if (i >= windowSize) rollingSum -= Number(samples[i - windowSize].v) || 0;
         const count = Math.min(i + 1, windowSize);
-        out.push({ t: samples[i].t, v: rollingSum / count });
+        out.push({ t: samples[i].t, v: rollingSum / count, c: samples[i].c });
       }
       return out;
     }
@@ -1330,6 +1441,11 @@ async def home() -> HTMLResponse:
       const pci = lte.pcid;
       currentServingEarfcn = Number.isFinite(Number(earfcn)) ? Number(earfcn) : null;
       currentServingPci = Number.isFinite(Number(pci)) ? Number(pci) : null;
+      primaryCellDataAvailable =
+        inService &&
+        Number.isFinite(currentServingEarfcn) &&
+        Number.isFinite(currentServingPci) &&
+        Number.isFinite(Number(lte.rsrp));
       if (earfcn === null || earfcn === undefined || pci === null || pci === undefined) {
         el("earfcnpci").textContent = "-";
       } else {
@@ -1366,6 +1482,8 @@ async def home() -> HTMLResponse:
         addCategorySample("state", srv.state || "-", trendTs);
         addCategorySample("band", net.band || "-", trendTs);
       }
+      const hz = Number(payload?.poll_hz);
+      if (Number.isFinite(hz) && hz > 0) currentPollHz = hz;
 
       el("chains").textContent =
         `QRSRP: PRX=${fmt(qrsrp.prx)} DRX=${fmt(qrsrp.drx)} RX2=${fmt(qrsrp.rx2)} RX3=${fmt(qrsrp.rx3)}\\n` +
@@ -2047,7 +2165,11 @@ async def home() -> HTMLResponse:
       const v = Number(value);
       if (!Number.isFinite(v) || !rfHistory[kind]) return;
       const t = tsSec ? Number(tsSec) * 1000 : Date.now();
-      rfHistory[kind].push({ t, v });
+      const cellKey =
+        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
+          ? `${currentServingEarfcn}/${currentServingPci}`
+          : null;
+      rfHistory[kind].push({ t, v, c: cellKey });
       pruneHistoryByAge(rfHistory[kind], t);
       drawRfCharts();
     }
@@ -2056,7 +2178,11 @@ async def home() -> HTMLResponse:
       const v = Number(value);
       if (!Number.isFinite(v)) return;
       const t = tsSec ? Number(tsSec) * 1000 : Date.now();
-      bwHistory.push({ t, v });
+      const cellKey =
+        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
+          ? `${currentServingEarfcn}/${currentServingPci}`
+          : null;
+      bwHistory.push({ t, v, c: cellKey });
       pruneHistoryByAge(bwHistory, t);
       drawBwChart();
     }
@@ -2065,7 +2191,11 @@ async def home() -> HTMLResponse:
       const v = Number(value);
       if (!Number.isFinite(v)) return;
       const t = tsSec ? Number(tsSec) * 1000 : Date.now();
-      pciHistory.push({ t, v });
+      const cellKey =
+        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
+          ? `${currentServingEarfcn}/${currentServingPci}`
+          : null;
+      pciHistory.push({ t, v, c: cellKey });
       pruneHistoryByAge(pciHistory, t);
       drawPciChart();
     }
@@ -2074,7 +2204,11 @@ async def home() -> HTMLResponse:
       const v = Number(value);
       if (!Number.isFinite(v) || !neighbourHistory[kind]) return;
       const t = tsSec ? Number(tsSec) * 1000 : Date.now();
-      neighbourHistory[kind].push({ t, v });
+      const cellKey =
+        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
+          ? `${currentServingEarfcn}/${currentServingPci}`
+          : null;
+      neighbourHistory[kind].push({ t, v, c: cellKey });
       pruneHistoryByAge(neighbourHistory[kind], t);
       drawNeighbourCharts();
     }
@@ -2083,7 +2217,11 @@ async def home() -> HTMLResponse:
       if (!categoryHistory[kind]) return;
       const v = String(value || "-").trim() || "-";
       const t = tsSec ? Number(tsSec) * 1000 : Date.now();
-      categoryHistory[kind].push({ t, v });
+      const cellKey =
+        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
+          ? `${currentServingEarfcn}/${currentServingPci}`
+          : null;
+      categoryHistory[kind].push({ t, v, c: cellKey });
       pruneHistoryByAge(categoryHistory[kind], t);
       drawCategoryCharts();
     }
@@ -2134,21 +2272,39 @@ async def home() -> HTMLResponse:
       const y0 = h - 12;
       const y1 = 10;
       const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
+      const nowMs = Date.now();
+      const windowStartMs = nowMs - chartWindowMs;
+      const expectedStepMs = Math.max(200, 1000 / Math.max(0.1, Number(currentPollHz) || 2));
+      const gapBreakMs = expectedStepMs * 1.8;
+      const xFor = (p, i) => {
+        if (!chartGapModeEnabled) return x0 + i * xStep;
+        const t = Number(p?.t);
+        if (!Number.isFinite(t)) return x0 + i * xStep;
+        const ratio = Math.max(0, Math.min(1, (t - windowStartMs) / chartWindowMs));
+        return x0 + ratio * (x1 - x0);
+      };
 
       ctx.strokeStyle = "#39d353";
       ctx.lineWidth = 2;
-      ctx.beginPath();
-      pingHistory.forEach((p, i) => {
-        const x = x0 + i * xStep;
-        const y = y0 - ((p.v - yMin) / span) * (y0 - y1);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
-      ctx.stroke();
+      for (let i = 1; i < pingHistory.length; i++) {
+        const p0 = pingHistory[i - 1];
+        const p1 = pingHistory[i];
+        const t0 = Number(p0?.t);
+        const t1 = Number(p1?.t);
+        if (chartGapModeEnabled && Number.isFinite(t0) && Number.isFinite(t1) && (t1 - t0) > gapBreakMs) continue;
+        const xA = xFor(p0, i - 1);
+        const yA = y0 - ((p0.v - yMin) / span) * (y0 - y1);
+        const xB = xFor(p1, i);
+        const yB = y0 - ((p1.v - yMin) / span) * (y0 - y1);
+        ctx.beginPath();
+        ctx.moveTo(xA, yA);
+        ctx.lineTo(xB, yB);
+        ctx.stroke();
+      }
 
       ctx.fillStyle = "#8be9a8";
       pingHistory.forEach((p, i) => {
-        const x = x0 + i * xStep;
+        const x = xFor(p, i);
         const y = y0 - ((p.v - yMin) / span) * (y0 - y1);
         ctx.beginPath();
         ctx.arc(x, y, 2.2, 0, Math.PI * 2);
@@ -2206,6 +2362,17 @@ async def home() -> HTMLResponse:
       const y0 = h - 12;
       const y1 = 10;
       const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
+      const nowMs = Date.now();
+      const windowStartMs = nowMs - chartWindowMs;
+      const expectedStepMs = Math.max(200, 1000 / Math.max(0.1, Number(currentPollHz) || 2));
+      const gapBreakMs = expectedStepMs * 1.8;
+      const xFor = (p, i) => {
+        if (!chartGapModeEnabled) return x0 + i * xStep;
+        const t = Number(p?.t);
+        if (!Number.isFinite(t)) return x0 + i * xStep;
+        const ratio = Math.max(0, Math.min(1, (t - windowStartMs) / chartWindowMs));
+        return x0 + ratio * (x1 - x0);
+      };
 
       if (Number.isFinite(thresholdValue)) {
         const yThreshold = y0 - ((Number(thresholdValue) - yMin) / span) * (y0 - y1);
@@ -2217,21 +2384,29 @@ async def home() -> HTMLResponse:
         ctx.stroke();
       }
 
-      ctx.strokeStyle = color;
+      const sampleColor = (p) => colorForCellKey(p?.c, color);
       ctx.lineWidth = 2;
-      ctx.beginPath();
-      samples.forEach((p, i) => {
-        const x = x0 + i * xStep;
-        const y = y0 - ((p.v - yMin) / span) * (y0 - y1);
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
-      ctx.stroke();
+      for (let i = 1; i < samples.length; i++) {
+        const p0 = samples[i - 1];
+        const p1 = samples[i];
+        const t0 = Number(p0?.t);
+        const t1 = Number(p1?.t);
+        if (chartGapModeEnabled && Number.isFinite(t0) && Number.isFinite(t1) && (t1 - t0) > gapBreakMs) continue;
+        const xA = xFor(p0, i - 1);
+        const yA = y0 - ((p0.v - yMin) / span) * (y0 - y1);
+        const xB = xFor(p1, i);
+        const yB = y0 - ((p1.v - yMin) / span) * (y0 - y1);
+        ctx.strokeStyle = sampleColor(p1);
+        ctx.beginPath();
+        ctx.moveTo(xA, yA);
+        ctx.lineTo(xB, yB);
+        ctx.stroke();
+      }
 
-      ctx.fillStyle = color;
       samples.forEach((p, i) => {
-        const x = x0 + i * xStep;
+        const x = xFor(p, i);
         const y = y0 - ((p.v - yMin) / span) * (y0 - y1);
+        ctx.fillStyle = sampleColor(p);
         ctx.beginPath();
         ctx.arc(x, y, 2.1, 0, Math.PI * 2);
         ctx.fill();
@@ -2243,25 +2418,46 @@ async def home() -> HTMLResponse:
       const rsrq = rfSmoothingEnabled ? smoothSeries(rfHistory.rsrq, RF_SMOOTH_WINDOW) : rfHistory.rsrq;
       const sinr = rfSmoothingEnabled ? smoothSeries(rfHistory.sinr, RF_SMOOTH_WINDOW) : rfHistory.sinr;
       const rssi = rfSmoothingEnabled ? smoothSeries(rfHistory.rssi, RF_SMOOTH_WINDOW) : rfHistory.rssi;
-      const dominance = rfSmoothingEnabled ? smoothSeries(rfHistory.dominance, RF_SMOOTH_WINDOW) : rfHistory.dominance;
-      drawMetricChart("rsrpchart", rsrp, "dBm", "#4da3ff", -105);
-      drawMetricChart("rsrqchart", rsrq, "dB", "#f4b400", -15);
-      drawMetricChart("sinrchart", sinr, "dB", "#ff6d6d", 0);
-      drawMetricChart("rssichart", rssi, "dBm", "#b388ff", -25);
+      const dominanceSource = rfSmoothingEnabled ? smoothSeries(rfHistory.dominance, RF_SMOOTH_WINDOW) : rfHistory.dominance;
+      const dominance = primaryCellDataAvailable ? dominanceSource : [];
+      const currentCellKey =
+        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
+          ? `${currentServingEarfcn}/${currentServingPci}`
+          : null;
+      const pciColor = colorForCellKey(currentCellKey, "#4da3ff");
+      drawMetricChart("rsrpchart", rsrp, "dBm", pciColor, -105);
+      drawMetricChart("rsrqchart", rsrq, "dB", pciColor, -15);
+      drawMetricChart("sinrchart", sinr, "dB", pciColor, 0);
+      drawMetricChart("rssichart", rssi, "dBm", pciColor, -25);
       drawMetricChart("dominancechart", dominance, "dB", "#50fa7b", 6);
     }
 
     function drawBwChart() {
-      drawMetricChart("bwchart", bwHistory, "MHz", "#00d1b2");
+      const currentCellKey =
+        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
+          ? `${currentServingEarfcn}/${currentServingPci}`
+          : null;
+      const cellColor = colorForCellKey(currentCellKey, "#00d1b2");
+      drawMetricChart("bwchart", bwHistory, "MHz", cellColor);
     }
 
     function drawPciChart() {
-      drawMetricChart("pcichart", pciHistory, "", "#ff7f50");
+      const currentCellKey =
+        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
+          ? `${currentServingEarfcn}/${currentServingPci}`
+          : null;
+      const cellColor = colorForCellKey(currentCellKey, "#ff7f50");
+      drawMetricChart("pcichart", pciHistory, "", cellColor);
     }
 
     function drawNeighbourCharts() {
-      drawMetricChart("nbrsrpchart", neighbourHistory.rsrp, "dBm", "#61dafb");
-      drawMetricChart("nbpcichart", neighbourHistory.pci, "", "#f78c6c");
+      const currentCellKey =
+        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
+          ? `${currentServingEarfcn}/${currentServingPci}`
+          : null;
+      const cellColor = colorForCellKey(currentCellKey, "#61dafb");
+      drawMetricChart("nbrsrpchart", neighbourHistory.rsrp, "dBm", cellColor);
+      drawMetricChart("nbpcichart", neighbourHistory.pci, "", cellColor);
     }
 
     function drawCategoryChart(canvasId, samples, color) {
@@ -2311,23 +2507,43 @@ async def home() -> HTMLResponse:
 
       const n = samples.length;
       const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
-      ctx.strokeStyle = color;
+      const nowMs = Date.now();
+      const windowStartMs = nowMs - chartWindowMs;
+      const expectedStepMs = Math.max(200, 1000 / Math.max(0.1, Number(currentPollHz) || 2));
+      const gapBreakMs = expectedStepMs * 1.8;
+      const xFor = (p, i) => {
+        if (!chartGapModeEnabled) return x0 + i * xStep;
+        const t = Number(p?.t);
+        if (!Number.isFinite(t)) return x0 + i * xStep;
+        const ratio = Math.max(0, Math.min(1, (t - windowStartMs) / chartWindowMs));
+        return x0 + ratio * (x1 - x0);
+      };
+      const sampleColor = (p) => colorForCellKey(p?.c, color);
       ctx.lineWidth = 2;
-      ctx.beginPath();
-      samples.forEach((p, i) => {
-        const idx = labels.indexOf(p.v);
-        const y = y0 - (idx / Math.max(1, levels)) * (y0 - y1);
-        const x = x0 + i * xStep;
-        if (i === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      });
-      ctx.stroke();
+      for (let i = 1; i < samples.length; i++) {
+        const p0 = samples[i - 1];
+        const p1 = samples[i];
+        const t0 = Number(p0?.t);
+        const t1 = Number(p1?.t);
+        if (chartGapModeEnabled && Number.isFinite(t0) && Number.isFinite(t1) && (t1 - t0) > gapBreakMs) continue;
+        const idx0 = labels.indexOf(p0.v);
+        const idx1 = labels.indexOf(p1.v);
+        const y0p = y0 - (idx0 / Math.max(1, levels)) * (y0 - y1);
+        const y1p = y0 - (idx1 / Math.max(1, levels)) * (y0 - y1);
+        const xA = xFor(p0, i - 1);
+        const xB = xFor(p1, i);
+        ctx.strokeStyle = sampleColor(p1);
+        ctx.beginPath();
+        ctx.moveTo(xA, y0p);
+        ctx.lineTo(xB, y1p);
+        ctx.stroke();
+      }
 
-      ctx.fillStyle = color;
       samples.forEach((p, i) => {
         const idx = labels.indexOf(p.v);
         const y = y0 - (idx / Math.max(1, levels)) * (y0 - y1);
-        const x = x0 + i * xStep;
+        const x = xFor(p, i);
+        ctx.fillStyle = sampleColor(p);
         ctx.beginPath();
         ctx.arc(x, y, 2.1, 0, Math.PI * 2);
         ctx.fill();
@@ -2335,8 +2551,13 @@ async def home() -> HTMLResponse:
     }
 
     function drawCategoryCharts() {
-      drawCategoryChart("statechart", categoryHistory.state, "#8be9fd");
-      drawCategoryChart("bandchart", categoryHistory.band, "#ff9f43");
+      const currentCellKey =
+        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
+          ? `${currentServingEarfcn}/${currentServingPci}`
+          : null;
+      const cellColor = colorForCellKey(currentCellKey, "#8be9fd");
+      drawCategoryChart("statechart", categoryHistory.state, cellColor);
+      drawCategoryChart("bandchart", categoryHistory.band, cellColor);
     }
 
     function clearDataServiceKpi() {
@@ -2427,6 +2648,10 @@ async def home() -> HTMLResponse:
     el("btn-volte-test").addEventListener("click", () => runVolteTest());
     el("auto-ping-toggle").addEventListener("change", (ev) => setAutoPing(!!ev.target.checked));
     el("btn-clear-charts").addEventListener("click", () => clearAllCharts());
+    el("btn-chart-gap-mode").addEventListener("click", () => setChartGapMode(!chartGapModeEnabled));
+    el("chart-window-select").addEventListener("change", (ev) => {
+      applyChartWindowSec(Number(ev.target?.value || 60));
+    });
     el("rf-smooth-toggle").addEventListener("change", (ev) => {
       rfSmoothingEnabled = !!ev.target.checked;
       drawRfCharts();
@@ -2439,6 +2664,11 @@ async def home() -> HTMLResponse:
     setInterval(pollFallback, 2000);
     setInterval(pollAtLog, 1200);
     setInterval(() => readSerialStatus(false), 3000);
+    setInterval(() => {
+      if (!chartGapModeEnabled) return;
+      pruneAllHistory(Date.now());
+      redrawAllCharts();
+    }, 400);
     pollFallback();
     pollAtLog();
     readSerialStatus(true);
@@ -2449,12 +2679,9 @@ async def home() -> HTMLResponse:
     readMnoState();
     readDataGate();
     readSimHighLevel();
-    drawPingChart();
-    drawRfCharts();
-    drawBwChart();
-    drawPciChart();
-    drawNeighbourCharts();
-    drawCategoryCharts();
+    applyChartWindowSec(Number(el("chart-window-select")?.value || 60));
+    updateChartGapButton();
+    redrawAllCharts();
   </script>
 </body>
 </html>"""
