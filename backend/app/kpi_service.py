@@ -297,9 +297,9 @@ def _parse_qeng_servingcell(lines: list[str]) -> dict[str, Any] | None:
 def _parse_qeng_strongest_neighbour(
     lines: list[str], serving_pci: int | None = None, serving_earfcn: int | None = None
 ) -> dict[str, int] | None:
-    # Intra-frequency neighbour line shape:
-    # +QENG: "neighbourcell intra","LTE",<earfcn>,<pcid>,<rsrq>,<rsrp>,...
-    # For intra-cell dominance, only compare against intra LTE neighbours on same EARFCN.
+    # Intra-frequency neighbour line shape (Quectel LTE, common):
+    # ... "LTE",<EARFCN>,<PCID>,<RSRQ>,<RSRP>[,optional extra fields ...]
+    # Selection: strongest RSRP among intra rows on serving EARFCN (excluding serving PCI when known).
     best: dict[str, int] | None = None
     fallback: dict[str, int] | None = None
     for raw in lines:
@@ -316,14 +316,67 @@ def _parse_qeng_strongest_neighbour(
                 # ... "LTE",earfcn,pcid,rsrq,rsrp,...
                 earfcn = _safe_int(parts[i + 1]) if len(parts) > i + 1 else None
                 pci = _safe_int(parts[i + 2]) if len(parts) > i + 2 else None
+                rsrq = _safe_int(parts[i + 3]) if len(parts) > i + 3 else None
                 rsrp = _safe_int(parts[i + 4])
+                rssi = _safe_int(parts[i + 5]) if len(parts) > i + 5 else None
+                sinr = _safe_int(parts[i + 6]) if len(parts) > i + 6 else None
                 if rsrp is None or pci is None:
                     continue
                 if serving_earfcn is not None and earfcn is not None and earfcn != serving_earfcn:
                     continue
-                cand = {"pci": pci, "rsrp": rsrp, "earfcn": earfcn}
+                cand: dict[str, int | None] = {
+                    "pci": pci,
+                    "rsrp": rsrp,
+                    "earfcn": earfcn,
+                    "rsrq": rsrq,
+                    "rssi": rssi,
+                    "sinr": sinr,
+                }
                 if serving_pci is not None and pci == serving_pci:
                     # Some firmware lists serving cell first in neighbour table; keep only as fallback.
+                    if fallback is None or rsrp > fallback["rsrp"]:
+                        fallback = cand
+                    continue
+                if best is None or rsrp > best["rsrp"]:
+                    best = cand
+    return best or fallback
+
+
+def _parse_qeng_strongest_inter_neighbour(
+    lines: list[str], serving_pci: int | None = None, serving_earfcn: int | None = None
+) -> dict[str, int | None] | None:
+    """Inter-frequency (inter-cell) LTE neighbours from +QENG neighbourcell inter lines."""
+    best: dict[str, int | None] | None = None
+    fallback: dict[str, int | None] | None = None
+    for raw in lines:
+        if not raw.startswith("+QENG:"):
+            continue
+        low = raw.lower()
+        if "neighbourcell inter" not in low:
+            continue
+        parts = _parse_csv_payload(raw.split(":", 1)[1].strip())
+        for i, token in enumerate(parts):
+            rat = token.upper()
+            if rat == "LTE" and len(parts) > i + 4:
+                earfcn = _safe_int(parts[i + 1]) if len(parts) > i + 1 else None
+                pci = _safe_int(parts[i + 2]) if len(parts) > i + 2 else None
+                rsrq = _safe_int(parts[i + 3]) if len(parts) > i + 3 else None
+                rsrp = _safe_int(parts[i + 4])
+                rssi = _safe_int(parts[i + 5]) if len(parts) > i + 5 else None
+                sinr = _safe_int(parts[i + 6]) if len(parts) > i + 6 else None
+                if rsrp is None or pci is None:
+                    continue
+                if serving_earfcn is not None and earfcn is not None and earfcn == serving_earfcn:
+                    continue
+                cand: dict[str, int | None] = {
+                    "pci": pci,
+                    "rsrp": rsrp,
+                    "earfcn": earfcn,
+                    "rsrq": rsrq,
+                    "rssi": rssi,
+                    "sinr": sinr,
+                }
+                if serving_pci is not None and pci == serving_pci:
                     if fallback is None or rsrp > fallback["rsrp"]:
                         fallback = cand
                     continue
@@ -577,6 +630,27 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                     sample_ts,
                 )
 
+                intra_n = _parse_qeng_strongest_neighbour(
+                    qeng_nb.get("lines", []), serving_pci=serving_pci, serving_earfcn=serving_earfcn
+                )
+                inter_n = _parse_qeng_strongest_inter_neighbour(
+                    qeng_nb.get("lines", []), serving_pci=serving_pci, serving_earfcn=serving_earfcn
+                )
+                neighbour = {
+                    "strongest_rsrp": intra_n.get("rsrp") if intra_n else None,
+                    "strongest_pci": intra_n.get("pci") if intra_n else None,
+                    "strongest_earfcn": intra_n.get("earfcn") if intra_n else None,
+                    "strongest_rsrq": intra_n.get("rsrq") if intra_n else None,
+                    "strongest_rssi": intra_n.get("rssi") if intra_n else None,
+                    "strongest_sinr": intra_n.get("sinr") if intra_n else None,
+                    "inter_strongest_rsrp": inter_n.get("rsrp") if inter_n else None,
+                    "inter_strongest_pci": inter_n.get("pci") if inter_n else None,
+                    "inter_strongest_earfcn": inter_n.get("earfcn") if inter_n else None,
+                    "inter_strongest_rsrq": inter_n.get("rsrq") if inter_n else None,
+                    "inter_strongest_rssi": inter_n.get("rssi") if inter_n else None,
+                    "inter_strongest_sinr": inter_n.get("sinr") if inter_n else None,
+                }
+
                 parsed = {
                     "sample_ts": sample_ts,
                     "servingcell": serving,
@@ -589,17 +663,7 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                     "qrsrp": _parse_four_path_metric(qrsrp.get("lines", []), "+QRSRP:"),
                     "qrsrq": _parse_four_path_metric(qrsrq.get("lines", []), "+QRSRQ:"),
                     "qsinr": _parse_four_path_metric(qsinr.get("lines", []), "+QSINR:"),
-                    "neighbour": {
-                        **(
-                            (lambda n: {"strongest_rsrp": n["rsrp"], "strongest_pci": n["pci"], "strongest_earfcn": n.get("earfcn")})(n)
-                            if (
-                                n := _parse_qeng_strongest_neighbour(
-                                    qeng_nb.get("lines", []), serving_pci=serving_pci, serving_earfcn=serving_earfcn
-                                )
-                            )
-                            else {"strongest_rsrp": None, "strongest_pci": None, "strongest_earfcn": None}
-                        ),
-                    },
+                    "neighbour": neighbour,
                     "carrier_reselection": carrier_resel,
                     "raw": {
                         "cgmr": cgmr if need_fw else None,

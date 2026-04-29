@@ -25,7 +25,7 @@ from app.sim_usim_services import (
     label_usim_service,
 )
 
-APP_VERSION = "1.6"
+APP_VERSION = "1.7"
 
 
 def _serial_state_file_path() -> str:
@@ -1099,7 +1099,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="1.6.0",
+    version="1.7.0",
     lifespan=lifespan,
 )
 
@@ -1146,6 +1146,7 @@ async def home() -> HTMLResponse:
   <div id="status" class="label" style="margin-top:8px;">Connecting...</div>
   <div style="margin-top:10px; display:flex; gap:14px; align-items:center; flex-wrap:wrap;">
     <button id="btn-clear-charts">Clear All Charts</button>
+    <button id="btn-ui-defaults" type="button" title="Chart 10m, RF smoothing on, MNO Auto, RAT AUTO, LTE/NR bands, CA multi-band on, NRDC on">Apply UI defaults</button>
     <button id="btn-chart-gap-mode">Time-roll gaps: OFF</button>
     <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6;">
       Chart window
@@ -1161,7 +1162,7 @@ async def home() -> HTMLResponse:
     </label>
     <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6;">
       <input id="rf-smooth-toggle" type="checkbox" />
-      RF smoothing (rolling avg, last 10 samples)
+      RF smoothing (rolling avg, last 10 samples — primary + intra overlay)
     </label>
   </div>
 
@@ -1258,8 +1259,8 @@ async def home() -> HTMLResponse:
       <div class="row"><span class="label">RSSI</span><span id="rssi">-</span></div>
       <div class="row"><span class="label">Primary cell intra-cell dominance</span><span id="dominance">-</span></div>
       <div class="label" style="margin-top:10px;">Neighbour Cells RF KPI</div>
-      <div class="row"><span class="label">1st strongest neighbour RSRP</span><span id="nrsrp1">-</span></div>
-      <div class="row"><span class="label">1st strongest neighbour PCI</span><span id="npci1">-</span></div>
+      <div class="row"><span class="label">1st strongest neighbour RSRP (intra)</span><span id="nrsrp1">-</span></div>
+      <div class="row"><span class="label">1st strongest neighbour PCI (intra)</span><span id="npci1">-</span></div>
       <div class="row"><span class="label">1st strongest neighbour EARFCN (intra)</span><span id="nearfcn1">-</span></div>
     </div>
 
@@ -1270,32 +1271,56 @@ async def home() -> HTMLResponse:
     </div>
 
     <div class="card">
-      <div class="label">RSRP Trend (dBm)</div>
+      <div class="label">Primary and 1st strongest intra-cell neighbour RSRP Trend (dBm)</div>
       <canvas id="rsrpchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
     <div class="card">
-      <div class="label">RSRQ Trend (dB)</div>
+      <div class="label">Primary and 1st strongest intra-cell neighbour RSRQ Trend (dB)</div>
       <canvas id="rsrqchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
     <div class="card">
-      <div class="label">SNIR Trend (dB)</div>
+      <div class="label">Primary SNIR Trend (dB)</div>
       <canvas id="sinrchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
     <div class="card">
-      <div class="label">RSSI Trend (dBm)</div>
+      <div class="label">Primary and 1st strongest intra-cell neighbour RSSI Trend (dBm)</div>
       <canvas id="rssichart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
     <div class="card">
-      <div class="label">Intra-cell Dominance Trend (dB)</div>
+      <div class="label">Primary and 1st strongest intra-cell neighbour dominance Trend (dB)</div>
       <canvas id="dominancechart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+    </div>
+
+    <div class="card">
+      <div class="label">1st strongest inter-cell neighbour RSRP Trend (dBm)</div>
+      <canvas id="nbrintersrpchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+    </div>
+
+    <div class="card">
+      <div class="label">1st strongest inter-cell neighbour RSRQ Trend (dB)</div>
+      <canvas id="nbrintersrqchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+    </div>
+
+    <div class="card">
+      <div class="label">1st strongest inter-cell neighbour RSSI Trend (dBm)</div>
+      <canvas id="nbrinterrssichart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Primary and 1st strongest inter-cell neighbour dominance Trend (dB)</div>
+      <canvas id="nbridomchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
@@ -1314,24 +1339,6 @@ async def home() -> HTMLResponse:
     <div class="card">
       <div class="label">Band Trend</div>
       <canvas id="bandchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
-    </div>
-
-    <div class="card">
-      <div class="label">PCI Trend</div>
-      <canvas id="pcichart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
-    </div>
-
-    <div class="card">
-      <div class="label">Neighbour RSRP Trend (dBm)</div>
-      <canvas id="nbrsrpchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
-    </div>
-
-    <div class="card">
-      <div class="label">Neighbour PCI Trend</div>
-      <canvas id="nbpcichart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
@@ -1625,33 +1632,67 @@ async def home() -> HTMLResponse:
       if (n < 1000) return `${n.toFixed(1)} kbps`;
       return `${(n / 1000).toFixed(2)} Mbps`;
     };
+    /** Line/point colours for dark (#101010) canvas — avoid black and very dark RGBs (invisible/low contrast). */
     const CELL_COLOR_PALETTE = [
-      "#e6194b", // red
-      "#4363d8", // blue
-      "#3cb44b", // green
-      "#f58231", // orange
-      "#911eb4", // purple
-      "#46f0f0", // cyan
-      "#ffe119", // yellow
-      "#f032e6", // magenta
-      "#008080", // teal-dark
-      "#9a6324", // brown
-      "#3a86ff", // bright blue
-      "#808000", // olive
-      "#800000", // maroon
-      "#aaffc3", // mint
-      "#000000"  // black
+      "#e6194b",
+      "#4363d8",
+      "#42d982",
+      "#f58231",
+      "#bf7bff",
+      "#46f0f0",
+      "#ffe119",
+      "#ff5cd6",
+      "#2dd4bf",
+      "#daa520",
+      "#5c9dff",
+      "#b5cf2e",
+      "#ff7f7f",
+      "#baffd0",
+      "#eabfff"
     ];
     const cellColorMap = new Map();
     let nextColorSeed = 0;
-    const colorForCellKey = (cellKey, fallback = "#4da3ff") => {
+    function liftRgbForDarkBg(r, g, b, minMax = 108) {
+      let mx = Math.max(r, g, b);
+      if (mx >= minMax) return { r, g, b };
+      const s = mx < 1 ? 2.85 : Math.min(3.4, (minMax + 24) / mx);
+      return {
+        r: Math.min(255, Math.round(r * s + 38)),
+        g: Math.min(255, Math.round(g * s + 38)),
+        b: Math.min(255, Math.round(b * s + 38))
+      };
+    }
+    function hex6(r, g, b) {
+      return [r, g, b].map((x) => Math.max(0, Math.min(255, x)).toString(16).padStart(2, "0")).join("");
+    }
+    /** Normalize any hex (palette or fallback) so traces stay visible on dark chart background */
+    function traceColorForCanvas(hex) {
+      const raw = String(hex || "").trim();
+      const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(raw);
+      if (!m) return "#62c8ff";
+      let r = parseInt(m[1], 16);
+      let g = parseInt(m[2], 16);
+      let b = parseInt(m[3], 16);
+      const lifted = liftRgbForDarkBg(r, g, b);
+      r = lifted.r;
+      g = lifted.g;
+      b = lifted.b;
+      const mx2 = Math.max(r, g, b);
+      if (mx2 < 100) {
+        r = Math.min(255, r + (100 - mx2));
+        g = Math.min(255, g + (100 - mx2));
+        b = Math.min(255, b + (100 - mx2));
+      }
+      return `#${hex6(r, g, b)}`;
+    }
+    const colorForCellKey = (cellKey, fallback = "#62c8ff") => {
       const s = String(cellKey || "").trim();
-      if (!s) return fallback;
-      if (cellColorMap.has(s)) return cellColorMap.get(s) || fallback;
-      // Step through palette with a prime-like jump to reduce adjacent similarity.
+      const fb = traceColorForCanvas(fallback);
+      if (!s) return fb;
+      if (cellColorMap.has(s)) return cellColorMap.get(s) || fb;
       const idx = (nextColorSeed * 7 + 3) % CELL_COLOR_PALETTE.length;
       nextColorSeed += 1;
-      const c = CELL_COLOR_PALETTE[idx] || fallback;
+      const c = traceColorForCanvas(CELL_COLOR_PALETTE[idx] || fb);
       cellColorMap.set(s, c);
       return c;
     };
@@ -1674,9 +1715,13 @@ async def home() -> HTMLResponse:
     let lastPhAvgMs = null;
     let lastPhJitMs = null;
     const rfHistory = { rsrp: [], rsrq: [], sinr: [], rssi: [], dominance: [] };
+    /** Intra-EARFCN strongest neighbour (QENG neighbourcell intra) per metric for RF trend overlays. */
+    const rfNeighborOverlap = { rsrp: [], rsrq: [], rssi: [] };
+    const nbrInterRsrpHistory = [];
+    const nbrInterRsrqHistory = [];
+    const nbrInterRssiHistory = [];
+    const nInterDomHistory = [];
     const bwHistory = [];
-    const pciHistory = [];
-    const neighbourHistory = { rsrp: [], pci: [] };
     const carrierReselPciHistory = [];
     const carrierReselEarfcnHistory = [];
     const categoryHistory = { state: [], band: [] };
@@ -1688,13 +1733,27 @@ async def home() -> HTMLResponse:
     let primaryCellDataAvailable = false;
     let lastTrendSampleTs = null;
     let rfChartTooltipEl = null;
-    const RF_HOVER_CANVAS_IDS = ["rsrpchart", "rsrqchart", "sinrchart", "rssichart", "dominancechart"];
+    const RF_HOVER_CANVAS_IDS = [
+      "rsrpchart",
+      "rsrqchart",
+      "sinrchart",
+      "rssichart",
+      "dominancechart",
+      "nbrintersrpchart",
+      "nbrintersrqchart",
+      "nbrinterrssichart",
+      "nbridomchart"
+    ];
     const RF_CHART_TITLE_BY_ID = {
-      rsrpchart: "RSRP",
-      rsrqchart: "RSRQ",
-      sinrchart: "SINR",
-      rssichart: "RSSI",
-      dominancechart: "Intra-cell dominance"
+      rsrpchart: "Primary and 1st strongest intra-cell neighbour RSRP Trend (dBm)",
+      rsrqchart: "Primary and 1st strongest intra-cell neighbour RSRQ Trend (dB)",
+      sinrchart: "Primary SNIR Trend (dB)",
+      rssichart: "Primary and 1st strongest intra-cell neighbour RSSI Trend (dBm)",
+      dominancechart: "Primary and 1st strongest intra-cell neighbour dominance Trend (dB)",
+      nbrintersrpchart: "1st strongest inter-cell neighbour RSRP Trend (dBm)",
+      nbrintersrqchart: "1st strongest inter-cell neighbour RSRQ Trend (dB)",
+      nbrinterrssichart: "1st strongest inter-cell neighbour RSSI Trend (dBm)",
+      nbridomchart: "Primary and 1st strongest inter-cell neighbour dominance Trend (dB)"
     };
     const copsModeName = (m) => {
       if (m === 0) return "0 (Auto)";
@@ -1747,9 +1806,12 @@ async def home() -> HTMLResponse:
       pruneHistoryByAge(phAvgHistory, nowMs);
       pruneHistoryByAge(phJitHistory, nowMs);
       Object.values(rfHistory).forEach((h) => pruneHistoryByAge(h, nowMs));
+      Object.values(rfNeighborOverlap).forEach((h) => pruneHistoryByAge(h, nowMs));
+      pruneHistoryByAge(nbrInterRsrpHistory, nowMs);
+      pruneHistoryByAge(nbrInterRsrqHistory, nowMs);
+      pruneHistoryByAge(nbrInterRssiHistory, nowMs);
+      pruneHistoryByAge(nInterDomHistory, nowMs);
       pruneHistoryByAge(bwHistory, nowMs);
-      pruneHistoryByAge(pciHistory, nowMs);
-      Object.values(neighbourHistory).forEach((h) => pruneHistoryByAge(h, nowMs));
       pruneHistoryByAge(carrierReselPciHistory, nowMs);
       pruneHistoryByAge(carrierReselEarfcnHistory, nowMs);
       Object.values(categoryHistory).forEach((h) => pruneHistoryByAge(h, nowMs));
@@ -1777,9 +1839,8 @@ async def home() -> HTMLResponse:
       drawPhSweepChart();
       drawPhGauges();
       drawRfCharts();
+      drawInterNbrRfCharts();
       drawBwChart();
-      drawPciChart();
-      drawNeighbourCharts();
       drawCarrierReselChart();
       drawCategoryCharts();
     }
@@ -1819,6 +1880,71 @@ async def home() -> HTMLResponse:
         out.push({ t: samples[i].t, v: rollingSum / count, c: samples[i].c });
       }
       return out;
+    }
+
+    function nbrRfKey(nb) {
+      const row = nb || {};
+      const e = row.strongest_earfcn;
+      const p = row.strongest_pci;
+      if (e === null || e === undefined || p === null || p === undefined) return null;
+      const en = Number(e);
+      const pn = Number(p);
+      if (!Number.isFinite(en) || !Number.isFinite(pn)) return null;
+      return `${en}/${pn}`;
+    }
+
+    /** Same EARFCN as LTE primary: push strongest intra-cell neighbour RF samples for overlay charts. */
+    function pushRfNeighborIntraOverlap(nb, lte, trendTsSec) {
+      const pe = Number(lte && lte.earfcn);
+      const ne = Number(nb && nb.strongest_earfcn);
+      if (!Number.isFinite(pe) || !Number.isFinite(ne) || pe !== ne) return;
+      const nk = nbrRfKey(nb);
+      if (!nk) return;
+      const t = Number(trendTsSec);
+      const tMs = Number.isFinite(t) ? t * 1000 : Date.now();
+      const pushOne = (kind, raw) => {
+        const vv = Number(raw);
+        if (!Number.isFinite(vv) || !rfNeighborOverlap[kind]) return;
+        rfNeighborOverlap[kind].push({ t: tMs, v: vv, c: nk });
+        pruneHistoryByAge(rfNeighborOverlap[kind], tMs);
+      };
+      pushOne("rsrp", nb.strongest_rsrp);
+      pushOne("rsrq", nb.strongest_rsrq);
+      pushOne("rssi", nb.strongest_rssi);
+    }
+
+    function nbrInterRssiKey(nb) {
+      const row = nb || {};
+      const e = row.inter_strongest_earfcn;
+      const p = row.inter_strongest_pci;
+      if (e === null || e === undefined || p === null || p === undefined) return null;
+      const en = Number(e);
+      const pn = Number(p);
+      if (!Number.isFinite(en) || !Number.isFinite(pn)) return null;
+      return `${en}/${pn}`;
+    }
+
+    /** strongest inter-freq neighbour (QENG neighbourcell inter): RSRQ/RSRP/RSSI + primary−inter RSRP dominance. */
+    function addInterNeighbourTrendSamples(nb, lte, tsSec) {
+      const t = tsSec ? Number(tsSec) * 1000 : Date.now();
+      const ck = nbrInterRssiKey(nb);
+      const pushIf = (arr, raw) => {
+        const v = Number(raw);
+        if (!Number.isFinite(v)) return;
+        arr.push({ t, v, c: ck });
+        pruneHistoryByAge(arr, t);
+      };
+      pushIf(nbrInterRsrpHistory, nb && nb.inter_strongest_rsrp);
+      pushIf(nbrInterRsrqHistory, nb && nb.inter_strongest_rsrq);
+      pushIf(nbrInterRssiHistory, nb && nb.inter_strongest_rssi);
+      const pr = Number(lte && lte.rsrp);
+      const ir = Number(nb && nb.inter_strongest_rsrp);
+      if (Number.isFinite(pr) && Number.isFinite(ir)) {
+        const d = pr - ir;
+        nInterDomHistory.push({ t, v: d, c: ck });
+        pruneHistoryByAge(nInterDomHistory, t);
+      }
+      drawInterNbrRfCharts();
     }
 
     function applySnap(payload) {
@@ -1952,18 +2078,18 @@ async def home() -> HTMLResponse:
       const trendTs = sample.sample_ts || null;
       if (trendTs !== lastTrendSampleTs) {
         lastTrendSampleTs = trendTs;
-        addRfSample("rsrp", lte.rsrp, trendTs);
-        addRfSample("rsrq", lte.rsrq, trendTs);
-        addRfSample("sinr", qsinr.prx, trendTs);
-        addRfSample("rssi", lte.rssi, trendTs);
-        addRfSample("dominance", dominance, trendTs);
+        addRfSample("rsrp", lte.rsrp, trendTs, true);
+        addRfSample("rsrq", lte.rsrq, trendTs, true);
+        addRfSample("sinr", qsinr.prx, trendTs, true);
+        addRfSample("rssi", lte.rssi, trendTs, true);
+        addRfSample("dominance", dominance, trendTs, true);
+        pushRfNeighborIntraOverlap(nb, lte, trendTs);
+        drawRfCharts();
         addBwSample(lte.dl_bw, trendTs);
-        addPciSample(lte.pcid, trendTs);
-        addNeighbourSample("rsrp", nb.strongest_rsrp, trendTs);
-        addNeighbourSample("pci", nb.strongest_pci, trendTs);
         addCategorySample("state", srv.state || "-", trendTs);
         addCategorySample("band", net.band || "-", trendTs);
         addCarrierReselSamples(idleMob, trendTs);
+        addInterNeighbourTrendSamples(nb, lte, trendTs);
       }
       const hz = Number(payload?.poll_hz);
       if (Number.isFinite(hz) && hz > 0) currentPollHz = hz;
@@ -2516,6 +2642,51 @@ async def home() -> HTMLResponse:
       }
     }
 
+    const UI_DEFAULT_LTE_BANDS = "1:3:7:8:20:28:38:32";
+    const UI_DEFAULT_NR_BANDS = "1:3:7:8:28:78";
+
+    /** Local chart prefs + Modem QNWPREFCFG (+ MNO profile) presets for UK-style lab use. */
+    async function applyUiDefaults() {
+      const btn = el("btn-ui-defaults");
+      if (btn) btn.disabled = true;
+      try {
+        const cw = el("chart-window-select");
+        if (cw) {
+          cw.value = "600";
+          applyChartWindowSec(600);
+        }
+        const rst = el("rf-smooth-toggle");
+        if (rst) {
+          rst.checked = true;
+          rfSmoothingEnabled = true;
+          redrawAllCharts();
+        }
+
+        el("input-ratmode").value = "AUTO";
+        el("input-lteband").value = UI_DEFAULT_LTE_BANDS;
+        el("input-ca-enable").checked = true;
+        el("input-ca-on-bands").value = "";
+        el("input-ca-single-band").value = "";
+        el("input-nrband").value = UI_DEFAULT_NR_BANDS;
+        el("input-nrdc-enable").checked = true;
+
+        el("mno-select").value = "auto";
+
+        await setLocks();
+        await applyMnoSelection();
+
+        el("status").textContent =
+          "UI defaults: 10m chart window, smoothing on, locks (AUTO LTE " +
+          UI_DEFAULT_LTE_BANDS +
+          ", NR " +
+          UI_DEFAULT_NR_BANDS +
+          ", NRDC ON), MNO Auto — see RAT/Band lock and roaming messages.";
+        el("status").className = "label ok";
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
     async function runVolteTest() {
       const number = String(el("volte-number")?.value || "").trim();
       const password = String(el("volte-password")?.value || "");
@@ -2911,7 +3082,7 @@ async def home() -> HTMLResponse:
       drawIperfChart();
     }
 
-    function addRfSample(kind, value, tsSec = null) {
+    function addRfSample(kind, value, tsSec = null, deferDraw = false) {
       const v = Number(value);
       if (!Number.isFinite(v) || !rfHistory[kind]) return;
       const t = tsSec ? Number(tsSec) * 1000 : Date.now();
@@ -2921,7 +3092,7 @@ async def home() -> HTMLResponse:
           : null;
       rfHistory[kind].push({ t, v, c: cellKey });
       pruneHistoryByAge(rfHistory[kind], t);
-      drawRfCharts();
+      if (!deferDraw) drawRfCharts();
     }
 
     function addBwSample(value, tsSec = null) {
@@ -2935,32 +3106,6 @@ async def home() -> HTMLResponse:
       bwHistory.push({ t, v, c: cellKey });
       pruneHistoryByAge(bwHistory, t);
       drawBwChart();
-    }
-
-    function addPciSample(value, tsSec = null) {
-      const v = Number(value);
-      if (!Number.isFinite(v)) return;
-      const t = tsSec ? Number(tsSec) * 1000 : Date.now();
-      const cellKey =
-        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
-          ? `${currentServingEarfcn}/${currentServingPci}`
-          : null;
-      pciHistory.push({ t, v, c: cellKey });
-      pruneHistoryByAge(pciHistory, t);
-      drawPciChart();
-    }
-
-    function addNeighbourSample(kind, value, tsSec = null) {
-      const v = Number(value);
-      if (!Number.isFinite(v) || !neighbourHistory[kind]) return;
-      const t = tsSec ? Number(tsSec) * 1000 : Date.now();
-      const cellKey =
-        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
-          ? `${currentServingEarfcn}/${currentServingPci}`
-          : null;
-      neighbourHistory[kind].push({ t, v, c: cellKey });
-      pruneHistoryByAge(neighbourHistory[kind], t);
-      drawNeighbourCharts();
     }
 
     function addCategorySample(kind, value, tsSec = null) {
@@ -3521,6 +3666,243 @@ async def home() -> HTMLResponse:
       };
     }
 
+    /** Primary + strongest intra-cell (same-EARFCN) neighbour overlay; shared scale; time-aligned x when overlay exists. */
+    function drawMetricChartWithIntraNeighbour(
+      canvasId,
+      primarySamples,
+      overlapSamples,
+      unitLabel,
+      primaryColor,
+      thresholdValue = null
+    ) {
+      const overlap = Array.isArray(overlapSamples) ? overlapSamples : [];
+      if (!overlap.length) {
+        drawMetricChart(canvasId, primarySamples, unitLabel, primaryColor, thresholdValue);
+        return;
+      }
+
+      const canvas = el(canvasId);
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#101010";
+      ctx.fillRect(0, 0, w, h);
+
+      const prim = primarySamples || [];
+      if (!prim.length && !overlap.length) {
+        canvas._metricHover = null;
+        ctx.fillStyle = "#777";
+        ctx.font = "12px Arial";
+        ctx.fillText("No samples yet", 12, 24);
+        return;
+      }
+
+      const valueList = [...prim, ...overlap]
+        .map((p) => Number(p?.v))
+        .filter((x) => Number.isFinite(x));
+      if (!valueList.length) {
+        canvas._metricHover = null;
+        ctx.fillStyle = "#777";
+        ctx.font = "12px Arial";
+        ctx.fillText("No samples yet", 12, 24);
+        return;
+      }
+
+      const minV = Math.min(...valueList);
+      const maxV = Math.max(...valueList);
+      const pad = Math.max(1, (maxV - minV) * 0.15);
+      let yMin = minV - pad;
+      let yMax = maxV + pad;
+      if (Number.isFinite(thresholdValue)) {
+        yMin = Math.min(yMin, Number(thresholdValue) - 0.5);
+        yMax = Math.max(yMax, Number(thresholdValue) + 0.5);
+      }
+      const span = Math.max(1, yMax - yMin);
+
+      ctx.strokeStyle = "#2a2a2a";
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = 10 + (i * (h - 20)) / 4;
+        ctx.beginPath();
+        ctx.moveTo(40, y);
+        ctx.lineTo(w - 8, y);
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = "#aaa";
+      ctx.font = "11px Arial";
+      ctx.fillText(`${yMax.toFixed(1)} ${unitLabel}`, 4, 14);
+      ctx.fillText(`${yMin.toFixed(1)} ${unitLabel}`, 4, h - 8);
+
+      const n = prim.length || 1;
+      const x0 = 44;
+      const x1 = w - 12;
+      const y0 = h - 12;
+      const y1 = 10;
+      const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
+      const nowMs = Date.now();
+      const windowStartMs = nowMs - chartWindowMs;
+      const expectedStepMs = Math.max(200, 1000 / Math.max(0.1, Number(currentPollHz) || 2));
+      const gapBreakMsLocal = expectedStepMs * 1.8;
+      const intraOvTolMs = Math.max(50, expectedStepMs / 2);
+      const primArr = prim;
+
+      /** Match drawMetricChart: time-X only when Time-roll gaps is ON — never infer from intra overlay alone. */
+      const xPrim = (p, i) => {
+        if (!chartGapModeEnabled) return x0 + i * xStep;
+        const t = Number(p?.t);
+        if (!Number.isFinite(t)) return x0 + i * xStep;
+        const ratio = Math.max(0, Math.min(1, (t - windowStartMs) / chartWindowMs));
+        return x0 + ratio * (x1 - x0);
+      };
+
+      function slotNearestPrim(tt) {
+        const t = Number(tt);
+        if (!Number.isFinite(t) || !primArr.length) return -1;
+        let bestIx = -1;
+        let bestAbs = Infinity;
+        for (let q = 0; q < primArr.length; q++) {
+          const d = Math.abs(Number(primArr[q].t) - t);
+          if (d < bestAbs) {
+            bestAbs = d;
+            bestIx = q;
+          }
+        }
+        return bestAbs <= intraOvTolMs ? bestIx : -1;
+      }
+
+      /** When gaps OFF, neighbour traces share primary column (same poll time). When gaps ON, use time-roll like primary. */
+      const xNeighbourPt = (p) => {
+        if (chartGapModeEnabled) return xPrim(p, 0);
+        const sx = slotNearestPrim(p?.t);
+        if (sx < 0) return null;
+        return x0 + sx * xStep;
+      };
+
+      if (Number.isFinite(thresholdValue)) {
+        const yThreshold = y0 - ((Number(thresholdValue) - yMin) / span) * (y0 - y1);
+        ctx.strokeStyle = "#ff4d4f";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x0, yThreshold);
+        ctx.lineTo(x1, yThreshold);
+        ctx.stroke();
+      }
+
+      const neighbourFb = "#61dafb";
+      const primColorFn = (p) => colorForCellKey(p?.c, primaryColor);
+      const nbrColorFn = (p) => colorForCellKey(p?.c, neighbourFb);
+
+      ctx.lineWidth = 2;
+      for (let i = 1; i < primArr.length; i++) {
+        const p0 = primArr[i - 1];
+        const p1 = primArr[i];
+        const t0 = Number(p0?.t);
+        const t1 = Number(p1?.t);
+        if (chartGapModeEnabled && Number.isFinite(t0) && Number.isFinite(t1) && t1 - t0 > gapBreakMsLocal)
+          continue;
+        const xA = xPrim(p0, i - 1);
+        const yA = y0 - ((Number(p0.v) - yMin) / span) * (y0 - y1);
+        const xB = xPrim(p1, i);
+        const yB = y0 - ((Number(p1.v) - yMin) / span) * (y0 - y1);
+        ctx.strokeStyle = primColorFn(p1);
+        ctx.beginPath();
+        ctx.moveTo(xA, yA);
+        ctx.lineTo(xB, yB);
+        ctx.stroke();
+      }
+
+      const overlapSorted = [...overlap].sort((a, b) => Number(a.t) - Number(b.t));
+      ctx.setLineDash([5, 4]);
+      if (chartGapModeEnabled) {
+        for (let i = 1; i < overlapSorted.length; i++) {
+          const p0 = overlapSorted[i - 1];
+          const p1 = overlapSorted[i];
+          const t0 = Number(p0?.t);
+          const t1 = Number(p1?.t);
+          if (Number.isFinite(t0) && Number.isFinite(t1) && t1 - t0 > gapBreakMsLocal) continue;
+          const xA = xNeighbourPt(p0);
+          const xB = xNeighbourPt(p1);
+          if (xA === null || xB === null || !Number.isFinite(xA) || !Number.isFinite(xB)) continue;
+          const yA = y0 - ((Number(p0.v) - yMin) / span) * (y0 - y1);
+          const yB = y0 - ((Number(p1.v) - yMin) / span) * (y0 - y1);
+          ctx.strokeStyle = nbrColorFn(p1);
+          ctx.beginPath();
+          ctx.moveTo(xA, yA);
+          ctx.lineTo(xB, yB);
+          ctx.stroke();
+        }
+      } else {
+        const nPts = overlapSorted
+          .map((p) => {
+            const xv = xNeighbourPt(p);
+            if (xv === null || !Number.isFinite(xv)) return null;
+            return { p, xv, yv: y0 - ((Number(p.v) - yMin) / span) * (y0 - y1) };
+          })
+          .filter(Boolean)
+          .sort((a, b) => a.xv - b.xv || Number(a.p.t) - Number(b.p.t));
+        for (let i = 1; i < nPts.length; i++) {
+          const a = nPts[i - 1];
+          const b = nPts[i];
+          if (Math.abs(a.xv - b.xv) < 1e-9) continue;
+          ctx.strokeStyle = nbrColorFn(b.p);
+          ctx.beginPath();
+          ctx.moveTo(a.xv, a.yv);
+          ctx.lineTo(b.xv, b.yv);
+          ctx.stroke();
+        }
+      }
+      ctx.setLineDash([]);
+
+      primArr.forEach((p, i) => {
+        const x = xPrim(p, i);
+        const y = y0 - ((Number(p.v) - yMin) / span) * (y0 - y1);
+        ctx.fillStyle = primColorFn(p);
+        ctx.beginPath();
+        ctx.arc(x, y, 2.1, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      overlapSorted.forEach((p) => {
+        const x = xNeighbourPt(p);
+        if (x === null || !Number.isFinite(x)) return;
+        const y = y0 - ((Number(p.v) - yMin) / span) * (y0 - y1);
+        ctx.fillStyle = nbrColorFn(p);
+        ctx.beginPath();
+        ctx.arc(x, y, 2.0, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      ctx.fillStyle = "#888";
+      ctx.font = "10px Arial";
+      ctx.fillText("··· intra-neighbour", w - 102, h - 4);
+
+      const primSamples = primArr;
+      const nbrSamples = overlapSorted;
+      canvas._metricHover = {
+        dualCmp: true,
+        canvasId,
+        rows: primSamples,
+        samples: primSamples,
+        primSamples,
+        nbrSamples,
+        intraOvTolMs,
+        unitLabel,
+        x0,
+        x1,
+        y0,
+        y1,
+        yMin,
+        yMax,
+        span,
+        gapBreakMs: gapBreakMsLocal,
+        chartNowMs: nowMs,
+        cwMs: chartWindowMs,
+        gapMode: chartGapModeEnabled
+      };
+    }
+
     function metricHoverXFor(p, i, h) {
       const { x0, x1, samples, cwMs, chartNowMs, gapMode } = h;
       const n = samples.length;
@@ -3587,15 +3969,88 @@ async def home() -> HTMLResponse:
       const canvas = ev.currentTarget;
       if (!canvas || !RF_HOVER_CANVAS_IDS.includes(canvas.id)) return;
       const hover = canvas._metricHover;
-      if (!hover || !Array.isArray(hover.samples) || hover.samples.length === 0) {
-        hideRfChartTooltip();
-        return;
-      }
       const rect = canvas.getBoundingClientRect();
       const scaleX = canvas.width / rect.width;
       const scaleY = canvas.height / rect.height;
       const mx = (ev.clientX - rect.left) * scaleX;
       const my = (ev.clientY - rect.top) * scaleY;
+
+      if (
+        hover &&
+        hover.dualCmp &&
+        Array.isArray(hover.primSamples) &&
+        Array.isArray(hover.nbrSamples) &&
+        ((hover.primSamples && hover.primSamples.length) || (hover.nbrSamples && hover.nbrSamples.length))
+      ) {
+        const { primSamples, nbrSamples, y0, y1, yMin, span } = hover;
+        let best = null;
+        let bestD = Infinity;
+        const hitR = 22;
+        const hitR2 = hitR * hitR;
+        const tol = Number(hover.intraOvTolMs);
+        const useNbrIxMatch =
+          !hover.gapMode && Number.isFinite(tol) && Array.isArray(hover.primSamples) && hover.primSamples.length;
+        const ixMatchXForNbr = (p) => {
+          const tt = Number(p?.t);
+          if (!Number.isFinite(tt)) return null;
+          const ps = hover.primSamples;
+          let bi = -1;
+          let bd = Infinity;
+          for (let q = 0; q < ps.length; q++) {
+            const d = Math.abs(Number(ps[q].t) - tt);
+            if (d < bd) {
+              bd = d;
+              bi = q;
+            }
+          }
+          if (bi < 0 || bd > tol) return null;
+          const pn = ps.length;
+          const xSpr = pn > 1 ? (hover.x1 - hover.x0) / (pn - 1) : 0;
+          return hover.x0 + bi * xSpr;
+        };
+        const trySeries = (arr, seriesTag) => {
+          for (let i = 0; i < arr.length; i++) {
+            const p = arr[i];
+            let x =
+              seriesTag === "nbr" && useNbrIxMatch ? ixMatchXForNbr(p) : metricHoverXFor(p, i, hover);
+            if (seriesTag === "nbr" && useNbrIxMatch && (x === null || !Number.isFinite(x))) continue;
+            const vy = Number(p?.v);
+            if (!Number.isFinite(vy)) continue;
+            const y = y0 - ((vy - yMin) / span) * (y0 - y1);
+            const dx = mx - x;
+            const dy = my - y;
+            const d2 = dx * dx + dy * dy;
+            if (d2 < bestD) {
+              bestD = d2;
+              best = { p, v: vy, seriesTag };
+            }
+          }
+        };
+        trySeries(primSamples, "prim");
+        trySeries(nbrSamples, "nbr");
+        if (!best || bestD > hitR2) {
+          hideRfChartTooltip();
+          return;
+        }
+        const chartTitle = RF_CHART_TITLE_BY_ID[canvas.id] || canvas.id;
+        const sub = best.seriesTag === "prim" ? "Primary" : "Strongest intra";
+        const shown =
+          Number.isFinite(best.v) ? (Math.abs(best.v % 1) < 0.05 ? best.v.toFixed(1) : best.v.toFixed(2)) : "-";
+        showRfChartTooltip(
+          ev.clientX,
+          ev.clientY,
+          `${chartTitle} — ${sub}`,
+          shown,
+          hover.unitLabel || "",
+          best.p?.c
+        );
+        return;
+      }
+
+      if (!hover || !Array.isArray(hover.samples) || hover.samples.length === 0) {
+        hideRfChartTooltip();
+        return;
+      }
       const { samples, y0, y1, yMin, span } = hover;
       let best = null;
       let bestD = Infinity;
@@ -3649,11 +4104,27 @@ async def home() -> HTMLResponse:
           ? `${currentServingEarfcn}/${currentServingPci}`
           : null;
       const pciColor = colorForCellKey(currentCellKey, "#4da3ff");
-      drawMetricChart("rsrpchart", rsrp, "dBm", pciColor, -105);
-      drawMetricChart("rsrqchart", rsrq, "dB", pciColor, -15);
+      const ovRsrp = rfSmoothingEnabled ? smoothSeries(rfNeighborOverlap.rsrp, RF_SMOOTH_WINDOW) : rfNeighborOverlap.rsrp;
+      const ovRsrq = rfSmoothingEnabled ? smoothSeries(rfNeighborOverlap.rsrq, RF_SMOOTH_WINDOW) : rfNeighborOverlap.rsrq;
+      const ovRssi = rfSmoothingEnabled ? smoothSeries(rfNeighborOverlap.rssi, RF_SMOOTH_WINDOW) : rfNeighborOverlap.rssi;
+      drawMetricChartWithIntraNeighbour("rsrpchart", rsrp, ovRsrp, "dBm", pciColor, -105);
+      drawMetricChartWithIntraNeighbour("rsrqchart", rsrq, ovRsrq, "dB", pciColor, -15);
       drawMetricChart("sinrchart", sinr, "dB", pciColor, 0);
-      drawMetricChart("rssichart", rssi, "dBm", pciColor, -25);
+      drawMetricChartWithIntraNeighbour("rssichart", rssi, ovRssi, "dBm", pciColor, -25);
       drawMetricChart("dominancechart", dominance, "dB", "#50fa7b", 6);
+    }
+
+    function drawInterNbrRfCharts() {
+      const base = "#d4a017";
+      const rsrp = rfSmoothingEnabled ? smoothSeries(nbrInterRsrpHistory, RF_SMOOTH_WINDOW) : nbrInterRsrpHistory;
+      const rsrq = rfSmoothingEnabled ? smoothSeries(nbrInterRsrqHistory, RF_SMOOTH_WINDOW) : nbrInterRsrqHistory;
+      const rssi = rfSmoothingEnabled ? smoothSeries(nbrInterRssiHistory, RF_SMOOTH_WINDOW) : nbrInterRssiHistory;
+      const domSource = rfSmoothingEnabled ? smoothSeries(nInterDomHistory, RF_SMOOTH_WINDOW) : nInterDomHistory;
+      const dominanceInter = primaryCellDataAvailable ? domSource : [];
+      drawMetricChart("nbrintersrpchart", rsrp, "dBm", base, -105);
+      drawMetricChart("nbrintersrqchart", rsrq, "dB", base, -15);
+      drawMetricChart("nbrinterrssichart", rssi, "dBm", base, -90);
+      drawMetricChart("nbridomchart", dominanceInter, "dB", "#bd93f9", 6);
     }
 
     function drawBwChart() {
@@ -3663,25 +4134,6 @@ async def home() -> HTMLResponse:
           : null;
       const cellColor = colorForCellKey(currentCellKey, "#00d1b2");
       drawMetricChart("bwchart", bwHistory, "MHz", cellColor);
-    }
-
-    function drawPciChart() {
-      const currentCellKey =
-        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
-          ? `${currentServingEarfcn}/${currentServingPci}`
-          : null;
-      const cellColor = colorForCellKey(currentCellKey, "#ff7f50");
-      drawMetricChart("pcichart", pciHistory, "", cellColor);
-    }
-
-    function drawNeighbourCharts() {
-      const currentCellKey =
-        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
-          ? `${currentServingEarfcn}/${currentServingPci}`
-          : null;
-      const cellColor = colorForCellKey(currentCellKey, "#61dafb");
-      drawMetricChart("nbrsrpchart", neighbourHistory.rsrp, "dBm", cellColor);
-      drawMetricChart("nbpcichart", neighbourHistory.pci, "", cellColor);
     }
 
     function drawCategoryChart(canvasId, samples, color) {
@@ -3818,10 +4270,14 @@ async def home() -> HTMLResponse:
       rfHistory.sinr.length = 0;
       rfHistory.rssi.length = 0;
       rfHistory.dominance.length = 0;
+      Object.keys(rfNeighborOverlap).forEach((k) => {
+        rfNeighborOverlap[k].length = 0;
+      });
+      nbrInterRsrpHistory.length = 0;
+      nbrInterRsrqHistory.length = 0;
+      nbrInterRssiHistory.length = 0;
+      nInterDomHistory.length = 0;
       bwHistory.length = 0;
-      pciHistory.length = 0;
-      neighbourHistory.rsrp.length = 0;
-      neighbourHistory.pci.length = 0;
       carrierReselPciHistory.length = 0;
       carrierReselEarfcnHistory.length = 0;
       categoryHistory.state.length = 0;
@@ -3831,9 +4287,8 @@ async def home() -> HTMLResponse:
       drawPhSweepChart();
       drawPhGauges();
       drawRfCharts();
+      drawInterNbrRfCharts();
       drawBwChart();
-      drawPciChart();
-      drawNeighbourCharts();
       drawCarrierReselChart();
       drawCategoryCharts();
       clearDataServiceKpi();
@@ -3892,13 +4347,15 @@ async def home() -> HTMLResponse:
     const phRepeatToggle = el("ph-repeat-toggle");
     if (phRepeatToggle) phRepeatToggle.addEventListener("change", (ev) => setPhRepeatPing(!!ev.target.checked));
     el("btn-clear-charts").addEventListener("click", () => clearAllCharts());
+    const btnUiDefaults = el("btn-ui-defaults");
+    if (btnUiDefaults) btnUiDefaults.addEventListener("click", () => applyUiDefaults());
     el("btn-chart-gap-mode").addEventListener("click", () => setChartGapMode(!chartGapModeEnabled));
     el("chart-window-select").addEventListener("change", (ev) => {
       applyChartWindowSec(Number(ev.target?.value || 60));
     });
     el("rf-smooth-toggle").addEventListener("change", (ev) => {
       rfSmoothingEnabled = !!ev.target.checked;
-      drawRfCharts();
+      redrawAllCharts();
     });
     el("btn-serial-refresh").addEventListener("click", () => refreshSerialPorts(false));
     el("btn-serial-autopick").addEventListener("click", () => autoPickSerialPort());

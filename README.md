@@ -1,8 +1,17 @@
 # 5G ModemTestDriver
 
-**Version 1.6**
+**Version 1.7**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.6** is shown in the page header).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.7** is shown in the page header).
+
+**Changes in v1.7**
+
+- **Inter-frequency neighbour KPIs**: `AT+QENG="neighbourcell","inter"` is parsed for the strongest inter-carrier neighbour **distinct from the serving cell EARFCN** (`inter_strongest_*` JSON fields alongside existing intra-frequency neighbour fields).
+- **RF charts**: Serving **RSRP/RSRQ/RSSI/dominance** trends plot the **primary** series with a dashed **first intra-frequency neighbour** overlay; gaps vs continuous time-axis respects **Roll chart gaps over time-roll**. **Primary SNIR Trend (dB)** stays single-series only.
+- **Inter-carrier RF trends**: charts for strongest inter-neighbour **RSSI**, **RSRP**, **RSRQ**, and **primary − inter RSRP dominance** (`nbr-*-inter*` canvases).
+- **Removed** redundant standalone charts: PCI trend, standalone neighbour RSRP, RSRP primary vs intra comparison, neighbour PCI trend.
+- **Neighbour KPI** labels clarified as intra-frequency where applicable.
+- **Apply UI defaults** button: 10 minute chart window, RF smoothing on, MNO **auto**, RAT **AUTO**, UK-style LTE/NR band presets, CA and NRDC checkboxes on.
 
 **Changes in v1.6**
 
@@ -87,7 +96,7 @@ AT command catalog from current modem firmware:
   - iperf3 throughput test (TCP, DL/UL, bind interface, optional bitrate limit) with gauges and trend charts
   - VoLTE call test (`ATD...;` + `AT+CLCC` + `ATH` + `AT+CEER`) with user dial number and auto hangup after 10s
   - `Clear All Charts` control (also clears Data Service KPI display)
-  - Trend charts for iperf throughput, ICMP ping sweep, RSRP, RSRQ, SINR, RSSI, State, Band, DL bandwidth, PCI, neighbour RSRP, neighbour PCI, intra-cell dominance, LTE carrier re-selection (PCI and EARFCN rates)
+  - Trend charts for iperf throughput, ICMP ping sweep, RSRP, RSRQ, SNIR, RSSI, State, Band, DL bandwidth, intra-cell dominance + neighbour overlays on RSRP/RSRQ/RSSI, inter-frequency neighbour RSRP/RSRQ/RSSI + dominance (`nbr-*-inter*`), LTE carrier re-selection (dual trace)
   - Selectable chart window (60s to 60m)
   - Dynamic chart axis label shows time span (for example, `Time axis: last 10m`)
   - Optional `Time-roll gaps` mode to scroll by wall-clock time and show blank gaps when samples pause
@@ -101,7 +110,7 @@ AT command catalog from current modem firmware:
     - RSSI max `-25 dBm`
     - Intra-cell dominance min `6 dB`
   - Optional RF smoothing toggle (rolling average of last 10 samples) for RSRP/RSRQ/SINR/RSSI/dominance
-  - **RF trend hover tooltips**: on the RSRP / RSRQ / SINR / RSSI / intra-cell dominance canvases, moving the pointer near a plotted sample shows a tooltip with the metric value and **EARFCN/PCI** for that sample (same cell key used for segment colouring).
+  - **RF trend hover tooltips**: on the RSRP / RSRQ / SNIR / RSSI / dominance / intra and inter-frequency neighbour canvases, moving the pointer near a plotted sample shows a tooltip with the metric value and **EARFCN/PCI** where applicable (same cell key used for segment colouring).
   - Primary Cell bandwidth KPI (`DL/UL BW`)
   - Primary cell intra-cell dominance KPI (`Primary RSRP - strongest intra-frequency neighbour RSRP` on serving EARFCN)
 - Exposes REST and WebSocket endpoints for control and integration
