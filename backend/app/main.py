@@ -25,7 +25,7 @@ from app.sim_usim_services import (
     label_usim_service,
 )
 
-APP_VERSION = "1.8"
+APP_VERSION = "1.9"
 
 
 def _serial_state_file_path() -> str:
@@ -1099,7 +1099,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="1.8.0",
+    version="1.9.0",
     lifespan=lifespan,
 )
 
@@ -1339,7 +1339,7 @@ async def home() -> HTMLResponse:
     </div>
 
     <div class="card">
-      <div class="label">Bandwidth Trend (DL BW)</div>
+      <div class="label">Primary cell Bandwidth Trend (DL BW)</div>
       <canvas id="bwchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
@@ -1351,13 +1351,13 @@ async def home() -> HTMLResponse:
     </div>
 
     <div class="card">
-      <div class="label">Band Trend</div>
+      <div class="label">Primary cell Band Trend</div>
       <canvas id="bandchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
     <div class="card">
-      <div class="label">Primary Carrier re-selection rate — LTE PCell (camped and connected, /min)</div>
+      <div class="label">Primary Carrier re-selection rate — LTE PCell /min</div>
       <canvas id="carrier-resel-chart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
@@ -3237,8 +3237,8 @@ async def home() -> HTMLResponse:
       const minV = Math.min(...values);
       const maxV = Math.max(...values);
       const pad = Math.max(0.25, (maxV - minV) * 0.15);
-      const yMin = Math.max(0, minV - pad);
-      const yMax = maxV + pad;
+      const yMin = 0;
+      const yMax = Math.max(maxV + pad, 0.25);
       const span = Math.max(1e-6, yMax - yMin);
 
       ctx.strokeStyle = "#2a2a2a";
@@ -3334,8 +3334,8 @@ async def home() -> HTMLResponse:
       const minV = Math.min(...values);
       const maxV = Math.max(...values);
       const pad = Math.max(1, (maxV - minV) * 0.15);
-      const yMin = Math.max(0, minV - pad);
-      const yMax = maxV + pad;
+      const yMin = 0;
+      const yMax = Math.max(maxV + pad, 1);
       const span = Math.max(1, yMax - yMin);
 
       ctx.strokeStyle = "#2a2a2a";
@@ -3492,8 +3492,8 @@ async def home() -> HTMLResponse:
       const minV = Math.min(...values);
       const maxV = Math.max(...values);
       const pad = Math.max(0.5, (maxV - minV) * 0.15);
-      const yMin = Math.max(0, minV - pad);
-      const yMax = maxV + pad;
+      const yMin = 0;
+      const yMax = Math.max(maxV + pad, 1);
       const span = Math.max(1, yMax - yMin);
 
       ctx.strokeStyle = "#2a2a2a";
@@ -3626,7 +3626,7 @@ async def home() -> HTMLResponse:
       if (note) note.textContent = `Latest sweep: avg ${aTxt}, jitter ${jTxt} (gauge scale from recent runs).`;
     }
 
-    function drawMetricChart(canvasId, samples, unitLabel, color, thresholdValue = null) {
+    function drawMetricChart(canvasId, samples, unitLabel, color, thresholdValue = null, yFloorAtZero = false) {
       const canvas = el(canvasId);
       if (!canvas) return;
       const ctx = canvas.getContext("2d");
@@ -3653,6 +3653,10 @@ async def home() -> HTMLResponse:
       if (Number.isFinite(thresholdValue)) {
         yMin = Math.min(yMin, Number(thresholdValue) - 0.5);
         yMax = Math.max(yMax, Number(thresholdValue) + 0.5);
+      }
+      if (yFloorAtZero) {
+        yMin = 0;
+        yMax = Math.max(yMax, 1);
       }
       const span = Math.max(1, yMax - yMin);
 
@@ -4213,8 +4217,8 @@ async def home() -> HTMLResponse:
           : null;
       const cIntra = colorForCellKey(currentCellKey, "#7ee787");
       const cInter = colorForCellKey(currentCellKey, "#c678dd");
-      drawMetricChart("nbrintracountchart", nbrIntraCountHistory, "cells", cIntra, null);
-      drawMetricChart("nbrintercountchart", nbrInterCountHistory, "cells", cInter, null);
+      drawMetricChart("nbrintracountchart", nbrIntraCountHistory, "cells", cIntra, null, true);
+      drawMetricChart("nbrintercountchart", nbrInterCountHistory, "cells", cInter, null, true);
     }
 
     function drawBwChart() {
@@ -4223,7 +4227,7 @@ async def home() -> HTMLResponse:
           ? `${currentServingEarfcn}/${currentServingPci}`
           : null;
       const cellColor = colorForCellKey(currentCellKey, "#00d1b2");
-      drawMetricChart("bwchart", bwHistory, "MHz", cellColor);
+      drawMetricChart("bwchart", bwHistory, "MHz", cellColor, null, true);
     }
 
     function drawCategoryChart(canvasId, samples, color) {

@@ -1,8 +1,13 @@
 # 5G ModemTestDriver
 
-**Version 1.8**
+**Version 1.9**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.8** is shown in the page header).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.9** is shown in the page header).
+
+**Changes in v1.9**
+
+- **Chart labels**: carrier re-selection trend title → **Primary Carrier re-selection rate — LTE PCell /min**; **Primary cell** prefix on **Bandwidth Trend (DL BW)** and **Band Trend** chart titles.
+- **Non-negative trend Y-axis**: for metrics that are never below zero (throughput, ping sweep, carrier re-selection rates, primary DL bandwidth, neighbour **cell counts**), the vertical scale now **anchors at zero** on the bottom so the axis does not float above zero when values are clustered high (**RF plots with negative dBm / dB** unchanged).
 
 **Changes in v1.8**
 
