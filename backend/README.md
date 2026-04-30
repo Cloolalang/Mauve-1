@@ -1,8 +1,13 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 1.7** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.7.0**).
+**Version 1.8** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.8.0**).
 
-Notes for **v1.7**:
+Notes for **v1.8**:
+
+- **`GET /api/kpi/latest`**: **`intra_neighbour_count`** / **`inter_neighbour_count`** on **`sample.neighbour`** (distinct LTE rows on **`neighbourcell intra` / `inter`**, with serving-cell echo suppressed when EARFCN+PCI identity matches).
+- **Parsing/UI**: **`_qeng_lte_row_echoes_serving_cell`** aligns strongest intra/inter choice and counts; dominance and RF history skip **`null`** (no bogus **0 dB** dominance when there is no neighbour).
+
+Notes for **v1.7** (historical):
 
 - **`GET /api/kpi/latest`**: strongest **inter-frequency** neighbour extracted from **`+QENG: "neighbourcell","inter"`** when EARFCN differs from the serving cell (**`inter_strongest_*`** fields).
 - **Dashboard**: intra-neighbour overlays on serving RSRP/RSRQ/RSSI/dominance; inter-neighbour RSSI/RSRQ/RSRP + dominance charts; redundant PCI/neighbour-only trend cards removed; **Apply UI defaults** for window/smoothing/RAT bands.
@@ -54,7 +59,7 @@ $env:MD_BAUDRATE="115200"
 
 Failures from the modem (**`+CME ERROR`**, **`ERROR`**, **TIMEOUT**, etc.) surface as **`ok: false`**, **`error`**, and often **`modem_detail`** on **`/api/network/*`**, **`/api/network/apn`**, **`/api/tools/modem-reset`**, etc. (decoded in **`app/at_modem_errors.py`**).
 
-- `GET /` **5G ModemTestDriver** KPI page (**v1.7** in browser tab title and main heading): compact **Serial Port** tile; **Access / Operator** + **Registration Control (COPS)** combined; modem reset; lock controls + re-apply guard; roaming MNO [Vodafone/VMO2/EE/H3G/Auto]; data gate; CA/NRDC; **Primary Cell** (serving + RF + neighbour + dominance); intra overlay + **inter-frequency** neighbour trends; **LTE carrier re-selection** KPI + dual-trace chart; Data Service KPI; SIM + PLMN; AT console; **iperf3** + ICMP sweep; VoLTE test; charts (window, gaps, thresholds, smoothing, hover tooltips); **Apply UI defaults**
+- `GET /` **5G ModemTestDriver** KPI page (**v1.8** in browser tab title and main heading): compact **Serial Port** tile; **Access / Operator** + **Registration Control (COPS)** combined; modem reset; lock controls + re-apply guard; roaming MNO [Vodafone/VMO2/EE/H3G/Auto]; data gate; CA/NRDC; **Primary Cell** (serving + RF + neighbour + dominance + neighbour counts); intra overlay + **inter-frequency** neighbour trends; **LTE carrier re-selection** KPI + dual-trace chart; Data Service KPI; SIM + PLMN; AT console; **iperf3** + ICMP sweep; VoLTE test; charts (window, gaps, thresholds, smoothing, hover tooltips); **Apply UI defaults**
 - `GET /api/serial/status`
 - `GET /api/serial/ports`
 - `POST /api/at/send`

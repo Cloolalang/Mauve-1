@@ -92,6 +92,25 @@ def _safe_int(value: str) -> int | None:
     return v
 
 
+def _qeng_lte_row_echoes_serving_cell(
+    earfcn: int | None,
+    pci: int | None,
+    serving_pci: int | None,
+    serving_earfcn: int | None,
+) -> bool:
+    """True when a neighbour-table LTE row is a PCell echo, not a distinct neighbour.
+
+    Some firmware repeats serving PCI (and matching EARFCN on intra lists) with no separate
+    neighbours. When both neighbour and serving EARFCN are known and differ, the same PCI is
+    treated as reuse on another carrier and is not suppressed.
+    """
+    if pci is None or serving_pci is None or pci != serving_pci:
+        return False
+    if serving_earfcn is not None and earfcn is not None:
+        return earfcn == serving_earfcn
+    return True
+
+
 def _decode_lte_bw_mhz(value: str) -> int | None:
     raw = _safe_int(value)
     if raw is None:
@@ -339,7 +358,18 @@ def _parse_qeng_strongest_neighbour(
                     continue
                 if best is None or rsrp > best["rsrp"]:
                     best = cand
-    return best or fallback
+    chosen = best if best is not None else fallback
+    if chosen is None:
+        return None
+    # When only the serving cell appears in intra neighbour list — omit KPI/charts.
+    if _qeng_lte_row_echoes_serving_cell(
+        int(chosen["earfcn"]) if chosen.get("earfcn") is not None else None,
+        int(chosen["pci"]) if chosen.get("pci") is not None else None,
+        serving_pci,
+        serving_earfcn,
+    ):
+        return None
+    return chosen
 
 
 def _parse_qeng_strongest_inter_neighbour(
@@ -382,7 +412,76 @@ def _parse_qeng_strongest_inter_neighbour(
                     continue
                 if best is None or rsrp > best["rsrp"]:
                     best = cand
-    return best or fallback
+    chosen = best if best is not None else fallback
+    if chosen is None:
+        return None
+    if _qeng_lte_row_echoes_serving_cell(
+        int(chosen["earfcn"]) if chosen.get("earfcn") is not None else None,
+        int(chosen["pci"]) if chosen.get("pci") is not None else None,
+        serving_pci,
+        serving_earfcn,
+    ):
+        return None
+    return chosen
+
+
+def _count_qeng_intra_neighbours(
+    lines: list[str], serving_pci: int | None = None, serving_earfcn: int | None = None
+) -> int:
+    """Distinct intra-frequency LTE neighbours on ``neighbourcell intra`` lines.
+
+    Rows must match serving EARFCN when known; excludes the serving PCI (modem often echoes PCell).
+    """
+    keys: set[tuple[int, int]] = set()
+    for raw in lines:
+        if not raw.startswith("+QENG:"):
+            continue
+        if "neighbourcell intra" not in raw.lower():
+            continue
+        parts = _parse_csv_payload(raw.split(":", 1)[1].strip())
+        for i, token in enumerate(parts):
+            rat = token.upper()
+            if rat == "LTE" and len(parts) > i + 4:
+                earfcn = _safe_int(parts[i + 1]) if len(parts) > i + 1 else None
+                pci = _safe_int(parts[i + 2]) if len(parts) > i + 2 else None
+                rsrp = _safe_int(parts[i + 4])
+                if pci is None or rsrp is None:
+                    continue
+                if serving_earfcn is not None and earfcn is not None and earfcn != serving_earfcn:
+                    continue
+                if _qeng_lte_row_echoes_serving_cell(earfcn, pci, serving_pci, serving_earfcn):
+                    continue
+                if earfcn is not None and pci is not None:
+                    keys.add((earfcn, pci))
+    return len(keys)
+
+
+def _count_qeng_inter_neighbours(
+    lines: list[str], serving_pci: int | None = None, serving_earfcn: int | None = None
+) -> int:
+    """Distinct inter-frequency LTE neighbours on ``neighbourcell inter`` lines (not serving EARFCN)."""
+    keys: set[tuple[int, int]] = set()
+    for raw in lines:
+        if not raw.startswith("+QENG:"):
+            continue
+        if "neighbourcell inter" not in raw.lower():
+            continue
+        parts = _parse_csv_payload(raw.split(":", 1)[1].strip())
+        for i, token in enumerate(parts):
+            rat = token.upper()
+            if rat == "LTE" and len(parts) > i + 4:
+                earfcn = _safe_int(parts[i + 1]) if len(parts) > i + 1 else None
+                pci = _safe_int(parts[i + 2]) if len(parts) > i + 2 else None
+                rsrp = _safe_int(parts[i + 4])
+                if pci is None or rsrp is None:
+                    continue
+                if serving_earfcn is not None and earfcn is not None and earfcn == serving_earfcn:
+                    continue
+                if _qeng_lte_row_echoes_serving_cell(earfcn, pci, serving_pci, serving_earfcn):
+                    continue
+                if earfcn is not None and pci is not None:
+                    keys.add((earfcn, pci))
+    return len(keys)
 
 
 def _parse_cgatt(lines: list[str]) -> int | None:
@@ -630,12 +729,13 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                     sample_ts,
                 )
 
-                intra_n = _parse_qeng_strongest_neighbour(
-                    qeng_nb.get("lines", []), serving_pci=serving_pci, serving_earfcn=serving_earfcn
-                )
+                nb_lines = qeng_nb.get("lines", [])
+                intra_n = _parse_qeng_strongest_neighbour(nb_lines, serving_pci=serving_pci, serving_earfcn=serving_earfcn)
                 inter_n = _parse_qeng_strongest_inter_neighbour(
-                    qeng_nb.get("lines", []), serving_pci=serving_pci, serving_earfcn=serving_earfcn
+                    nb_lines, serving_pci=serving_pci, serving_earfcn=serving_earfcn
                 )
+                intra_n_count = _count_qeng_intra_neighbours(nb_lines, serving_pci=serving_pci, serving_earfcn=serving_earfcn)
+                inter_n_count = _count_qeng_inter_neighbours(nb_lines, serving_pci=serving_pci, serving_earfcn=serving_earfcn)
                 neighbour = {
                     "strongest_rsrp": intra_n.get("rsrp") if intra_n else None,
                     "strongest_pci": intra_n.get("pci") if intra_n else None,
@@ -649,6 +749,8 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                     "inter_strongest_rsrq": inter_n.get("rsrq") if inter_n else None,
                     "inter_strongest_rssi": inter_n.get("rssi") if inter_n else None,
                     "inter_strongest_sinr": inter_n.get("sinr") if inter_n else None,
+                    "intra_neighbour_count": intra_n_count,
+                    "inter_neighbour_count": inter_n_count,
                 }
 
                 parsed = {

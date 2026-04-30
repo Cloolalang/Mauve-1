@@ -25,7 +25,7 @@ from app.sim_usim_services import (
     label_usim_service,
 )
 
-APP_VERSION = "1.7"
+APP_VERSION = "1.8"
 
 
 def _serial_state_file_path() -> str:
@@ -1099,7 +1099,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="1.7.0",
+    version="1.8.0",
     lifespan=lifespan,
 )
 
@@ -1262,6 +1262,8 @@ async def home() -> HTMLResponse:
       <div class="row"><span class="label">1st strongest neighbour RSRP (intra)</span><span id="nrsrp1">-</span></div>
       <div class="row"><span class="label">1st strongest neighbour PCI (intra)</span><span id="npci1">-</span></div>
       <div class="row"><span class="label">1st strongest neighbour EARFCN (intra)</span><span id="nearfcn1">-</span></div>
+      <div class="row"><span class="label">Intra-frequency neighbour count (LTE)</span><span id="nbr-intra-count">-</span></div>
+      <div class="row"><span class="label">Inter-frequency neighbour count (LTE)</span><span id="nbr-inter-count">-</span></div>
     </div>
 
     <div class="card">
@@ -1321,6 +1323,18 @@ async def home() -> HTMLResponse:
     <div class="card">
       <div class="label">Primary and 1st strongest inter-cell neighbour dominance Trend (dB)</div>
       <canvas id="nbridomchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Intra-frequency neighbour cell count Trend (LTE, QENG intra)</div>
+      <canvas id="nbrintracountchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Inter-frequency neighbour cell count Trend (LTE, QENG inter)</div>
+      <canvas id="nbrintercountchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
@@ -1721,6 +1735,8 @@ async def home() -> HTMLResponse:
     const nbrInterRsrqHistory = [];
     const nbrInterRssiHistory = [];
     const nInterDomHistory = [];
+    const nbrIntraCountHistory = [];
+    const nbrInterCountHistory = [];
     const bwHistory = [];
     const carrierReselPciHistory = [];
     const carrierReselEarfcnHistory = [];
@@ -1742,7 +1758,9 @@ async def home() -> HTMLResponse:
       "nbrintersrpchart",
       "nbrintersrqchart",
       "nbrinterrssichart",
-      "nbridomchart"
+      "nbridomchart",
+      "nbrintracountchart",
+      "nbrintercountchart"
     ];
     const RF_CHART_TITLE_BY_ID = {
       rsrpchart: "Primary and 1st strongest intra-cell neighbour RSRP Trend (dBm)",
@@ -1753,7 +1771,9 @@ async def home() -> HTMLResponse:
       nbrintersrpchart: "1st strongest inter-cell neighbour RSRP Trend (dBm)",
       nbrintersrqchart: "1st strongest inter-cell neighbour RSRQ Trend (dB)",
       nbrinterrssichart: "1st strongest inter-cell neighbour RSSI Trend (dBm)",
-      nbridomchart: "Primary and 1st strongest inter-cell neighbour dominance Trend (dB)"
+      nbridomchart: "Primary and 1st strongest inter-cell neighbour dominance Trend (dB)",
+      nbrintracountchart: "Intra-frequency neighbour cell count Trend (LTE, QENG intra)",
+      nbrintercountchart: "Inter-frequency neighbour cell count Trend (LTE, QENG inter)"
     };
     const copsModeName = (m) => {
       if (m === 0) return "0 (Auto)";
@@ -1811,6 +1831,8 @@ async def home() -> HTMLResponse:
       pruneHistoryByAge(nbrInterRsrqHistory, nowMs);
       pruneHistoryByAge(nbrInterRssiHistory, nowMs);
       pruneHistoryByAge(nInterDomHistory, nowMs);
+      pruneHistoryByAge(nbrIntraCountHistory, nowMs);
+      pruneHistoryByAge(nbrInterCountHistory, nowMs);
       pruneHistoryByAge(bwHistory, nowMs);
       pruneHistoryByAge(carrierReselPciHistory, nowMs);
       pruneHistoryByAge(carrierReselEarfcnHistory, nowMs);
@@ -1840,6 +1862,7 @@ async def home() -> HTMLResponse:
       drawPhGauges();
       drawRfCharts();
       drawInterNbrRfCharts();
+      drawNeighbourCountCharts();
       drawBwChart();
       drawCarrierReselChart();
       drawCategoryCharts();
@@ -1893,11 +1916,32 @@ async def home() -> HTMLResponse:
       return `${en}/${pn}`;
     }
 
+    /** True when neighbour intra strongest row is on primary EARFCN and PCI is not a PCell echo. */
+    function intraStrongestDistinctFromServing(nb, lte) {
+      const row = nb || {};
+      const L = lte || {};
+      const pe = Number(L.earfcn);
+      const ne = Number(row.strongest_earfcn);
+      if (!Number.isFinite(pe) || !Number.isFinite(ne) || pe !== ne) return false;
+      const spci = L.pcid;
+      const npci = row.strongest_pci;
+      if (
+        spci !== null &&
+        spci !== undefined &&
+        npci !== null &&
+        npci !== undefined &&
+        Number.isFinite(Number(spci)) &&
+        Number.isFinite(Number(npci)) &&
+        Number(spci) === Number(npci)
+      ) {
+        return false;
+      }
+      return true;
+    }
+
     /** Same EARFCN as LTE primary: push strongest intra-cell neighbour RF samples for overlay charts. */
     function pushRfNeighborIntraOverlap(nb, lte, trendTsSec) {
-      const pe = Number(lte && lte.earfcn);
-      const ne = Number(nb && nb.strongest_earfcn);
-      if (!Number.isFinite(pe) || !Number.isFinite(ne) || pe !== ne) return;
+      if (!intraStrongestDistinctFromServing(nb, lte)) return;
       const nk = nbrRfKey(nb);
       if (!nk) return;
       const t = Number(trendTsSec);
@@ -1945,6 +1989,26 @@ async def home() -> HTMLResponse:
         pruneHistoryByAge(nInterDomHistory, t);
       }
       drawInterNbrRfCharts();
+    }
+
+    /** Distinct LTE neighbour counts from QENG neighbourcell intra/inter (see API neighbour.intra_neighbour_count). */
+    function addNeighbourCountTrendSamples(nb, tsSec) {
+      const row = nb || {};
+      const t = tsSec ? Number(tsSec) * 1000 : Date.now();
+      const ck =
+        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
+          ? `${currentServingEarfcn}/${currentServingPci}`
+          : null;
+      const pushCount = (arr, raw) => {
+        if (raw === null || raw === undefined) return;
+        const v = Number(raw);
+        if (!Number.isFinite(v) || v < 0) return;
+        arr.push({ t, v, c: ck });
+        pruneHistoryByAge(arr, t);
+      };
+      pushCount(nbrIntraCountHistory, row.intra_neighbour_count);
+      pushCount(nbrInterCountHistory, row.inter_neighbour_count);
+      drawNeighbourCountCharts();
     }
 
     function applySnap(payload) {
@@ -2056,6 +2120,12 @@ async def home() -> HTMLResponse:
       el("nrsrp1").textContent = fmt(nb.strongest_rsrp, " dBm");
       el("npci1").textContent = fmt(nb.strongest_pci);
       el("nearfcn1").textContent = fmt(nb.strongest_earfcn);
+      const ic = nb.intra_neighbour_count;
+      const xc = nb.inter_neighbour_count;
+      el("nbr-intra-count").textContent =
+        ic !== null && ic !== undefined && Number.isFinite(Number(ic)) ? String(ic) : "-";
+      el("nbr-inter-count").textContent =
+        xc !== null && xc !== undefined && Number.isFinite(Number(xc)) ? String(xc) : "-";
       if (idleMob.intra_freq_pci_reselections_per_min === undefined || idleMob.intra_freq_pci_reselections_per_min === null) {
         el("idle-pci-rate").textContent = "-";
       } else {
@@ -2069,9 +2139,16 @@ async def home() -> HTMLResponse:
       el("rsrq").textContent = fmt(lte.rsrq, " dB");
       el("sinr").textContent = fmt(qsinr.prx, " dB");
       el("rssi").textContent = fmt(lte.rssi, " dBm");
-      const dominance = (lte.rsrp === null || lte.rsrp === undefined || nb.strongest_rsrp === null || nb.strongest_rsrp === undefined)
-        ? null
-        : Number(lte.rsrp) - Number(nb.strongest_rsrp);
+      const dominance =
+        intraStrongestDistinctFromServing(nb, lte) &&
+        lte.rsrp !== null &&
+        lte.rsrp !== undefined &&
+        nb.strongest_rsrp !== null &&
+        nb.strongest_rsrp !== undefined &&
+        Number.isFinite(Number(lte.rsrp)) &&
+        Number.isFinite(Number(nb.strongest_rsrp))
+          ? Number(lte.rsrp) - Number(nb.strongest_rsrp)
+          : null;
       el("dominance").textContent = fmt(dominance, " dB");
       el("updated").textContent = fmtTs(sample.sample_ts);
 
@@ -2090,6 +2167,7 @@ async def home() -> HTMLResponse:
         addCategorySample("band", net.band || "-", trendTs);
         addCarrierReselSamples(idleMob, trendTs);
         addInterNeighbourTrendSamples(nb, lte, trendTs);
+        addNeighbourCountTrendSamples(nb, trendTs);
       }
       const hz = Number(payload?.poll_hz);
       if (Number.isFinite(hz) && hz > 0) currentPollHz = hz;
@@ -3083,6 +3161,7 @@ async def home() -> HTMLResponse:
     }
 
     function addRfSample(kind, value, tsSec = null, deferDraw = false) {
+      if (value === null || value === undefined) return;
       const v = Number(value);
       if (!Number.isFinite(v) || !rfHistory[kind]) return;
       const t = tsSec ? Number(tsSec) * 1000 : Date.now();
@@ -4127,6 +4206,17 @@ async def home() -> HTMLResponse:
       drawMetricChart("nbridomchart", dominanceInter, "dB", "#bd93f9", 6);
     }
 
+    function drawNeighbourCountCharts() {
+      const currentCellKey =
+        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
+          ? `${currentServingEarfcn}/${currentServingPci}`
+          : null;
+      const cIntra = colorForCellKey(currentCellKey, "#7ee787");
+      const cInter = colorForCellKey(currentCellKey, "#c678dd");
+      drawMetricChart("nbrintracountchart", nbrIntraCountHistory, "cells", cIntra, null);
+      drawMetricChart("nbrintercountchart", nbrInterCountHistory, "cells", cInter, null);
+    }
+
     function drawBwChart() {
       const currentCellKey =
         Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
@@ -4277,6 +4367,8 @@ async def home() -> HTMLResponse:
       nbrInterRsrqHistory.length = 0;
       nbrInterRssiHistory.length = 0;
       nInterDomHistory.length = 0;
+      nbrIntraCountHistory.length = 0;
+      nbrInterCountHistory.length = 0;
       bwHistory.length = 0;
       carrierReselPciHistory.length = 0;
       carrierReselEarfcnHistory.length = 0;
@@ -4288,6 +4380,7 @@ async def home() -> HTMLResponse:
       drawPhGauges();
       drawRfCharts();
       drawInterNbrRfCharts();
+      drawNeighbourCountCharts();
       drawBwChart();
       drawCarrierReselChart();
       drawCategoryCharts();

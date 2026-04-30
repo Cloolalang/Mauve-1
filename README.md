@@ -1,8 +1,14 @@
 # 5G ModemTestDriver
 
-**Version 1.7**
+**Version 1.8**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.7** is shown in the page header).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.8** is shown in the page header).
+
+**Changes in v1.8**
+
+- **Neighbour counts**: KPI rows plus trend charts for **distinct LTE intra‑frequency** and **inter‑frequency** neighbour cells from `AT+QENG="neighbourcell"` (`sample.neighbour.intra_neighbour_count`, `inter_neighbour_count`).
+- **PCell echo handling**: parsers and neighbour **counts** share `_qeng_lte_row_echoes_serving_cell` so the modem repeating the serving **EARFCN/PCI** in neighbour lists does not inflate neighbours or overlays; intra **strongest neighbour** rejects echo-only fallback; **inter strongest** rejects the same.
+- **Intra‑cell dominance KPI and trend**: no value / no chart point unless there is a **real distinct** intra strongest neighbour comparable to primary ( **`addRfSample` no longer treats `null` as 0**, so bogus **0 dB** is not plotted).
 
 **Changes in v1.7**
 
@@ -72,7 +78,7 @@ AT command catalog from current modem firmware:
   - Runtime lock guard that re-applies desired RAT/band/NRDC settings if modem drifts
   - CA policy switch for LTE (single-band vs multi/all)
   - NRDC on/off switch
-  - Neighbour Cells RF KPI (strongest intra-frequency neighbour RSRP + PCI + EARFCN) under **Primary Cell**
+  - Neighbour Cells RF KPI (strongest intra-frequency neighbour RSRP + PCI + EARFCN, plus intra/inter neighbour counts) under **Primary Cell**
   - Mobility / LTE carrier re-selection KPI (PCell EARFCN vs intra-frequency PCI rates) with dual-trace chart
   - Data Service KPI section:
     - APN (live read plus **Set APN** form using `AT+CGDCONT`, same unlock password as Allow Data)
@@ -204,7 +210,7 @@ $env:MD_KPI_POLL_HZ="2.0"
    - If lock values drift during runtime, verify they are automatically re-applied by the lock guard.
    - Validate **CA policy** behavior: CA ON uses multi/all LTE bands, CA OFF uses a single LTE band.
    - Toggle **NRDC** and confirm the readback state changes.
-   - Check **Neighbour Cells RF KPI** values (strongest intra-frequency neighbour RSRP + PCI + EARFCN).
+   - Check **Neighbour Cells RF KPI** values (strongest intra-frequency neighbour RSRP + PCI + EARFCN; intra/inter neighbour counts).
    - Check **Primary cell intra-cell dominance** value and trend behavior.
    - Run **ICMP Ping Sweep** (and optional **repeat every 15 s**) and confirm gauges/trend update.
    - Watch RF, neighbour, dominance, State/Band/PCI, and Bandwidth charts update with live polling.
