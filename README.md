@@ -4,6 +4,68 @@
 
 Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.13** is shown in the page header).
 
+## Quick start
+
+Do these in order on **Windows** with a **Robustel** modem/router (tested on **R5010**). COM port names and router labels vary by model.
+
+### 1. Set up the hardware
+
+- Install **SIM**.
+- For a single antenna, prefer **Antenna Port 0** (see your hardware guide).
+- Power on the router. Connect an **Ethernet** cable between the **PC** and the router. In the **PC** browser, open the router **web UI** and **log in**. Then enable **modem mode** plus **serial AT** so the Quectel modem appears as a **COM** port (baud is commonly **`115200`**).
+- Use a **USB data** cable from **PC → router USB**. (The router can be powered from the **PC USB-C** port.)
+
+### 2. Install Python and application dependencies
+
+**Install Python 3.12** once: [python.org/downloads](https://www.python.org/downloads/) or Microsoft Store. In the installer, enable **Add python.exe to PATH** (and the **py** launcher if offered). Close and reopen **PowerShell** after installing.
+
+In PowerShell, check Python:
+
+```powershell
+py -3.12 --version
+```
+
+Expect Python 3.12.x.
+
+Download the app from GitHub: open the **[repository page](https://github.com/Cloolalang/Mauve-1)**, click **Code**, then **Download ZIP**. Unzip it somewhere easy to find (for example your **Desktop**). After unzip you should see a folder that contains **`backend`**—often named **`Mauve-1-main`** (GitHub adds **`-main`** to the folder name).
+
+In PowerShell, create the virtual environment and install packages (adjust the path if your Desktop or folder name differs):
+
+```powershell
+cd $HOME\Desktop\Mauve-1-main\backend
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+### 3. Confirm the Quectel AT COM port, then start the server
+
+In **Windows Device Manager**, open **Ports (COM & LPT)** and find **Quectel USB AT Port** (wording may vary slightly by driver). Note the **COM** number (example **`COM49`**).
+
+In PowerShell, start the backend from the **`backend`** folder:
+
+```powershell
+cd $HOME\Desktop\Mauve-1-main\backend
+.\start.ps1
+```
+
+### 4. Open the dashboard and connect to the modem
+
+In the browser go to **`http://127.0.0.1:8011/`**.
+
+Under **Serial Port**, choose your modem COM port and click **Reconnect**. Use **Refresh Ports** or **Auto-select AT Port** if needed.
+
+### 5. Stop the app
+
+In **PowerShell**, click the window where **`.\start.ps1`** is running and press `Ctrl + C` to stop the backend.
+
+## Requirements
+
+- Windows with Python 3.12 installed
+- **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
+- Access to modem AT port (`COM49` by default)
+- Modem not locked by another serial terminal app
+
 **Changes in v1.13**
 
 - **σ samples (N)**: toolbar **number control** (2–600, default **60**) sets how many **most recent** primary-cell **raw** samples **inside the chart time window** feed each **σ** KPI; **Apply UI defaults** resets **N** to 60.
@@ -154,48 +216,46 @@ AT command catalog from current modem firmware:
 - Carrier aggregation details from `AT+QCAINFO` (PCC/SCC, band, bandwidth, channel)
 - Mobility/context timeline for serving cell changes (PCI, Cell ID, TAC, band, EARFCN/ARFCN)
 
-## Requirements
-
-- Windows with Python 3.12 installed
-- Access to modem AT port (`COM49` by default)
-- Modem not locked by another serial terminal app
-
 ## Install
 
-From project root:
+Same as **Quick start**, step **2** (Python 3.12 + GitHub ZIP + `backend\.venv` + `pip install -r requirements.txt`). Copy-paste from step **2**; minimal recap:
 
 ```powershell
-cd backend
+cd $HOME\Desktop\Mauve-1-main\backend
 py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 ## Start the app
 
-From `backend` folder:
+Default: **Quick start**, steps **3**–**4** (COM port + **`.\start.ps1`** + browser **Reconnect**). Stop with step **5**. Additional options from `backend`:
+
+From `backend` folder (adjust path if your unzip location differs):
 
 ```powershell
-cd backend
+cd $HOME\Desktop\Mauve-1-main\backend
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8011
 ```
 
 Safer start helper (auto-clears stale listener on selected port before launch):
 
 ```powershell
-cd backend
+cd $HOME\Desktop\Mauve-1-main\backend
 .\start.ps1
 ```
 
 Optional custom port/host:
 
 ```powershell
-cd backend
+cd $HOME\Desktop\Mauve-1-main\backend
 .\start.ps1 -Port 8012 -BindHost 127.0.0.1
 ```
 
-From project root:
+From the unzipped project folder (parent of `backend`):
 
 ```powershell
+cd $HOME\Desktop\Mauve-1-main
 .\backend\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir .\backend --host 127.0.0.1 --port 8011
 ```
 

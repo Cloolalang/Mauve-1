@@ -62,6 +62,8 @@ cd backend
 .\start.ps1
 ```
 
+Connect the **PC** to the router **USB** port with a **data** cable so Windows exposes the AT **COM** port (see root **[`README.md`](../README.md)** → **Quick start** step **1**).
+
 Default serial target is `COM49 @ 115200`.
 Default KPI poll rate is `2.0 Hz`.
 
