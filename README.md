@@ -4,6 +4,8 @@
 
 Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.13** is shown in the page header).
 
+License: [GNU General Public License v2.0](LICENSE).
+
 ## Quick start
 
 Do these in order on **Windows** with a **Robustel** modem/router (tested on **R5010**). COM port names and router labels vary by model.
