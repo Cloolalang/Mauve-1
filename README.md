@@ -1,8 +1,17 @@
 # 5G ModemTestDriver
 
-**Version 1.9**
+**Version 1.11**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.9** is shown in the page header).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.11** is shown in the page header).
+
+**Changes in v1.11**
+
+- **LTE neighbour EARFCN card**: dashboard lists **distinct LTE EARFCNs** from `AT+QENG="neighbourcell"` for **intra** and **inter** (strongest-measurement order, capped). Data is **pre-formatted on the server** and exposed only via **`GET /api/kpi/neighbour-channels`**; the UI polls it about every **3 s** so the main KPI snapshot and **`/ws/kpi`** payload stay lean.
+- **Reliability**: KPI WebSocket broadcast wraps **`json.dumps`** failures (logs and continues). WebSocket and HTTP poll paths surface **parse / `applySnap` errors** on the status line instead of failing silently.
+
+**Changes in v1.10**
+
+- **KPI polling**: fixed at **2.0 Hz** (removed dashboard **KPI poll** control). **`MD_KPI_POLL_HZ`** is no longer read. **`POST /api/kpi/poll`** remains for compatibility; request body must use **`"poll_hz": 2.0`**; the rate is always **2 Hz**. WebSocket live KPI pushes use a **0.5 s** interval (2 Hz).
 
 **Changes in v1.9**
 
@@ -84,6 +93,7 @@ AT command catalog from current modem firmware:
   - CA policy switch for LTE (single-band vs multi/all)
   - NRDC on/off switch
   - Neighbour Cells RF KPI (strongest intra-frequency neighbour RSRP + PCI + EARFCN, plus intra/inter neighbour counts) under **Primary Cell**
+  - **LTE neighbour channels** card: distinct **EARFCN** lists (intra / inter) via **`GET /api/kpi/neighbour-channels`** (~3 s refresh); not merged into live WebSocket KPI JSON
   - Mobility / LTE carrier re-selection KPI (PCell EARFCN vs intra-frequency PCI rates) with dual-trace chart
   - Data Service KPI section:
     - APN (live read plus **Set APN** form using `AT+CGDCONT`, same unlock password as Allow Data)
@@ -128,7 +138,7 @@ AT command catalog from current modem firmware:
 
 ## Planned RF features
 
-- Neighbor cell RF table from `AT+QENG="neighbourcell"` (PCI, EARFCN/ARFCN, RSRP, RSRQ, SINR where available)
+- Full neighbour-cell RF table from `AT+QENG="neighbourcell"` (PCI, EARFCN/ARFCN, RSRP, RSRQ, SINR where available); v1.11 adds distinct **EARFCN** lists only
 - Per-chain RF charts from `AT+QRSRP`, `AT+QRSRQ`, `AT+QSINR` (`PRX/DRX/RX2/RX3`)
 - Dedicated NR serving KPI panel (NSA/SA `RSRP/RSRQ/SINR`, ARFCN, band)
 - Carrier aggregation details from `AT+QCAINFO` (PCC/SCC, band, bandwidth, channel)
@@ -200,7 +210,6 @@ Set environment variables before start:
 ```powershell
 $env:MD_SERIAL_PORT="COM49"
 $env:MD_BAUDRATE="115200"
-$env:MD_KPI_POLL_HZ="2.0"
 ```
 
 ## Getting started
@@ -255,6 +264,7 @@ The JSON includes `sample.carrier_reselection` with `window_sec` (60), `primary_
 - `POST /api/at/send`
 - `GET /api/at/log`
 - `GET /api/kpi/latest`
+- `GET /api/kpi/neighbour-channels` (distinct LTE EARFCNs intra/inter as text; not in WebSocket KPI)
 - `POST /api/kpi/poll`
 - `POST /api/kpi/poll/start`
 - `POST /api/kpi/poll/stop`

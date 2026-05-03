@@ -13,6 +13,10 @@ from app.serial_engine import SerialEngine
 # Applies in camped / idle-style reporting and in RRC_CONNECTED (CONNECT) whenever AT+QENG exposes LTE PCell.
 CARRIER_RESEL_WINDOW_SEC = 60.0
 
+# Pre-formatted neighbour channel card (served only via /api/kpi/neighbour-channels, not WebSocket).
+NEIGHBOUR_CHANNEL_CARD_MAX_ROWS = 32
+NEIGHBOUR_CHANNEL_CARD_MAX_CHARS = 12_000
+
 
 def _prune_ts_window(ts_deque: deque[float], now: float, window_sec: float) -> None:
     cutoff = now - window_sec
@@ -484,6 +488,112 @@ def _count_qeng_inter_neighbours(
     return len(keys)
 
 
+def _qeng_channel_row_fill_score(row: dict[str, int | None]) -> int:
+    return sum(1 for k in ("pci", "rsrq", "rsrp", "rssi", "sinr") if row.get(k) is not None)
+
+
+def _merge_qeng_channel_rows(
+    prev: dict[str, int | None] | None, cand: dict[str, int | None]
+) -> dict[str, int | None]:
+    if prev is None:
+        return cand
+    pr, cr = prev.get("rsrp"), cand.get("rsrp")
+    if cr is not None and (pr is None or cr > pr):
+        return cand
+    if pr is not None and cr is not None:
+        if cr > pr:
+            return cand
+        if cr < pr:
+            return prev
+        if _qeng_channel_row_fill_score(cand) > _qeng_channel_row_fill_score(prev):
+            return cand
+        return prev
+    if pr is None and cr is None and _qeng_channel_row_fill_score(cand) > _qeng_channel_row_fill_score(prev):
+        return cand
+    if pr is None and cr is not None:
+        return cand
+    return prev
+
+
+def _list_qeng_neighbour_lte_channel_rows(
+    lines: list[str],
+    *,
+    inter: bool,
+    serving_pci: int | None,
+    serving_earfcn: int | None,
+) -> list[dict[str, int | None]]:
+    """LTE rows from QENG neighbourcell intra/inter; partial '-' fields allowed; capped for UI text."""
+    tag = "neighbourcell inter" if inter else "neighbourcell intra"
+    best: dict[tuple[int, int], dict[str, int | None]] = {}
+    for raw in lines:
+        if not raw.startswith("+QENG:"):
+            continue
+        if tag not in raw.lower():
+            continue
+        parts = _parse_csv_payload(raw.split(":", 1)[1].strip())
+        for i, token in enumerate(parts):
+            if token.upper() != "LTE":
+                continue
+            if len(parts) <= i + 1:
+                continue
+            earfcn = _safe_int(parts[i + 1]) if len(parts) > i + 1 else None
+            if earfcn is None:
+                continue
+            pci = _safe_int(parts[i + 2]) if len(parts) > i + 2 else None
+            rsrq = _safe_int(parts[i + 3]) if len(parts) > i + 3 else None
+            rsrp = _safe_int(parts[i + 4]) if len(parts) > i + 4 else None
+            rssi = _safe_int(parts[i + 5]) if len(parts) > i + 5 else None
+            sinr = _safe_int(parts[i + 6]) if len(parts) > i + 6 else None
+            if inter:
+                if serving_earfcn is not None and earfcn == serving_earfcn:
+                    continue
+            else:
+                if serving_earfcn is not None and earfcn != serving_earfcn:
+                    continue
+            if _qeng_lte_row_echoes_serving_cell(earfcn, pci, serving_pci, serving_earfcn):
+                continue
+            cand: dict[str, int | None] = {
+                "earfcn": earfcn,
+                "pci": pci,
+                "rsrq": rsrq,
+                "rsrp": rsrp,
+                "rssi": rssi,
+                "sinr": sinr,
+            }
+            dedupe_pci = pci if pci is not None else -1
+            key = (earfcn, dedupe_pci)
+            best[key] = _merge_qeng_channel_rows(best.get(key), cand)
+    out = list(best.values())
+
+    def _rsrp_sort(r: dict[str, int | None]) -> int:
+        v = r.get("rsrp")
+        return v if v is not None else -10**9
+
+    out.sort(key=_rsrp_sort, reverse=True)
+    return out[:NEIGHBOUR_CHANNEL_CARD_MAX_ROWS]
+
+
+def neighbour_channel_rows_to_text(rows: list[dict[str, int | None]]) -> str:
+    """Distinct LTE EARFCNs, one per line (order: strongest RSRP first among input rows)."""
+    if not rows:
+        return "-"
+
+    seen: set[int] = set()
+    lines: list[str] = []
+    for r in rows:
+        e = r.get("earfcn")
+        if e is None or e in seen:
+            continue
+        seen.add(e)
+        lines.append(str(e))
+    if not lines:
+        return "-"
+    text = "\n".join(lines)
+    if len(text) > NEIGHBOUR_CHANNEL_CARD_MAX_CHARS:
+        return text[: NEIGHBOUR_CHANNEL_CARD_MAX_CHARS] + "\n..."
+    return text
+
+
 def _parse_cgatt(lines: list[str]) -> int | None:
     for raw in lines:
         if not raw.startswith("+CGATT:"):
@@ -621,13 +731,16 @@ class KpiRuntime:
     snapshot: dict[str, Any] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     poll_running: bool = False
-    poll_hz: float = 1.0
+    poll_hz: float = 2.0
     last_error: str | None = None
     modem_fw: str | None = None
     modem_fw_at: float = 0.0
     data_service: dict[str, Any] = field(default_factory=dict)
     data_service_at: float = 0.0
     carrier_resel: CarrierReselTracker = field(default_factory=CarrierReselTracker)
+    neighbour_channel_card: dict[str, Any] = field(
+        default_factory=lambda: {"intra_text": "-", "inter_text": "-", "sample_ts": None}
+    )
 
 
 async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
@@ -736,6 +849,22 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                 )
                 intra_n_count = _count_qeng_intra_neighbours(nb_lines, serving_pci=serving_pci, serving_earfcn=serving_earfcn)
                 inter_n_count = _count_qeng_inter_neighbours(nb_lines, serving_pci=serving_pci, serving_earfcn=serving_earfcn)
+                try:
+                    intra_rows = _list_qeng_neighbour_lte_channel_rows(
+                        nb_lines, inter=False, serving_pci=serving_pci, serving_earfcn=serving_earfcn
+                    )
+                    inter_rows = _list_qeng_neighbour_lte_channel_rows(
+                        nb_lines, inter=True, serving_pci=serving_pci, serving_earfcn=serving_earfcn
+                    )
+                    ch_intra = neighbour_channel_rows_to_text(intra_rows)
+                    ch_inter = neighbour_channel_rows_to_text(inter_rows)
+                except Exception:  # noqa: BLE001
+                    ch_intra, ch_inter = "-", "-"
+                neighbour_channel_card = {
+                    "intra_text": ch_intra,
+                    "inter_text": ch_inter,
+                    "sample_ts": sample_ts,
+                }
                 neighbour = {
                     "strongest_rsrp": intra_n.get("rsrp") if intra_n else None,
                     "strongest_pci": intra_n.get("pci") if intra_n else None,
@@ -779,13 +908,19 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                 }
                 async with runtime.lock:
                     runtime.snapshot = parsed
+                    runtime.neighbour_channel_card = neighbour_channel_card
                     runtime.last_error = None
             except Exception as exc:  # noqa: BLE001
                 async with runtime.lock:
                     runtime.last_error = str(exc)
+                    runtime.neighbour_channel_card = {
+                        "intra_text": "-",
+                        "inter_text": "-",
+                        "sample_ts": None,
+                    }
 
             elapsed = time.time() - started
-            interval = max(0.2, 1.0 / max(0.1, runtime.poll_hz))
+            interval = max(0.05, 1.0 / max(1.0, float(runtime.poll_hz)))
             wait_sec = max(0.0, interval - elapsed)
             await asyncio.sleep(wait_sec)
     finally:

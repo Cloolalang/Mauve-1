@@ -1,6 +1,15 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 1.9** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.9.0**).
+**Version 1.11** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.11.0**).
+
+Notes for **v1.11**:
+
+- **`GET /api/kpi/neighbour-channels`**: returns **`intra_text`** / **`inter_text`** (newline-separated distinct LTE **EARFCNs** from QENG neighbourcell intra/inter, server-preformatted; **`sample_ts`** from the KPI poll). Not part of **`GET /api/kpi/latest`** or WebSocket KPI JSON.
+- **KPI WebSocket loop**: **`json.dumps`** errors are caught and logged so the broadcaster task keeps running.
+
+Notes for **v1.10** (historical):
+
+- **KPI poll rate** is **fixed at 2.0 Hz** (no UI control, no `MD_KPI_POLL_HZ`). **`POST /api/kpi/poll`** only accepts **`poll_hz: 2.0`**; handler always sets **`poll_hz`** to **2.0**. **`/ws/kpi`** push cadence **0.5 s**.
 
 Notes for **v1.9**:
 
@@ -63,7 +72,7 @@ $env:MD_BAUDRATE="115200"
 
 Failures from the modem (**`+CME ERROR`**, **`ERROR`**, **TIMEOUT**, etc.) surface as **`ok: false`**, **`error`**, and often **`modem_detail`** on **`/api/network/*`**, **`/api/network/apn`**, **`/api/tools/modem-reset`**, etc. (decoded in **`app/at_modem_errors.py`**).
 
-- `GET /` **5G ModemTestDriver** KPI page (**v1.9** in browser tab title and main heading): compact **Serial Port** tile; **Access / Operator** + **Registration Control (COPS)** combined; modem reset; lock controls + re-apply guard; roaming MNO [Vodafone/VMO2/EE/H3G/Auto]; data gate; CA/NRDC; **Primary Cell** (serving + RF + neighbour + dominance + neighbour counts); intra overlay + **inter-frequency** neighbour trends; **LTE carrier re-selection** KPI + dual-trace chart; Data Service KPI; SIM + PLMN; AT console; **iperf3** + ICMP sweep; VoLTE test; charts (window, gaps, thresholds, smoothing, hover tooltips); **Apply UI defaults**
+- `GET /` **5G ModemTestDriver** KPI page (**v1.11** in browser tab title and main heading): compact **Serial Port** tile; **Access / Operator** + **Registration Control (COPS)** combined; modem reset; lock controls + re-apply guard; roaming MNO [Vodafone/VMO2/EE/H3G/Auto]; data gate; CA/NRDC; **Primary Cell** (serving + RF + neighbour + dominance + neighbour counts); **LTE neighbour EARFCN** card (separate API poll); intra overlay + **inter-frequency** neighbour trends; **LTE carrier re-selection** KPI + dual-trace chart; Data Service KPI; SIM + PLMN; AT console; **iperf3** + ICMP sweep; VoLTE test; charts (window, gaps, thresholds, smoothing, hover tooltips); **Apply UI defaults**
 - `GET /api/serial/status`
 - `GET /api/serial/ports`
 - `POST /api/at/send`
@@ -72,8 +81,9 @@ Failures from the modem (**`+CME ERROR`**, **`ERROR`**, **TIMEOUT**, etc.) surfa
 - `POST /api/serial/reopen`
   - body: `{ "port": "COM49", "baudrate": 115200 }`
 - `GET /api/kpi/latest`
+- `GET /api/kpi/neighbour-channels` — distinct LTE **EARFCN** lines (intra/inter) as preformatted text; small JSON, not included in WebSocket KPI
 - `POST /api/kpi/poll`
-  - body: `{ "poll_hz": 2.0 }`
+  - body: `{ "poll_hz": 2.0 }` only (rate is fixed; compatibility endpoint)
 - `POST /api/kpi/poll/start`
 - `POST /api/kpi/poll/stop`
 - `GET /api/network/cops` (read registration/operator status)

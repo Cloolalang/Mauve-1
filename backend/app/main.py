@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import logging
 import os
 import re
 import shutil
@@ -10,6 +11,8 @@ import subprocess
 import tempfile
 import time
 from contextlib import asynccontextmanager
+
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -25,7 +28,9 @@ from app.sim_usim_services import (
     label_usim_service,
 )
 
-APP_VERSION = "1.9"
+logger = logging.getLogger(__name__)
+
+APP_VERSION = "1.11"
 
 
 def _serial_state_file_path() -> str:
@@ -62,7 +67,7 @@ DEFAULT_PORT = os.getenv("MD_SERIAL_PORT", str(_last_serial.get("port") or "COM4
 DEFAULT_BAUD = int(os.getenv("MD_BAUDRATE", str(_last_serial.get("baudrate") or "115200")))
 
 engine = SerialEngine(port=DEFAULT_PORT, baudrate=DEFAULT_BAUD)
-kpi_runtime = KpiRuntime(poll_hz=float(os.getenv("MD_KPI_POLL_HZ", "2.0")))
+kpi_runtime = KpiRuntime(poll_hz=2.0)
 _kpi_task: asyncio.Task[None] | None = None
 _ws_push_task: asyncio.Task[None] | None = None
 _lock_guard_task: asyncio.Task[None] | None = None
@@ -182,7 +187,9 @@ class ReopenBody(BaseModel):
 
 
 class KpiPollBody(BaseModel):
-    poll_hz: float = Field(default=2.0, ge=0.1, le=5.0)
+    """KPI sampling is fixed at 2 Hz; `poll_hz` must be 2.0 (accepted for API compatibility)."""
+
+    poll_hz: Literal[2.0] = Field(default=2.0, description="Fixed at 2.0 Hz")
 
 
 class CopsSetBody(BaseModel):
@@ -867,17 +874,37 @@ MNO_OPERATOR_ALIASES: dict[str, set[str]] = {
 }
 
 
-def _first_payload_line(lines: list[str]) -> str | None:
+def _parse_imei_from_cgsn_lines(lines: list[str]) -> str | None:
+    """IMEI from AT+CGSN; skip interleaved URCs (+COPS, +CREG, …) captured in the same response."""
     for raw in lines:
         s = str(raw or "").strip()
         if not s:
             continue
         up = s.upper()
-        if up in {"OK", "ERROR"}:
+        if up in {"OK", "ERROR"} or up.startswith("AT+"):
             continue
-        if up.startswith("AT+"):
+        if s.lstrip().startswith("+"):
             continue
-        return s
+        cand = "".join(ch for ch in s if ch.isdigit())
+        if 14 <= len(cand) <= 16:
+            return cand
+    return None
+
+
+def _parse_imsi_from_cimi_lines(lines: list[str]) -> str | None:
+    """IMSI from AT+CIMI; skip interleaved URCs (+COPS, …)."""
+    for raw in lines:
+        s = str(raw or "").strip()
+        if not s:
+            continue
+        up = s.upper()
+        if up in {"OK", "ERROR"} or up.startswith("AT+"):
+            continue
+        if s.lstrip().startswith("+"):
+            continue
+        cand = "".join(ch for ch in s if ch.isdigit())
+        if 14 <= len(cand) <= 15:
+            return cand
     return None
 
 
@@ -1052,15 +1079,19 @@ async def _broadcast_kpi_loop() -> None:
         await asyncio.sleep(0.5)
         if not ws_clients:
             continue
-        async with kpi_runtime.lock:
-            payload = json.dumps(
-                {
-                    "sample": kpi_runtime.snapshot,
-                    "poll_running": kpi_runtime.poll_running,
-                    "poll_hz": kpi_runtime.poll_hz,
-                    "last_error": kpi_runtime.last_error,
-                }
-            )
+        try:
+            async with kpi_runtime.lock:
+                payload = json.dumps(
+                    {
+                        "sample": kpi_runtime.snapshot,
+                        "poll_running": kpi_runtime.poll_running,
+                        "poll_hz": kpi_runtime.poll_hz,
+                        "last_error": kpi_runtime.last_error,
+                    }
+                )
+        except Exception:
+            logger.exception("KPI WebSocket broadcast: json.dumps failed (snapshot not JSON-serializable?)")
+            continue
         dead: list[WebSocket] = []
         for ws in ws_clients:
             try:
@@ -1099,7 +1130,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="1.9.0",
+    version="1.11.0",
     lifespan=lifespan,
 )
 
@@ -1130,8 +1161,32 @@ async def home() -> HTMLResponse:
     .card-compact-tile .row { margin-top: 6px; }
     .label { color: #9aa0a6; font-size: 12px; }
     .value { font-size: 20px; font-weight: 700; margin-top: 4px; }
-    .row { display: flex; justify-content: space-between; margin-top: 8px; }
+    .row { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-top: 8px; }
+    .modemfw-value {
+      font-size: 10px;
+      line-height: 1.3;
+      font-family: Consolas, monospace;
+      text-align: right;
+      flex: 1;
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
     .mono { font-family: Consolas, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+    .nbr-channels-pre {
+      font-family: Consolas, monospace;
+      font-size: 11px;
+      line-height: 1.35;
+      margin: 6px 0 0;
+      padding: 8px;
+      max-height: 220px;
+      overflow: auto;
+      background: #0e0e0e;
+      border: 1px solid #333;
+      border-radius: 6px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
     .ok { color: #39d353; }
     .warn { color: #ffcc66; }
     .err { color: #ff7070; }
@@ -1185,7 +1240,7 @@ async def home() -> HTMLResponse:
       <div class="label">Access / Operator</div>
       <div class="row"><span class="label">Operator</span><span id="operator">-</span></div>
       <div class="row"><span class="label">Registration</span><span id="access-eps-scope">-</span></div>
-      <div class="row"><span class="label">Modem FW</span><span id="modemfw">-</span></div>
+      <div class="row"><span class="label">Modem FW</span><span id="modemfw" class="modemfw-value">-</span></div>
       <div class="row"><span class="label">Updated</span><span id="updated">-</span></div>
       <div class="label" style="margin-top:12px;">Registration Control (COPS)</div>
       <div class="row"><span class="label">Mode</span><span id="copsmode">-</span></div>
@@ -1257,7 +1312,10 @@ async def home() -> HTMLResponse:
       <div class="row"><span class="label">RSRQ</span><span id="rsrq">-</span></div>
       <div class="row"><span class="label">SINR (QSINR PRX)</span><span id="sinr">-</span></div>
       <div class="row"><span class="label">RSSI</span><span id="rssi">-</span></div>
-      <div class="row"><span class="label">Primary cell intra-cell dominance</span><span id="dominance">-</span></div>
+      <div class="row"><span class="label">Primary cell intra-cell RSRP dominance</span><span id="dominance">-</span></div>
+      <div class="row" title="Same LTE cell only. Builds median RSRQ from samples where |RSRP − rolling median RSRP| ≤ 3 dB. Value = baseline − current RSRQ (dB). Positive ⇒ current RSRQ worse than session baseline — RF/airtime congestion proxy for a static UE; not scheduler load. Resets on cell change.">
+        <span class="label">RSRQ vs baseline (static UE proxy)</span><span id="rsrq-static-proxy">-</span>
+      </div>
       <div class="label" style="margin-top:10px;">Neighbour Cells RF KPI</div>
       <div class="row"><span class="label">1st strongest neighbour RSRP (intra)</span><span id="nrsrp1">-</span></div>
       <div class="row"><span class="label">1st strongest neighbour PCI (intra)</span><span id="npci1">-</span></div>
@@ -1270,6 +1328,15 @@ async def home() -> HTMLResponse:
       <div class="label">Mobility · LTE carrier re-selection (camped and RRC connected)</div>
       <div class="row" style="margin-top:8px;"><span class="label">Intra-freq PCI re-selections / min</span><span id="idle-pci-rate">-</span></div>
       <div class="row"><span class="label">Primary EARFCN re-selections / min</span><span id="idle-earfcn-rate">-</span></div>
+    </div>
+
+    <div class="card">
+      <div class="label">LTE neighbour channels (+QENG)</div>
+      <div class="label" style="margin-top:6px; font-size:11px; line-height:1.35;">Distinct LTE EARFCNs from QENG neighbourcell (one per line). Updated via a separate API; strongest neighbour per carrier listed first. Up to 32 carriers per list.</div>
+      <div class="label" style="margin-top:10px;">Intra-frequency (neighbourcell intra)</div>
+      <pre id="nbr-intra-channels" class="nbr-channels-pre">-</pre>
+      <div class="label" style="margin-top:10px;">Inter-frequency (neighbourcell inter)</div>
+      <pre id="nbr-inter-channels" class="nbr-channels-pre">-</pre>
     </div>
 
     <div class="card">
@@ -1297,8 +1364,14 @@ async def home() -> HTMLResponse:
     </div>
 
     <div class="card">
-      <div class="label">Primary and 1st strongest intra-cell neighbour dominance Trend (dB)</div>
+      <div class="label">Primary and 1st strongest intra-cell neighbour RSRP dominance Trend (dB)</div>
       <canvas id="dominancechart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+    </div>
+
+    <div class="card">
+      <div class="label">RSRQ vs RSRP-stable session baseline — static UE congestion proxy (dB)</div>
+      <canvas id="congestionproxychart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
 
@@ -1321,7 +1394,7 @@ async def home() -> HTMLResponse:
     </div>
 
     <div class="card">
-      <div class="label">Primary and 1st strongest inter-cell neighbour dominance Trend (dB)</div>
+      <div class="label">Primary and 1st strongest inter-cell neighbour RSRP dominance Trend (dB)</div>
       <canvas id="nbridomchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
     </div>
@@ -1729,6 +1802,16 @@ async def home() -> HTMLResponse:
     let lastPhAvgMs = null;
     let lastPhJitMs = null;
     const rfHistory = { rsrp: [], rsrq: [], sinr: [], rssi: [], dominance: [] };
+    /** RSRQ session baseline vs current (RSRP-stable gated); UE-side congestion proxy — see stepCongestionProxy. */
+    const CONGESTION_RSRP_MEDIAN_WINDOW = 21;
+    const CONGESTION_RSRP_STABLE_DB = 3;
+    const CONGESTION_BASELINE_MAX = 160;
+    const CONGESTION_BASELINE_MIN_SAMPLES = 10;
+    const congestionRsrpRing = [];
+    const congestionBaselineRsrq = [];
+    const congestionProxyHistory = [];
+    let congestionProxyCellKey = null;
+    let lastCongestionUi = { proxy: null, baselineCount: 0 };
     /** Intra-EARFCN strongest neighbour (QENG neighbourcell intra) per metric for RF trend overlays. */
     const rfNeighborOverlap = { rsrp: [], rsrq: [], rssi: [] };
     const nbrInterRsrpHistory = [];
@@ -1755,6 +1838,7 @@ async def home() -> HTMLResponse:
       "sinrchart",
       "rssichart",
       "dominancechart",
+      "congestionproxychart",
       "nbrintersrpchart",
       "nbrintersrqchart",
       "nbrinterrssichart",
@@ -1767,11 +1851,12 @@ async def home() -> HTMLResponse:
       rsrqchart: "Primary and 1st strongest intra-cell neighbour RSRQ Trend (dB)",
       sinrchart: "Primary SNIR Trend (dB)",
       rssichart: "Primary and 1st strongest intra-cell neighbour RSSI Trend (dBm)",
-      dominancechart: "Primary and 1st strongest intra-cell neighbour dominance Trend (dB)",
+      dominancechart: "Primary and 1st strongest intra-cell neighbour RSRP dominance Trend (dB)",
+      congestionproxychart: "RSRQ vs RSRP-stable session baseline — static UE congestion proxy (dB)",
       nbrintersrpchart: "1st strongest inter-cell neighbour RSRP Trend (dBm)",
       nbrintersrqchart: "1st strongest inter-cell neighbour RSRQ Trend (dB)",
       nbrinterrssichart: "1st strongest inter-cell neighbour RSSI Trend (dBm)",
-      nbridomchart: "Primary and 1st strongest inter-cell neighbour dominance Trend (dB)",
+      nbridomchart: "Primary and 1st strongest inter-cell neighbour RSRP dominance Trend (dB)",
       nbrintracountchart: "Intra-frequency neighbour cell count Trend (LTE, QENG intra)",
       nbrintercountchart: "Inter-frequency neighbour cell count Trend (LTE, QENG inter)"
     };
@@ -1831,6 +1916,7 @@ async def home() -> HTMLResponse:
       pruneHistoryByAge(nbrInterRsrqHistory, nowMs);
       pruneHistoryByAge(nbrInterRssiHistory, nowMs);
       pruneHistoryByAge(nInterDomHistory, nowMs);
+      pruneHistoryByAge(congestionProxyHistory, nowMs);
       pruneHistoryByAge(nbrIntraCountHistory, nowMs);
       pruneHistoryByAge(nbrInterCountHistory, nowMs);
       pruneHistoryByAge(bwHistory, nowMs);
@@ -2139,6 +2225,8 @@ async def home() -> HTMLResponse:
       el("rsrq").textContent = fmt(lte.rsrq, " dB");
       el("sinr").textContent = fmt(qsinr.prx, " dB");
       el("rssi").textContent = fmt(lte.rssi, " dBm");
+      const trendTs = sample.sample_ts || null;
+      const advanceRfHistory = trendTs !== null && trendTs !== lastTrendSampleTs;
       const dominance =
         intraStrongestDistinctFromServing(nb, lte) &&
         lte.rsrp !== null &&
@@ -2150,9 +2238,38 @@ async def home() -> HTMLResponse:
           ? Number(lte.rsrp) - Number(nb.strongest_rsrp)
           : null;
       el("dominance").textContent = fmt(dominance, " dB");
+      const spEl = el("rsrq-static-proxy");
+      if (!primaryCellDataAvailable) {
+        resetCongestionProxyState();
+        if (spEl) spEl.textContent = "-";
+      } else if (advanceRfHistory) {
+        lastCongestionUi = stepCongestionProxy(lte, trendTs, primaryCellDataAvailable);
+        if (spEl) {
+          if (lastCongestionUi.proxy !== null && Number.isFinite(lastCongestionUi.proxy)) {
+            spEl.textContent = `${Number(lastCongestionUi.proxy).toFixed(1)} dB`;
+          } else if (
+            lastCongestionUi.baselineCount > 0 &&
+            lastCongestionUi.baselineCount < CONGESTION_BASELINE_MIN_SAMPLES
+          ) {
+            spEl.textContent = `${lastCongestionUi.baselineCount}/${CONGESTION_BASELINE_MIN_SAMPLES}`;
+          } else {
+            spEl.textContent = "-";
+          }
+        }
+      } else if (spEl) {
+        if (lastCongestionUi.proxy !== null && Number.isFinite(lastCongestionUi.proxy)) {
+          spEl.textContent = `${Number(lastCongestionUi.proxy).toFixed(1)} dB`;
+        } else if (
+          lastCongestionUi.baselineCount > 0 &&
+          lastCongestionUi.baselineCount < CONGESTION_BASELINE_MIN_SAMPLES
+        ) {
+          spEl.textContent = `${lastCongestionUi.baselineCount}/${CONGESTION_BASELINE_MIN_SAMPLES}`;
+        } else {
+          spEl.textContent = "-";
+        }
+      }
       el("updated").textContent = fmtTs(sample.sample_ts);
 
-      const trendTs = sample.sample_ts || null;
       if (trendTs !== lastTrendSampleTs) {
         lastTrendSampleTs = trendTs;
         addRfSample("rsrp", lte.rsrp, trendTs, true);
@@ -3160,6 +3277,73 @@ async def home() -> HTMLResponse:
       drawIperfChart();
     }
 
+    function medianNumeric(vals) {
+      const xs = vals.filter((x) => Number.isFinite(x)).slice().sort((a, b) => a - b);
+      const n = xs.length;
+      if (!n) return null;
+      const m = Math.floor(n / 2);
+      if (n % 2) return xs[m];
+      return (xs[m - 1] + xs[m]) / 2;
+    }
+
+    function resetCongestionProxyState() {
+      congestionRsrpRing.length = 0;
+      congestionBaselineRsrq.length = 0;
+      congestionProxyHistory.length = 0;
+      congestionProxyCellKey = null;
+      lastCongestionUi = { proxy: null, baselineCount: 0 };
+    }
+
+    /**
+     * Session RSRQ baseline from RSRP-stable samples on the same LTE cell; proxy = baseline − RSRQ (+ ⇒ worse than baseline).
+     */
+    function stepCongestionProxy(lte, tsSec, primaryOk) {
+      if (!primaryOk || !lte) {
+        return { proxy: null, gated: false, baselineCount: 0 };
+      }
+      const rsrp = Number(lte.rsrp);
+      const rsrq = Number(lte.rsrq);
+      if (!Number.isFinite(rsrp) || !Number.isFinite(rsrq)) {
+        return { proxy: null, gated: false, baselineCount: congestionBaselineRsrq.length };
+      }
+      const cellKey =
+        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
+          ? `${currentServingEarfcn}/${currentServingPci}`
+          : null;
+      if (!cellKey) return { proxy: null, gated: false, baselineCount: 0 };
+
+      if (congestionProxyCellKey !== cellKey) {
+        congestionRsrpRing.length = 0;
+        congestionBaselineRsrq.length = 0;
+        congestionProxyCellKey = cellKey;
+      }
+
+      congestionRsrpRing.push(rsrp);
+      while (congestionRsrpRing.length > CONGESTION_RSRP_MEDIAN_WINDOW) congestionRsrpRing.shift();
+
+      const medRsrp = medianNumeric(congestionRsrpRing);
+      const gated =
+        congestionRsrpRing.length >= 7 &&
+        medRsrp !== null &&
+        Math.abs(rsrp - medRsrp) <= CONGESTION_RSRP_STABLE_DB;
+
+      if (gated) {
+        congestionBaselineRsrq.push(rsrq);
+        while (congestionBaselineRsrq.length > CONGESTION_BASELINE_MAX) congestionBaselineRsrq.shift();
+      }
+
+      const baseline = medianNumeric(congestionBaselineRsrq);
+      const okN = congestionBaselineRsrq.length >= CONGESTION_BASELINE_MIN_SAMPLES;
+      let proxy = null;
+      if (gated && baseline !== null && okN) {
+        proxy = baseline - rsrq;
+        const t = tsSec ? Number(tsSec) * 1000 : Date.now();
+        congestionProxyHistory.push({ t, v: proxy, c: cellKey });
+        pruneHistoryByAge(congestionProxyHistory, t);
+      }
+      return { proxy, gated, baselineCount: congestionBaselineRsrq.length };
+    }
+
     function addRfSample(kind, value, tsSec = null, deferDraw = false) {
       if (value === null || value === undefined) return;
       const v = Number(value);
@@ -3683,7 +3867,7 @@ async def home() -> HTMLResponse:
       const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
       const nowMs = Date.now();
       const windowStartMs = nowMs - chartWindowMs;
-      const expectedStepMs = Math.max(200, 1000 / Math.max(0.1, Number(currentPollHz) || 2));
+      const expectedStepMs = Math.max(50, 1000 / Math.max(1, Number(currentPollHz) || 2));
       const gapBreakMs = expectedStepMs * 1.8;
       const xFor = (p, i) => {
         if (!chartGapModeEnabled) return x0 + i * xStep;
@@ -3827,7 +4011,7 @@ async def home() -> HTMLResponse:
       const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
       const nowMs = Date.now();
       const windowStartMs = nowMs - chartWindowMs;
-      const expectedStepMs = Math.max(200, 1000 / Math.max(0.1, Number(currentPollHz) || 2));
+      const expectedStepMs = Math.max(50, 1000 / Math.max(1, Number(currentPollHz) || 2));
       const gapBreakMsLocal = expectedStepMs * 1.8;
       const intraOvTolMs = Math.max(50, expectedStepMs / 2);
       const primArr = prim;
@@ -4195,6 +4379,7 @@ async def home() -> HTMLResponse:
       drawMetricChart("sinrchart", sinr, "dB", pciColor, 0);
       drawMetricChartWithIntraNeighbour("rssichart", rssi, ovRssi, "dBm", pciColor, -25);
       drawMetricChart("dominancechart", dominance, "dB", "#50fa7b", 6);
+      drawMetricChart("congestionproxychart", primaryCellDataAvailable ? congestionProxyHistory : [], "dB", "#ffb86c", 0);
     }
 
     function drawInterNbrRfCharts() {
@@ -4279,7 +4464,7 @@ async def home() -> HTMLResponse:
       const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
       const nowMs = Date.now();
       const windowStartMs = nowMs - chartWindowMs;
-      const expectedStepMs = Math.max(200, 1000 / Math.max(0.1, Number(currentPollHz) || 2));
+      const expectedStepMs = Math.max(50, 1000 / Math.max(1, Number(currentPollHz) || 2));
       const gapBreakMs = expectedStepMs * 1.8;
       const xFor = (p, i) => {
         if (!chartGapModeEnabled) return x0 + i * xStep;
@@ -4364,6 +4549,7 @@ async def home() -> HTMLResponse:
       rfHistory.sinr.length = 0;
       rfHistory.rssi.length = 0;
       rfHistory.dominance.length = 0;
+      resetCongestionProxyState();
       Object.keys(rfNeighborOverlap).forEach((k) => {
         rfNeighborOverlap[k].length = 0;
       });
@@ -4395,8 +4581,31 @@ async def home() -> HTMLResponse:
       try {
         const r = await fetch("/api/kpi/latest");
         if (!r.ok) return;
-        applySnap(await r.json());
+        try {
+          applySnap(await r.json());
+        } catch (e) {
+          console.error("KPI poll fallback applySnap error:", e);
+          const st = el("status");
+          st.textContent = `Live KPI update error: ${e && e.message ? e.message : e}`;
+          st.className = "label err";
+        }
       } catch (_) {}
+    }
+
+    async function pollNeighbourChannels() {
+      try {
+        const r = await fetch("/api/kpi/neighbour-channels");
+        if (!r.ok) return;
+        const j = await r.json();
+        const t1 = j.intra_text;
+        const t2 = j.inter_text;
+        const p1 = document.getElementById("nbr-intra-channels");
+        const p2 = document.getElementById("nbr-inter-channels");
+        if (p1) p1.textContent = typeof t1 === "string" ? t1 : "-";
+        if (p2) p2.textContent = typeof t2 === "string" ? t2 : "-";
+      } catch (e) {
+        console.error("Neighbour channels poll error:", e);
+      }
     }
 
     async function pollAtLog() {
@@ -4414,7 +4623,16 @@ async def home() -> HTMLResponse:
     const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${wsProto}//${location.host}/ws/kpi`);
     ws.onopen = () => { el("status").textContent = "WebSocket connected."; el("status").className = "label ok"; };
-    ws.onmessage = (ev) => { try { applySnap(JSON.parse(ev.data)); } catch (_) {} };
+    ws.onmessage = (ev) => {
+      try {
+        applySnap(JSON.parse(ev.data));
+      } catch (e) {
+        console.error("KPI WebSocket message error:", e);
+        const st = el("status");
+        st.textContent = `Live KPI parse/update error: ${e && e.message ? e.message : e}`;
+        st.className = "label err";
+      }
+    };
     ws.onclose = () => { el("status").textContent = "WebSocket disconnected; polling fallback."; el("status").className = "label warn"; };
 
     el("btn-cops-read").addEventListener("click", () => readCops());
@@ -4460,6 +4678,7 @@ async def home() -> HTMLResponse:
     el("btn-modem-reset").addEventListener("click", () => resetModem());
 
     setInterval(pollFallback, 2000);
+    setInterval(pollNeighbourChannels, 3000);
     setInterval(pollAtLog, 1200);
     setInterval(() => readSerialStatus(false), 3000);
     setInterval(() => {
@@ -4468,6 +4687,7 @@ async def home() -> HTMLResponse:
       redrawAllCharts();
     }, 400);
     pollFallback();
+    pollNeighbourChannels();
     pollAtLog();
     readSerialStatus(true);
     refreshSerialPorts(true);
@@ -4533,8 +4753,8 @@ async def sim_high_level() -> dict:
     cops_res = await engine.send_command("AT+COPS?", timeout_sec=4.0)
     cpol_res = await engine.send_command("AT+CPOL?", timeout_sec=8.0)
 
-    imei = _first_payload_line(imei_res.get("lines", []))
-    imsi = _first_payload_line(cimi_res.get("lines", []))
+    imei = _parse_imei_from_cgsn_lines(imei_res.get("lines", []))
+    imsi = _parse_imsi_from_cimi_lines(cimi_res.get("lines", []))
     spn = _parse_qspn(qspn_res.get("lines", []))
     cops = _parse_cops_lines(cops_res.get("lines", []))
     cpol_entries = _parse_cpol(cpol_res.get("lines", []))
@@ -4669,10 +4889,23 @@ async def kpi_latest() -> dict:
         }
 
 
-@app.post("/api/kpi/poll")
-async def kpi_poll_config(body: KpiPollBody) -> dict:
+@app.get("/api/kpi/neighbour-channels")
+async def kpi_neighbour_channels() -> dict:
+    """Small payload: pre-formatted LTE neighbour lines (not included in WebSocket KPI)."""
     async with kpi_runtime.lock:
-        kpi_runtime.poll_hz = body.poll_hz
+        c = kpi_runtime.neighbour_channel_card
+        return {
+            "ok": True,
+            "intra_text": c.get("intra_text") if isinstance(c.get("intra_text"), str) else "-",
+            "inter_text": c.get("inter_text") if isinstance(c.get("inter_text"), str) else "-",
+            "sample_ts": c.get("sample_ts"),
+        }
+
+
+@app.post("/api/kpi/poll")
+async def kpi_poll_config(_body: KpiPollBody = KpiPollBody()) -> dict:
+    async with kpi_runtime.lock:
+        kpi_runtime.poll_hz = 2.0
     return await kpi_latest()
 
 
