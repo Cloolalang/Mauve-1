@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 1.15**
+**Version 1.16**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.15** is shown in the page header).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.16** is shown in the page header).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -79,6 +79,12 @@ In **PowerShell**, click the window where **`.\start.ps1`** is running and press
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
 
+**Changes in v1.16**
+
+- **VoLTE / voice dashboard**: **in-call stopwatch** under the phone widget (counts while connected; after hang-up the display **keeps the last duration** until the **next** call starts, then resets to **0:00**). **In call** for both the handset state and the timer uses **`hook`** from **`/api/tools/voice-call-status`** plus **`line_state`** when **`AT+CLCC`** reports **active / held / dialing / alerting / waiting** (excluding pure **incoming_ring**), so **incoming VoLTE** paths that stay in alerting without an active stat still time correctly.
+- **`POST /api/tools/volte-test`**: optional **`connect_timeout_sec`** (20–300 seconds, default **120**); outbound connect detection waits on **voice-only** **`+CLCC`** rows so **data**-context lines do not hide a voice call still in setup.
+- **Auto-answer**: dashboard drives **host** **`POST /api/tools/host-auto-answer`** (PC-side **`ATA`** watcher); captions stay **Idle** / **Incoming** / **In call**.
+
 **Changes in v1.15**
 
 - **Dashboard charts**: single combined **Primary cell band & DL bandwidth trend** (dual Y-axis: categorical band + MHz); single **Neighbour cell count trend — intra & inter (LTE)** with fixed intra/inter colours (distinct from carrier EARFCN/PCI re-selection chart colours). **State trend** remains separate.
@@ -88,7 +94,6 @@ In **PowerShell**, click the window where **`.\start.ps1`** is running and press
 **Changes in v1.14**
 
 - **NR5G RF KPI** dashboard card plus **`sample.nr_rf`** on **`GET /api/kpi/latest`** and **`/ws/kpi`**: primary NR band/channel from multi-row **`AT+QNWINFO`**, serving identity/RF from **`AT+QENG`** NR NSA/SA, and PRX metrics from the **NR5G** rows of **`AT+QRSRP`**, **`AT+QRSRQ`**, **`AT+QSINR`**; strongest **intra** NR neighbour from **`AT+QENG="neighbourcell"`** when listed (modem-dependent).
-- **Incoming-call auto-answer**: **`ATS0`** (modem **S0**) via **`GET /api/tools/auto-answer`** and password-gated **`POST /api/tools/auto-answer`**; VoLTE card UI (**Read** / **Apply**, rings 1–255, **`ATS0=0`** off).
 
 **Changes in v1.13**
 
@@ -212,7 +217,7 @@ AT command catalog from current modem firmware:
   - Live AT TX/RX console
   - Host ICMP ping sweep (`ping` from the OS; default 10 probes to `8.8.8.8`), optional bind/source IPv4 on Windows, gauges + trend, optional repeat every 15 s
   - iperf3 throughput test (TCP, DL/UL, bind interface, optional bitrate limit) with gauges and trend charts
-  - VoLTE call test (`ATD...;` + `AT+CLCC` + `ATH` + `AT+CEER`) with user dial number and auto hangup after 10s; optional **auto-answer** control (**`ATS0`**) on the same card
+  - VoLTE call test and **auto-answer:** outbound test (`ATD...;` + hangup); **auto-answer** — set **Rings**, tick **On** (unlock password required; tab out of password field or change **Rings** to push settings if you typed password after **On**); **Off** stops without password; **Answer** / **Hang up** on the same card
   - `Clear All Charts` control (also clears Data Service KPI display)
   - Trend charts for iperf throughput, ICMP ping sweep, RSRP, RSRQ, SNIR, RSSI, State, Band, DL bandwidth, intra-cell dominance + neighbour overlays on RSRP/RSRQ/RSSI, inter-frequency neighbour RSRP/RSRQ/RSSI + dominance (`nbr-*-inter*`), LTE carrier re-selection (dual trace)
   - Selectable chart window (60s to 60m)
@@ -380,8 +385,8 @@ The JSON includes `sample.carrier_reselection` with `window_sec` (60), `primary_
 - `GET /api/tools/bind-interfaces` (Windows IPv4 adapters for bind dropdowns)
 - `POST /api/tools/iperf-test` (TCP iperf3 client; optional bind IP and bitrate limit)
 - `POST /api/tools/icmp-ping` (host OS ICMP ping sweep; optional Windows `-S` bind)
-- `GET /api/tools/auto-answer` (read modem **`ATS0`** / S0 ring count)
-- `POST /api/tools/auto-answer` (set **`ATS0`**; unlock password)
+- `GET /api/tools/auto-answer` / `POST /api/tools/auto-answer` — optional **modem `ATS0`** (legacy); not used by the dashboard VoLTE card
+- `GET /api/tools/host-auto-answer` / `POST /api/tools/host-auto-answer` — **auto-answer** used by the dashboard (**`ATA`** from PC; body **`enabled`**, **`rings`**, **`password`**)
 - `POST /api/tools/volte-test`
 - `GET /api/sim/high-level`
 - `GET /api/sim/inspector`
@@ -424,7 +429,7 @@ Values are exposed in `GET /api/kpi/latest` under `sample.data_service`.
   - body: `{ "inhibit": true }` -> deactivates active PDP contexts (`AT+QIDEACT=<cid>`)
   - body: `{ "inhibit": false, "password": "nacelle" }` -> allows packet data (`AT+CGATT=1`, `AT+QIACT=1`)
   - `password` is mandatory for `inhibit=false`; invalid password returns HTTP `403`.
-- `POST /api/tools/volte-test` and **`POST /api/tools/auto-answer`** also require the same unlock password (`nacelle`).
+- `POST /api/tools/volte-test` and **`POST /api/tools/host-auto-answer`** use the same unlock password (`nacelle`). **`POST /api/tools/auto-answer`** (modem **S0**) uses it too if you call that API.
 
 ## COPS scan behavior
 
@@ -474,11 +479,17 @@ Two SIM-focused endpoints are available:
 
 ## VoLTE call test and auto-answer
 
-- `GET /api/tools/auto-answer` — reads **`ATS0?`**; JSON includes **`s0_rings`** (0 = auto-answer off) and **`raw`** modem lines.
-- `POST /api/tools/auto-answer` — body: `{ "enabled": true|false, "rings": 1, "password": "nacelle" }`. When **`enabled`** is false, sends **`ATS0=0`**; when true, **`ATS0=<rings>`** (1–255). Read-back after set. Same unlock password as **`POST /api/tools/volte-test`** and allow-data. Saving across power cycles may require **`AT&W`** on the modem (not sent automatically).
+The dashboard **VoLTE** card controls **auto-answer** via **`GET`/`POST /api/tools/host-auto-answer`** only (PC sends **`ATA`** after ring URCs or timed **`CLCC`** fallback).
+
+- `GET /api/tools/auto-answer` / `POST /api/tools/auto-answer` — optional **modem `ATS0`** for scripts/integration; VoLTE usually ignores **S0**.
+
+- `GET /api/tools/host-auto-answer` — watcher **enabled** / **rings** / live hints (`ring_urcs`, `elapsed_s`, `note`).
+- `POST /api/tools/host-auto-answer` — body: `{ "enabled": true|false, "rings": 2, "password": "nacelle" }`.
+
+- **`GET /api/tools/voice-call-status`** includes **`host_auto_answer`**.
 
 - `POST /api/tools/volte-test`
-  - body: `{ "number": "+447700900123", "hold_sec": 10, "password": "nacelle" }`
+  - body: `{ "number": "+447700900123", "hold_sec": 10, "connect_timeout_sec": 120, "password": "nacelle" }` — **`connect_timeout_sec`** optional (default **120**, max **300**): time to wait for voice **CLCC** active/held after dial.
   - Flow:
     - pre-hangup guard (`ATH`)
     - dial (`ATD<number>;`)

@@ -12,14 +12,14 @@ import tempfile
 import time
 from contextlib import asynccontextmanager
 
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from serial.tools import list_ports
 
-from app.kpi_service import KpiRuntime, _parse_cgdcont, kpi_poll_loop
+from app.kpi_service import KpiRuntime, _parse_cgdcont, _parse_qiact, kpi_poll_loop
 from app.serial_engine import SerialEngine
 from app.at_modem_errors import combine_errors, describe_modem_send_result
 from app.sim_usim_services import (
@@ -30,7 +30,7 @@ from app.sim_usim_services import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.15"
+APP_VERSION = "1.16"
 
 
 def _serial_state_file_path() -> str:
@@ -71,6 +71,10 @@ kpi_runtime = KpiRuntime(poll_hz=2.0)
 _kpi_task: asyncio.Task[None] | None = None
 _ws_push_task: asyncio.Task[None] | None = None
 _lock_guard_task: asyncio.Task[None] | None = None
+_host_auto_answer_task: asyncio.Task[None] | None = None
+_host_aa_rings: int = 2
+_host_aa_status_lock = asyncio.Lock()
+_host_aa_status: dict[str, Any] = {"ring_urcs": 0, "note": ""}
 ws_clients: list[WebSocket] = []
 _instance_lock_file = None
 _desired_locks: dict[str, str] = {}
@@ -237,18 +241,40 @@ class LockSetBody(BaseModel):
 class VolteTestBody(BaseModel):
     number: str = Field(min_length=3, max_length=40, description="Dial number, e.g. +447700900123")
     hold_sec: int = Field(default=10, ge=3, le=120, description="Call hold duration before hangup")
+    connect_timeout_sec: int = Field(
+        default=120,
+        ge=20,
+        le=300,
+        description="Max seconds to wait for CLCC active/held (voice) after dial",
+    )
     password: str | None = Field(default=None, description="Unlock password (same as data allow password)")
+
+
+class VoiceHangupBody(BaseModel):
+    password: str | None = Field(default=None, description="Unlock password (same as VoLTE / data allow)")
+
+
+class VoiceAnswerBody(BaseModel):
+    password: str | None = Field(default=None, description="Unlock password (same as VoLTE / data allow)")
 
 
 class AutoAnswerSetBody(BaseModel):
     enabled: bool = Field(description="False → ATS0=0 (no auto-answer); True → ATS0=rings")
     rings: int = Field(
-        default=1,
+        default=2,
         ge=1,
         le=255,
-        description="Number of rings before auto-answer (only used when enabled=True)",
+        description="Rings before auto-answer (only when enabled=True)",
     )
     password: str | None = Field(default=None, description="Unlock password (same as data allow / VoLTE test)")
+
+
+class HostAutoAnswerBody(BaseModel):
+    """Enable/disable background watcher that sends ``ATA`` after N rings (VoLTE-friendly)."""
+
+    enabled: bool
+    rings: int = Field(default=2, ge=1, le=255)
+    password: str | None = Field(default=None, description="Required when enabled=True")
 
 
 class IperfTestBody(BaseModel):
@@ -589,6 +615,14 @@ def _parse_clcc_lines(lines: list[str]) -> list[dict]:
     return out
 
 
+def _clcc_rows_voice_only(rows: list[dict]) -> list[dict]:
+    """
+    Drop ``+CLCC`` rows that are **data** bearers (``mode`` **1** per 3GPP TS 27.007).
+    Packet data often shows ``stat`` active (0) with ``mode`` data (1); that must not look like a voice call.
+    """
+    return [r for r in rows if r.get("mode") != 1]
+
+
 def _clcc_stat_label(stat: int | None) -> str:
     m = {
         0: "active",
@@ -602,6 +636,154 @@ def _clcc_stat_label(stat: int | None) -> str:
     if stat is None:
         return "unknown"
     return m.get(stat, f"stat_{stat}")
+
+
+def _summarize_voice_call_state(rows: list[dict]) -> dict[str, Any]:
+    """Derive hook / ringing / line state from ``AT+CLCC`` rows (3GPP TS 27.007)."""
+    if not rows:
+        return {
+            "call_present": False,
+            "incoming_ringing": False,
+            "hook": "on_hook",
+            "line_state": "idle",
+            "primary_number": None,
+        }
+    stats: list[int | None] = [r.get("stat") for r in rows]
+    incoming = any(s == 4 for s in stats)
+    off_hook = any(s in (0, 1) for s in stats)
+    if incoming:
+        line_state = "incoming_ring"
+    elif any(s == 0 for s in stats):
+        line_state = "active"
+    elif any(s == 1 for s in stats):
+        line_state = "held"
+    elif any(s == 2 for s in stats):
+        line_state = "dialing"
+    elif any(s == 3 for s in stats):
+        line_state = "alerting"
+    elif any(s == 5 for s in stats):
+        line_state = "waiting"
+    else:
+        line_state = "other"
+    num = next((r.get("number") for r in rows if r.get("number")), None)
+    return {
+        "call_present": True,
+        "incoming_ringing": incoming,
+        "hook": "off_hook" if off_hook else "on_hook",
+        "line_state": line_state,
+        "primary_number": num,
+    }
+
+
+def _urc_recent_incoming_ring(urc_entries: list[tuple[float, str]], max_age_sec: float = 12.0) -> bool:
+    """True only if the newest RING / +CRING URC is within *max_age_sec* (avoids stale ring UI)."""
+    now = time.time()
+    for ts, raw in reversed(urc_entries[-96:]):
+        s = str(raw or "").strip().upper()
+        if not s:
+            continue
+        if s == "RING" or s.startswith("RING") or "+CRING:" in s:
+            return (now - float(ts)) <= max_age_sec
+    return False
+
+
+def _is_ring_urc_line(raw: str) -> bool:
+    s = str(raw or "").strip().upper()
+    if not s:
+        return False
+    return s == "RING" or s.startswith("RING") or "+CRING:" in s
+
+
+def _count_ring_urcs_since(urc_entries: list[tuple[float, str]], since_ts: float) -> int:
+    return sum(1 for ts, raw in urc_entries if float(ts) >= since_ts and _is_ring_urc_line(raw))
+
+
+async def _host_auto_answer_worker(rings_target: int, password: str) -> None:
+    """
+    Poll CLCC + URC log; send ``ATA`` when either:
+    - at least *rings_target* ``RING`` / ``+CRING`` lines since incoming started, or
+    - ``CLCC`` shows incoming voice long enough (~4.5s per missing ring) with no URC pulses (VoLTE).
+    """
+    global _host_aa_status
+    session_start: float | None = None
+    sent_ata = False
+    try:
+        while True:
+            await asyncio.sleep(0.55)
+            if (password or "") != DATA_GATE_UNLOCK_PASSWORD:
+                break
+            try:
+                entries = list(engine.urc_log)
+                clcc_res = await engine.send_command("AT+CLCC", timeout_sec=3.0)
+                rows = _parse_clcc_lines(clcc_res.get("lines", []))
+                voice_rows = _clcc_rows_voice_only(rows)
+                summary = _summarize_voice_call_state(voice_rows)
+                stats = [r.get("stat") for r in voice_rows]
+                in_voice = any(s in (0, 1) for s in stats)
+                recent_ring = _urc_recent_incoming_ring(entries)
+                clcc_incoming = bool(summary["incoming_ringing"])
+                incoming = clcc_incoming or recent_ring
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                async with _host_aa_status_lock:
+                    _host_aa_status = {"ring_urcs": 0, "note": "poll_error"}
+                continue
+
+            if in_voice or not incoming:
+                session_start = None
+                sent_ata = False
+                async with _host_aa_status_lock:
+                    _host_aa_status = {"ring_urcs": 0, "note": ""}
+                continue
+
+            if session_start is None:
+                session_start = time.time() - 2.0
+                sent_ata = False
+
+            ring_n = _count_ring_urcs_since(entries, session_start)
+            elapsed = time.time() - float(session_start)
+            need = max(1, min(255, rings_target))
+
+            urc_ready = ring_n >= need
+            min_elapsed = (3.0 if need > 1 else 1.2) + (need - 1) * 4.5
+            time_ready = clcc_incoming and elapsed >= min_elapsed
+
+            async with _host_aa_status_lock:
+                _host_aa_status = {
+                    "ring_urcs": ring_n,
+                    "elapsed_s": round(elapsed, 1),
+                    "note": "waiting" if not sent_ata else "answered",
+                }
+
+            if sent_ata:
+                continue
+
+            if urc_ready or time_ready:
+                sent_ata = True
+                await engine.send_command("ATA", timeout_sec=10.0)
+                await asyncio.sleep(0.35)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        global _host_auto_answer_task
+        ct = asyncio.current_task()
+        if _host_auto_answer_task is ct:
+            _host_auto_answer_task = None
+        async with _host_aa_status_lock:
+            _host_aa_status = {"ring_urcs": 0, "note": "stopped"}
+
+
+async def _stop_host_auto_answer_task() -> None:
+    global _host_auto_answer_task
+    t = _host_auto_answer_task
+    _host_auto_answer_task = None
+    if t is not None and not t.done():
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
 
 
 def _parse_ats0_rings(lines: list[str]) -> int | None:
@@ -836,25 +1018,6 @@ def _parse_cereg_stat(lines: list[str]) -> int | None:
         # +CEREG: <stat> or +CEREG: <n>,<stat>[,...]
         return nums[0] if len(nums) == 1 else nums[1]
     return None
-
-
-def _parse_qiact_contexts(lines: list[str]) -> list[dict]:
-    out: list[dict] = []
-    for raw in lines:
-        if not raw.startswith("+QIACT:"):
-            continue
-        payload = raw.split(":", 1)[1].strip()
-        m = re.match(r'(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*"([^"]*)"', payload)
-        if not m:
-            continue
-        out.append(
-            {
-                "cid": int(m.group(1)),
-                "active": int(m.group(3)) == 1,
-                "ip": m.group(4) or None,
-            }
-        )
-    return out
 
 
 MNO_PROFILES: dict[str, dict[str, str | None]] = {
@@ -1154,6 +1317,7 @@ async def lifespan(_: FastAPI):
             _ws_push_task.cancel()
         if _lock_guard_task:
             _lock_guard_task.cancel()
+        await _stop_host_auto_answer_task()
         await engine.stop()
     finally:
         _release_instance_lock()
@@ -1161,7 +1325,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="1.15.0",
+    version="1.16.0",
     lifespan=lifespan,
 )
 
@@ -1221,6 +1385,65 @@ async def home() -> HTMLResponse:
     .ok { color: #39d353; }
     .warn { color: #ffcc66; }
     .err { color: #ff7070; }
+    @keyframes voice-ring-pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.35; }
+    }
+    .voice-ringing {
+      animation: voice-ring-pulse 0.85s ease-in-out infinite;
+      color: #ffcc66 !important;
+      font-weight: 700;
+    }
+    .volte-phone-panel {
+      margin-top: 14px;
+      padding: 12px;
+      border-radius: 10px;
+      border: 1px solid #333;
+      background: #141414;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+    }
+    .volte-phone-widget {
+      width: 88px;
+      height: 88px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #d64545;
+      transition: color 0.25s ease;
+    }
+    .volte-phone-widget svg {
+      display: block;
+    }
+    .volte-phone-widget .volte-handset {
+      transition: transform 0.35s ease;
+      transform: translate(0, 5px);
+      transform-origin: 36px 46px;
+    }
+    .volte-phone-widget.volte-phone--active {
+      color: #39d353;
+    }
+    .volte-phone-widget.volte-phone--active .volte-handset {
+      transform: translate(-6px, -10px) rotate(-26deg);
+    }
+    .volte-phone-widget.volte-phone--ringing {
+      color: #e6b800;
+      animation: volte-phone-flash 0.75s ease-in-out infinite;
+    }
+    .volte-phone-widget.volte-phone--ringing .volte-handset {
+      transform: translate(0, 5px);
+    }
+    @keyframes volte-phone-flash {
+      0%, 100% { opacity: 1; filter: drop-shadow(0 0 4px rgba(230, 184, 0, 0.55)); }
+      50% { opacity: 0.38; filter: drop-shadow(0 0 2px rgba(230, 184, 0, 0.25)); }
+    }
+    .volte-phone-caption {
+      font-size: 13px;
+      font-weight: 600;
+      color: #c8c8c8;
+    }
   </style>
 </head>
 <body>
@@ -1602,38 +1825,68 @@ async def home() -> HTMLResponse:
     </div>
 
     <div class="card">
-      <div class="label">VoLTE Call Test</div>
-      <div class="label" style="margin-top:8px;">Incoming call auto-answer (ATS0)</div>
-      <div class="row"><span class="label">Modem S0</span><span id="autoanswer-s0">-</span></div>
-      <div class="label" style="font-size:11px; margin-top:4px; line-height:1.35;">
-        <code>ATS0=0</code> disables auto-answer. <code>ATS0=N</code> answers after N rings (1–255). Standard modem S-register; use <code>AT&amp;W</code> yourself if the module should retain it across power cycles.
+      <div class="label">VoLTE Call Controller</div>
+
+      <div style="margin-top:10px;">
+        <div class="label">Unlock password</div>
+        <input id="volte-password" type="password" placeholder="Enter password" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
       </div>
-      <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-        <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6;">
-          <input id="autoanswer-enabled" type="checkbox" />
-          Enable auto-answer
-        </label>
-        <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6;">
-          Rings
-          <input id="autoanswer-rings" type="number" min="1" max="255" value="1"
-            style="width:4em; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:3px 6px;" />
-        </label>
-        <button id="btn-autoanswer-read" type="button">Read</button>
-        <button id="btn-autoanswer-apply" type="button">Apply</button>
-      </div>
-      <div class="row"><span class="label">Hold time</span><span>10 seconds</span></div>
-      <div style="margin-top:8px;">
-        <div class="label">Dial number:</div>
+
+      <div class="label" style="margin-top:14px;">Outbound test call</div>
+      <div style="margin-top:6px;">
+        <div class="label">Dial number</div>
         <input id="volte-number" placeholder="+447700900123" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
       </div>
       <div style="margin-top:8px;">
-        <div class="label">Unlock password:</div>
-        <input id="volte-password" type="password" placeholder="Enter password" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+        <div class="label">Call hold time (seconds)</div>
+        <input id="volte-hold-sec" type="number" min="3" max="120" value="10"
+          style="width:100%; max-width:140px; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
       </div>
-      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
-        <button id="btn-volte-test">Run VoLTE Call Test</button>
+      <div style="margin-top:8px;">
+        <div class="label">Max wait for connect (seconds)</div>
+        <input id="volte-connect-timeout" type="number" min="20" max="300" value="120"
+          style="width:100%; max-width:140px; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
       </div>
-      <div id="volte-msg" class="label" style="margin-top:8px;">-</div>
+      <div style="margin-top:10px;">
+        <button id="btn-volte-test" type="button">Run VoLTE call test</button>
+      </div>
+
+      <div class="label" style="margin-top:14px;">Incoming calls — auto-answer</div>
+      <div class="row" style="margin-top:8px;"><span class="label">Auto-answer</span>
+        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+          <input id="autoanswer-enabled" type="checkbox" />
+          <span class="label" style="margin:0;">On</span>
+        </label>
+      </div>
+      <div class="row" style="margin-top:6px;"><span class="label">Rings before answer (1–255)</span>
+        <input id="autoanswer-rings" type="number" min="1" max="255" value="2"
+          style="width:72px; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:4px 6px;" />
+      </div>
+
+      <div class="volte-phone-panel">
+        <div id="volte-phone-widget" class="volte-phone-widget volte-phone--idle" title="Call status">
+          <svg viewBox="0 0 72 72" width="72" height="72" aria-hidden="true" focusable="false">
+            <g class="volte-phone-base" opacity="0.4" fill="currentColor">
+              <path d="M10 54 Q36 64 62 54 L60 58 Q36 68 12 58 Z"/>
+              <ellipse cx="36" cy="54" rx="20" ry="5"/>
+            </g>
+            <g class="volte-handset" fill="currentColor">
+              <rect x="20" y="10" width="32" height="38" rx="11" ry="11"/>
+              <rect x="33" y="44" width="6" height="12" rx="2"/>
+            </g>
+          </svg>
+        </div>
+        <div id="volte-phone-caption" class="volte-phone-caption">Idle</div>
+        <div id="volte-call-timer-row" style="text-align:center; margin-top:6px;" title="Elapsed in this call; holds the last duration after hang-up; resets to 0:00 when the next call starts.">
+          <span class="mono" id="volte-call-timer" style="font-size:20px; font-weight:600; letter-spacing:0.05em; color:#555;">0:00</span>
+        </div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap; justify-content:center; margin-top:4px;">
+          <button type="button" id="btn-voice-answer" disabled>Answer (ATA)</button>
+          <button type="button" id="btn-voice-hangup" disabled>Hang up (ATH)</button>
+        </div>
+      </div>
+
+      <div id="volte-msg" class="label" style="margin-top:10px;">-</div>
       <pre id="volte-trace" class="mono" style="max-height:140px; overflow:auto; margin-top:8px;">-</pre>
     </div>
 
@@ -2983,6 +3236,12 @@ async def home() -> HTMLResponse:
     async function runVolteTest() {
       const number = String(el("volte-number")?.value || "").trim();
       const password = String(el("volte-password")?.value || "");
+      let holdSec = Math.round(Number(el("volte-hold-sec")?.value ?? 10));
+      if (!Number.isFinite(holdSec)) holdSec = 10;
+      holdSec = Math.max(3, Math.min(120, holdSec));
+      let connectTimeoutSec = Math.round(Number(el("volte-connect-timeout")?.value ?? 120));
+      if (!Number.isFinite(connectTimeoutSec)) connectTimeoutSec = 120;
+      connectTimeoutSec = Math.max(20, Math.min(300, connectTimeoutSec));
       if (!number) {
         el("volte-msg").textContent = "Enter a dial number first.";
         return;
@@ -2994,7 +3253,7 @@ async def home() -> HTMLResponse:
         const r = await fetch("/api/tools/volte-test", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ number, hold_sec: 10, password })
+          body: JSON.stringify({ number, hold_sec: holdSec, connect_timeout_sec: connectTimeoutSec, password })
         });
         const j = await r.json();
         if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "VoLTE test failed"));
@@ -3039,62 +3298,225 @@ async def home() -> HTMLResponse:
       }
     }
 
-    async function readAutoAnswerStatus() {
-      const st = el("autoanswer-s0");
+    let autoAnswerApplyBusy = false;
+
+    async function readAutoAnswerStatus(silent = false) {
       try {
-        const r = await fetch("/api/tools/auto-answer");
+        const r = await fetch("/api/tools/host-auto-answer");
         const j = await r.json();
         if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "Read failed"));
-        const rings = j.s0_rings;
-        if (rings === null || rings === undefined) {
-          if (st) st.textContent = "-";
-        } else if (rings === 0) {
-          if (st) st.textContent = "0 (off)";
-        } else {
-          if (st) st.textContent = `${rings} (${rings} ring${rings === 1 ? "" : "s"} before answer)`;
-        }
         const cb = el("autoanswer-enabled");
-        const rn = el("autoanswer-rings");
-        if (cb && rings !== null && rings !== undefined) {
-          cb.checked = rings > 0;
-          if (rn && rings > 0) rn.value = String(rings);
+        if (cb) cb.checked = !!j.enabled;
+        const rin = el("autoanswer-rings");
+        if (rin && j.rings != null && j.rings !== undefined) {
+          rin.value = String(j.rings);
         }
-        el("volte-msg").textContent = "Auto-answer (ATS0) read OK.";
+        if (!silent) el("volte-msg").textContent = "-";
       } catch (e) {
-        el("volte-msg").textContent = `Auto-answer read error: ${e?.message || e}`;
-        if (st) st.textContent = "-";
+        if (!silent) el("volte-msg").textContent = `Auto-answer read error: ${e?.message || e}`;
       }
     }
 
     async function applyAutoAnswer() {
+      if (autoAnswerApplyBusy) return;
       const password = String(el("volte-password")?.value || "");
       const enabled = !!el("autoanswer-enabled")?.checked;
-      let rings = Math.round(Number(el("autoanswer-rings")?.value || 1));
-      if (!Number.isFinite(rings) || rings < 1) rings = 1;
-      if (rings > 255) rings = 255;
+      let rings = Math.max(1, Math.min(255, Math.floor(Number(el("autoanswer-rings")?.value || 2))));
+      if (!Number.isFinite(rings)) rings = 2;
+      if (enabled && !password) {
+        el("volte-msg").textContent = "-";
+        return;
+      }
+      autoAnswerApplyBusy = true;
       try {
-        el("volte-msg").textContent = "Applying auto-answer (ATS0)...";
-        const r = await fetch("/api/tools/auto-answer", {
+        const r = await fetch("/api/tools/host-auto-answer", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ enabled, rings, password })
+          body: JSON.stringify({ enabled, rings, password }),
         });
         const j = await r.json();
         if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "Apply failed"));
-        const ringsAfter = j.s0_rings;
-        const st = el("autoanswer-s0");
-        if (st) {
-          if (ringsAfter === null || ringsAfter === undefined) {
-            st.textContent = "-";
-          } else if (ringsAfter === 0) {
-            st.textContent = "0 (off)";
-          } else {
-            st.textContent = `${ringsAfter} (${ringsAfter} ring${ringsAfter === 1 ? "" : "s"} before answer)`;
-          }
-        }
-        el("volte-msg").textContent = "Auto-answer (ATS0) applied.";
+        await readAutoAnswerStatus(true);
+        el("volte-msg").textContent = "-";
       } catch (e) {
-        el("volte-msg").textContent = `Auto-answer apply error: ${e?.message || e}`;
+        el("volte-msg").textContent = `Auto-answer: ${e?.message || e}`;
+        await readAutoAnswerStatus(true);
+      } finally {
+        autoAnswerApplyBusy = false;
+      }
+    }
+
+    let volteCallTimerPrevInCall = false;
+    let volteCallTimerStartMs = null;
+    let volteCallTimerFrozenMs = null;
+    let volteCallTimerInterval = null;
+
+    function formatVolteCallElapsed(ms) {
+      const totalSec = Math.floor(ms / 1000);
+      const h = Math.floor(totalSec / 3600);
+      const m = Math.floor((totalSec % 3600) / 60);
+      const s = totalSec % 60;
+      if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+      return `${m}:${String(s).padStart(2, "0")}`;
+    }
+
+    function syncVolteCallTimerDisplay() {
+      const elT = el("volte-call-timer");
+      if (!elT) return;
+      if (volteCallTimerStartMs != null) {
+        elT.textContent = formatVolteCallElapsed(Date.now() - volteCallTimerStartMs);
+        elT.style.color = "#8fd491";
+        return;
+      }
+      if (volteCallTimerFrozenMs != null) {
+        elT.textContent = formatVolteCallElapsed(volteCallTimerFrozenMs);
+        elT.style.color = "#555";
+        return;
+      }
+      elT.textContent = "0:00";
+      elT.style.color = "#555";
+    }
+
+    function ensureVolteCallTimerTick() {
+      if (volteCallTimerInterval != null) return;
+      volteCallTimerInterval = setInterval(syncVolteCallTimerDisplay, 250);
+    }
+
+    function stopVolteCallTimerTick() {
+      if (volteCallTimerInterval != null) {
+        clearInterval(volteCallTimerInterval);
+        volteCallTimerInterval = null;
+      }
+    }
+
+    /**
+     * True when a voice session is in progress (connected or progressing).
+     * Some MT / VoLTE modems leave AT+CLCC in alerting/dialing without stat active (0/1), so hook stays on-hook;
+     * the stopwatch and handset must follow line_state as well, but not pure incoming_ring (unanswered ring).
+     */
+    function volteStatusInCall(j) {
+      if (!j) return false;
+      if (j.hook === "off_hook") return true;
+      const line = String(j.line_state || "");
+      if (line === "idle" || line === "incoming_ring" || line === "other") return false;
+      return (
+        line === "active" ||
+        line === "held" ||
+        line === "dialing" ||
+        line === "alerting" ||
+        line === "waiting"
+      );
+    }
+
+    function updateVoltePhoneWidget(j) {
+      const w = el("volte-phone-widget");
+      const cap = el("volte-phone-caption");
+      if (!w || !j) return;
+      const inCall = volteStatusInCall(j);
+      /* RING URC stays recent (~12s) after answer; CLCC active must win over that for the handset icon. */
+      const incoming = !!j.incoming_ringing && !inCall;
+      w.classList.remove("volte-phone--idle", "volte-phone--ringing", "volte-phone--active");
+      if (inCall) {
+        w.classList.add("volte-phone--active");
+        if (cap) cap.textContent = "In call";
+      } else if (incoming) {
+        w.classList.add("volte-phone--ringing");
+        const num = j.primary_number ? String(j.primary_number).trim() : "";
+        if (cap) cap.textContent = num ? `Incoming — ${num}` : "Incoming";
+      } else {
+        w.classList.add("volte-phone--idle");
+        if (cap) cap.textContent = "Idle";
+      }
+    }
+
+    async function pollVoiceCallStatus() {
+      try {
+        const r = await fetch("/api/tools/voice-call-status");
+        const j = await r.json();
+        if (!r.ok || !j.ok) return;
+        updateVoltePhoneWidget(j);
+        const inCall = volteStatusInCall(j);
+        if (inCall && !volteCallTimerPrevInCall) {
+          volteCallTimerFrozenMs = null;
+          volteCallTimerStartMs = Date.now();
+          ensureVolteCallTimerTick();
+          syncVolteCallTimerDisplay();
+        } else if (!inCall && volteCallTimerPrevInCall) {
+          stopVolteCallTimerTick();
+          if (volteCallTimerStartMs != null)
+            volteCallTimerFrozenMs = Date.now() - volteCallTimerStartMs;
+          volteCallTimerStartMs = null;
+          syncVolteCallTimerDisplay();
+        }
+        volteCallTimerPrevInCall = inCall;
+        const btnHu = el("btn-voice-hangup");
+        const btnAn = el("btn-voice-answer");
+        if (btnAn && !voiceCallActionBusy) btnAn.disabled = !j.can_answer;
+        if (btnHu && !voiceCallActionBusy) btnHu.disabled = !j.can_hangup;
+      } catch (_) {}
+    }
+
+    let voiceCallActionBusy = false;
+
+    async function voiceAnswerCall() {
+      if (voiceCallActionBusy) return;
+      const password = String(el("volte-password")?.value || "");
+      if (!password) {
+        el("volte-msg").textContent = "Enter unlock password to answer.";
+        return;
+      }
+      voiceCallActionBusy = true;
+      const btnAn = el("btn-voice-answer");
+      const btnHu = el("btn-voice-hangup");
+      if (btnAn) btnAn.disabled = true;
+      if (btnHu) btnHu.disabled = true;
+      try {
+        const r = await fetch("/api/tools/voice-answer", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password }),
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, j.error || "Answer failed"));
+        el("volte-msg").textContent = "Answer (ATA) sent.";
+      } catch (e) {
+        el("volte-msg").textContent = `Answer: ${e?.message || e}`;
+      } finally {
+        voiceCallActionBusy = false;
+        await pollVoiceCallStatus();
+        for (let i = 0; i < 4; i++) {
+          await new Promise((r) => setTimeout(r, 200));
+          await pollVoiceCallStatus();
+        }
+      }
+    }
+
+    async function voiceHangupCall() {
+      if (voiceCallActionBusy) return;
+      const password = String(el("volte-password")?.value || "");
+      if (!password) {
+        el("volte-msg").textContent = "Enter unlock password to hang up.";
+        return;
+      }
+      voiceCallActionBusy = true;
+      const btn = el("btn-voice-hangup");
+      const btnAn = el("btn-voice-answer");
+      if (btn) btn.disabled = true;
+      if (btnAn) btnAn.disabled = true;
+      try {
+        const r = await fetch("/api/tools/voice-hangup", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ password }),
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, j.error || "Hang up failed"));
+        el("volte-msg").textContent = "Hang up (ATH) completed.";
+      } catch (e) {
+        el("volte-msg").textContent = `Hang up: ${e?.message || e}`;
+      } finally {
+        voiceCallActionBusy = false;
+        await pollVoiceCallStatus();
       }
     }
 
@@ -4690,7 +5112,7 @@ async def home() -> HTMLResponse:
       drawMetricChartWithIntraNeighbour("rsrpchart", rsrp, ovRsrp, "dBm", pciColor, -105);
       drawMetricChartWithIntraNeighbour("rsrqchart", rsrq, ovRsrq, "dB", pciColor, -15);
       drawMetricChart("sinrchart", sinr, "dB", pciColor, 0);
-      drawMetricChartWithIntraNeighbour("rssichart", rssi, ovRssi, "dBm", pciColor, -25);
+      drawMetricChartWithIntraNeighbour("rssichart", rssi, ovRssi, "dBm", pciColor, -100);
       drawMetricChart("dominancechart", dominance, "dB", "#50fa7b", 6);
       drawMetricChart("congestionproxychart", primaryCellDataAvailable ? congestionProxyHistory : [], "dB", "#ffb86c", 0);
       updatePrimaryRfStdDevKpis();
@@ -4705,7 +5127,7 @@ async def home() -> HTMLResponse:
       const dominanceInter = primaryCellDataAvailable ? domSource : [];
       drawMetricChart("nbrintersrpchart", rsrp, "dBm", base, -105);
       drawMetricChart("nbrintersrqchart", rsrq, "dB", base, -15);
-      drawMetricChart("nbrinterrssichart", rssi, "dBm", base, -90);
+      drawMetricChart("nbrinterrssichart", rssi, "dBm", base, -100);
       drawMetricChart("nbridomchart", dominanceInter, "dB", "#bd93f9", 6);
     }
 
@@ -5253,10 +5675,22 @@ async def home() -> HTMLResponse:
     el("btn-sim-high-read").addEventListener("click", () => readSimHighLevel());
     el("btn-sim-inspect-read").addEventListener("click", () => readSimInspector());
     el("btn-volte-test").addEventListener("click", () => runVolteTest());
-    const btnAaRead = el("btn-autoanswer-read");
-    if (btnAaRead) btnAaRead.addEventListener("click", () => readAutoAnswerStatus());
-    const btnAaApply = el("btn-autoanswer-apply");
-    if (btnAaApply) btnAaApply.addEventListener("click", () => applyAutoAnswer());
+    const aaEn = el("autoanswer-enabled");
+    if (aaEn) aaEn.addEventListener("change", () => applyAutoAnswer());
+    const aaRings = el("autoanswer-rings");
+    if (aaRings) aaRings.addEventListener("change", () => applyAutoAnswer());
+    const voltePwd = el("volte-password");
+    if (voltePwd) {
+      const tryAaAfterPassword = () => {
+        if (el("autoanswer-enabled")?.checked && String(el("volte-password")?.value || "")) applyAutoAnswer();
+      };
+      voltePwd.addEventListener("change", tryAaAfterPassword);
+      voltePwd.addEventListener("blur", tryAaAfterPassword);
+    }
+    const btnVoiceHangup = el("btn-voice-hangup");
+    if (btnVoiceHangup) btnVoiceHangup.addEventListener("click", () => voiceHangupCall());
+    const btnVoiceAnswer = el("btn-voice-answer");
+    if (btnVoiceAnswer) btnVoiceAnswer.addEventListener("click", () => voiceAnswerCall());
     el("btn-iperf-test").addEventListener("click", () => runIperfTest());
     el("iperf-bind-select").addEventListener("change", () => syncIperfBindUi());
     el("btn-iperf-refresh-ifaces").addEventListener("click", () => loadBindInterfaces());
@@ -5292,6 +5726,7 @@ async def home() -> HTMLResponse:
 
     setInterval(pollFallback, 2000);
     setInterval(pollNeighbourChannels, 3000);
+    setInterval(pollVoiceCallStatus, 1000);
     setInterval(pollAtLog, 1200);
     setInterval(() => readSerialStatus(false), 3000);
     setInterval(() => {
@@ -5301,6 +5736,7 @@ async def home() -> HTMLResponse:
     }, 400);
     pollFallback();
     pollNeighbourChannels();
+    pollVoiceCallStatus();
     pollAtLog();
     readSerialStatus(true);
     refreshSerialPorts(true);
@@ -5308,6 +5744,7 @@ async def home() -> HTMLResponse:
     readLocks();
     readMnoState();
     readDataGate();
+    readAutoAnswerStatus(true);
     readSimHighLevel();
     applyChartWindowSec(Number(el("chart-window-select")?.value || 600));
     updateChartGapButton();
@@ -5860,7 +6297,7 @@ async def network_data_gate_get() -> dict:
     cgatt_res = await engine.send_command("AT+CGATT?", timeout_sec=3.0)
     qiact_res = await engine.send_command("AT+QIACT?", timeout_sec=4.0)
     attached = _parse_cgatt_attached(cgatt_res.get("lines", []))
-    contexts = _parse_qiact_contexts(qiact_res.get("lines", []))
+    contexts = _parse_qiact(qiact_res.get("lines", []))
     active = [c for c in contexts if c.get("active")]
     inhibited = len(active) == 0
     return {
@@ -5870,6 +6307,37 @@ async def network_data_gate_get() -> dict:
         "active_contexts": active,
         "raw": {"cgatt": cgatt_res, "qiact": qiact_res},
     }
+
+
+async def _require_packet_data_for_host_traffic_tests() -> None:
+    """Reject ping/iperf when PDP is down. Uses AT+QIACT? (same parsing as KPI)."""
+    qiact_res = await engine.send_command("AT+QIACT?", timeout_sec=4.0)
+    contexts = _parse_qiact(qiact_res.get("lines", []))
+    active = [c for c in contexts if c.get("active")]
+
+    if qiact_res.get("ok") and len(active) > 0:
+        return
+    if qiact_res.get("ok") and len(active) == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="Packet data is inhibited (no active PDP context). Use Allow Data before running ping or iperf.",
+        )
+
+    # QIACT? failed (busy modem, timeout) — avoid false "inhibited" using recent KPI snapshot.
+    async with kpi_runtime.lock:
+        ds = dict(kpi_runtime.data_service or {})
+        ds_at = float(kpi_runtime.data_service_at or 0.0)
+    now = time.time()
+    fresh = ds_at > 0 and (now - ds_at) <= 30.0
+    ap = ds.get("active_pdp_contexts")
+    c1a = ds.get("cid1_active")
+    if fresh and (isinstance(ap, int) and ap > 0 or c1a is True):
+        return
+    if fresh and (ap == 0 or ap is None) and c1a is False:
+        raise HTTPException(
+            status_code=409,
+            detail="Packet data is inhibited (no active PDP context). Use Allow Data before running ping or iperf.",
+        )
 
 
 @app.post("/api/network/apn")
@@ -5894,7 +6362,7 @@ async def network_apn_set(body: ApnSetBody) -> dict:
             actions.append({"cmd": "AT+CGATT?", "res": cgatt_before_res})
 
             qiact_res = await engine.send_command("AT+QIACT?", timeout_sec=4.0)
-            contexts = _parse_qiact_contexts(qiact_res.get("lines", []))
+            contexts = _parse_qiact(qiact_res.get("lines", []))
             active_here = next((c for c in contexts if c.get("cid") == cid and c.get("active")), None)
             did_ideact = False
             if active_here:
@@ -6195,6 +6663,7 @@ async def tools_modem_reset() -> dict:
 
 @app.post("/api/tools/iperf-test")
 async def tools_iperf_test(body: IperfTestBody) -> dict:
+    await _require_packet_data_for_host_traffic_tests()
     host = str(body.host or "").strip()
     if not host:
         raise HTTPException(status_code=400, detail="host is required.")
@@ -6327,6 +6796,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
 
 @app.post("/api/tools/icmp-ping")
 async def tools_icmp_ping(body: IcmpPingSweepBody) -> dict:
+    await _require_packet_data_for_host_traffic_tests()
     host = body.host.strip() or "8.8.8.8"
     count = int(body.count)
     bind = str(body.bind_ipv4 or "").strip() or None
@@ -6437,6 +6907,134 @@ async def tools_auto_answer_set(body: AutoAnswerSetBody) -> dict[str, Any]:
     }
 
 
+@app.get("/api/tools/host-auto-answer")
+async def tools_host_auto_answer_read() -> dict[str, Any]:
+    """Whether the PC-side ``ATA`` watcher is running (VoLTE-friendly auto-answer)."""
+    global _host_auto_answer_task, _host_aa_rings
+    running = _host_auto_answer_task is not None and not _host_auto_answer_task.done()
+    async with _host_aa_status_lock:
+        st = dict(_host_aa_status)
+    return {
+        "ok": True,
+        "enabled": running,
+        "rings": _host_aa_rings,
+        **st,
+    }
+
+
+@app.post("/api/tools/host-auto-answer")
+async def tools_host_auto_answer_set(body: HostAutoAnswerBody) -> dict[str, Any]:
+    global _host_auto_answer_task, _host_aa_rings
+    if body.enabled:
+        if (body.password or "") != DATA_GATE_UNLOCK_PASSWORD:
+            raise HTTPException(status_code=403, detail="Invalid password for host auto-answer.")
+        await _stop_host_auto_answer_task()
+        _host_aa_rings = int(body.rings)
+        _host_auto_answer_task = asyncio.create_task(
+            _host_auto_answer_worker(_host_aa_rings, str(body.password or ""))
+        )
+        return {"ok": True, "enabled": True, "rings": _host_aa_rings}
+    await _stop_host_auto_answer_task()
+    return {"ok": True, "enabled": False, "rings": _host_aa_rings}
+
+
+@app.get("/api/tools/voice-call-status")
+async def tools_voice_call_status() -> dict[str, Any]:
+    """Live voice indication from ``AT+CLCC`` plus *recent* URCs (RING / +CRING, time-limited)."""
+    clcc_res = await engine.send_command("AT+CLCC", timeout_sec=3.0)
+    rows = _parse_clcc_lines(clcc_res.get("lines", []))
+    voice_rows = _clcc_rows_voice_only(rows)
+    summary = _summarize_voice_call_state(voice_rows)
+    urc_entries = list(engine.urc_log)
+    recent_ring = _urc_recent_incoming_ring(urc_entries)
+    clcc_incoming = bool(summary["incoming_ringing"])
+    incoming = clcc_incoming or recent_ring
+    stats = [r.get("stat") for r in voice_rows]
+    in_voice_call = any(s in (0, 1) for s in stats)
+    can_answer = incoming and not in_voice_call
+    can_hangup = bool(summary["call_present"]) or recent_ring or clcc_incoming
+    running_haa = _host_auto_answer_task is not None and not _host_auto_answer_task.done()
+    async with _host_aa_status_lock:
+        haa_snap = dict(_host_aa_status)
+    return {
+        "ok": True,
+        "clcc_ok": bool(clcc_res.get("ok")),
+        "clcc": rows,
+        "hook": summary["hook"],
+        "line_state": summary["line_state"],
+        "primary_number": summary["primary_number"],
+        "incoming_ringing": incoming,
+        "incoming_clcc": clcc_incoming,
+        "recent_ring_urc": recent_ring,
+        "can_answer": can_answer,
+        "can_hangup": can_hangup,
+        "host_auto_answer": {
+            "enabled": running_haa,
+            "rings": _host_aa_rings,
+            **haa_snap,
+        },
+    }
+
+
+@app.post("/api/tools/voice-answer")
+async def tools_voice_answer(body: VoiceAnswerBody) -> dict[str, Any]:
+    """Answer incoming voice with ``ATA`` (27.007). Password-gated."""
+    if (body.password or "") != DATA_GATE_UNLOCK_PASSWORD:
+        raise HTTPException(status_code=403, detail="Invalid password for answer call.")
+
+    ata_res = await engine.send_command("ATA", timeout_sec=10.0)
+    await asyncio.sleep(0.4)
+    clcc_res = await engine.send_command("AT+CLCC", timeout_sec=3.0)
+    rows = _parse_clcc_lines(clcc_res.get("lines", []))
+    connected = any((r.get("stat") in (0, 1)) for r in _clcc_rows_voice_only(rows))
+    ok = bool(ata_res.get("ok")) or connected
+    err = None if ok else "ATA did not complete OK and CLCC still shows no active call."
+    return {
+        "ok": ok,
+        "error": err,
+        "ata": ata_res,
+        "clcc_after": rows,
+    }
+
+
+@app.post("/api/tools/voice-hangup")
+async def tools_voice_hangup(body: VoiceHangupBody) -> dict[str, Any]:
+    """Send ``ATH`` to release or reject the current voice session (password-gated)."""
+    if (body.password or "") != DATA_GATE_UNLOCK_PASSWORD:
+        raise HTTPException(status_code=403, detail="Invalid password for hang up.")
+
+    hang_attempts: list[dict[str, Any]] = []
+    hang_attempts.append(await engine.send_command("ATH", timeout_sec=5.0))
+    await asyncio.sleep(0.35)
+
+    def _still_live_voice(rows_in: list[dict]) -> bool:
+        v = _clcc_rows_voice_only(rows_in)
+        return any((r.get("stat") in (0, 1, 2, 3, 4, 5)) for r in v)
+
+    end_deadline = asyncio.get_running_loop().time() + 14.0
+    last_rows: list[dict] = []
+    while asyncio.get_running_loop().time() < end_deadline:
+        clcc_res = await engine.send_command("AT+CLCC", timeout_sec=3.0)
+        last_rows = _parse_clcc_lines(clcc_res.get("lines", []))
+        if not last_rows:
+            break
+        if _still_live_voice(last_rows) and len(hang_attempts) < 3:
+            hang_attempts.append(await engine.send_command("ATH", timeout_sec=5.0))
+            await asyncio.sleep(0.35)
+            continue
+        break
+
+    still = bool(last_rows) and _still_live_voice(last_rows)
+    ok = not still
+    err = None if ok else "Call may still be active; check AT+CLCC or retry ATH."
+    return {
+        "ok": ok,
+        "error": err,
+        "hang_attempts": hang_attempts,
+        "clcc_after": last_rows,
+    }
+
+
 @app.post("/api/tools/volte-test")
 async def tools_volte_test(body: VolteTestBody) -> dict:
     if (body.password or "") != DATA_GATE_UNLOCK_PASSWORD:
@@ -6447,6 +7045,7 @@ async def tools_volte_test(body: VolteTestBody) -> dict:
         raise HTTPException(status_code=400, detail="Invalid dial number.")
 
     hold_sec = int(body.hold_sec or 10)
+    connect_timeout_sec = int(body.connect_timeout_sec or 120)
 
     # Ensure no stale call exists before test.
     pre_hang = await engine.send_command("ATH", timeout_sec=4.0)
@@ -6460,7 +7059,7 @@ async def tools_volte_test(body: VolteTestBody) -> dict:
     dial_res = await engine.send_command(f"ATD{number};", timeout_sec=8.0)
     dial_ok = bool(dial_res.get("ok", False))
 
-    deadline = asyncio.get_running_loop().time() + 35.0
+    deadline = asyncio.get_running_loop().time() + float(connect_timeout_sec)
     call_connected = False
     connect_ts: float | None = None
     clcc_states: list[dict] = []
@@ -6469,20 +7068,20 @@ async def tools_volte_test(body: VolteTestBody) -> dict:
         clcc_res = await engine.send_command("AT+CLCC", timeout_sec=3.0)
         clcc = _parse_clcc_lines(clcc_res.get("lines", []))
         last_clcc = clcc
-        stat = clcc[0].get("stat") if clcc else None
-        clcc_states.append(
-            {
-                "t_s": round(time.time() - dial_started, 1),
-                "status": _clcc_stat_label(stat),
-                "raw_stat": stat,
-            }
-        )
-        if stat in (0, 1):
+        voice_rows = _clcc_rows_voice_only(clcc)
+        if any((r.get("stat") in (0, 1)) for r in voice_rows):
             call_connected = True
             connect_ts = time.time()
             break
-        if stat is None:
-            # No call entries anymore.
+        rep_stat = voice_rows[0].get("stat") if voice_rows else None
+        clcc_states.append(
+            {
+                "t_s": round(time.time() - dial_started, 1),
+                "status": _clcc_stat_label(rep_stat),
+                "raw_stat": rep_stat,
+            }
+        )
+        if not clcc:
             break
         await asyncio.sleep(0.8)
 
@@ -6537,9 +7136,9 @@ async def tools_volte_test(body: VolteTestBody) -> dict:
     else:
         delta_urc = now_urc
     call_urc_lines = [
-        x
-        for x in delta_urc
-        if any(tok in str(x).upper() for tok in ("NO CARRIER", "+CLCC", "+CEER", "BUSY", "NO ANSWER", "NO DIALTONE"))
+        ln
+        for _, ln in delta_urc
+        if any(tok in str(ln).upper() for tok in ("NO CARRIER", "+CLCC", "+CEER", "BUSY", "NO ANSWER", "NO DIALTONE"))
     ]
 
     setup_time_ms = int((connect_ts - dial_started) * 1000) if connect_ts else None
@@ -6550,7 +7149,7 @@ async def tools_volte_test(body: VolteTestBody) -> dict:
         if not dial_ok:
             error = f"Dial command failed ({dial_res.get('final') or 'no final'})"
         elif not call_connected:
-            error = "Call did not reach connected state within timeout."
+            error = f"Call did not reach connected state within {connect_timeout_sec}s."
         elif active_after_hang:
             error = "Call still appears active/held after hangup retries."
 
@@ -6559,6 +7158,7 @@ async def tools_volte_test(body: VolteTestBody) -> dict:
         "error": error,
         "number": number,
         "hold_sec": hold_sec,
+        "connect_timeout_sec": connect_timeout_sec,
         "dial_ok": dial_ok,
         "call_connected": call_connected,
         "setup_time_ms": setup_time_ms,

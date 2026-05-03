@@ -58,7 +58,7 @@ class SerialEngine:
         self._reopen_interval_sec = 2.0
 
         self.rx_log: deque[str] = deque(maxlen=max_log_lines)
-        self.urc_log: deque[str] = deque(maxlen=max_log_lines)
+        self.urc_log: deque[tuple[float, str]] = deque(maxlen=max_log_lines)
         self.tx_log: deque[str] = deque(maxlen=max_log_lines)
         self.at_trace: deque[str] = deque(maxlen=max_log_lines * 2)
 
@@ -134,7 +134,7 @@ class SerialEngine:
             "last_open_error": self._last_open_error,
             "recent_tx": list(self.tx_log)[-30:],
             "recent_rx": list(self.rx_log)[-30:],
-            "recent_urc": list(self.urc_log)[-30:],
+            "recent_urc": [{"ts": ts, "line": ln} for ts, ln in list(self.urc_log)[-30:]],
             "recent_at_trace": list(self.at_trace)[-80:],
         }
 
@@ -243,7 +243,7 @@ class SerialEngine:
             self.rx_log.append(line)
             req = self._active_request
             if req is None:
-                self.urc_log.append(line)
+                self.urc_log.append((time.time(), line))
                 self.at_trace.append(f"< URC {line}")
                 continue
 
