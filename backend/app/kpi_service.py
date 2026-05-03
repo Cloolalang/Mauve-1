@@ -134,22 +134,40 @@ def _decode_lte_bw_mhz(value: str) -> int | None:
 
 
 def _parse_qnwinfo(lines: list[str]) -> dict[str, Any] | None:
-    out: dict[str, Any] | None = None
+    """Parse all ``+QNWINFO`` lines (LTE + NR5G may both appear). Primary ``act``/``band``/``channel`` stay LTE-first for backward compatibility."""
+    entries: list[dict[str, Any]] = []
     for raw in lines:
         if not raw.startswith("+QNWINFO:"):
             continue
         payload = raw.split(":", 1)[1].strip()
         if payload.upper() == "NO SERVICE":
-            out = {"service": "NO SERVICE"}
-            continue
+            return {"service": "NO SERVICE", "entries": []}
         parts = _parse_csv_payload(payload)
         if len(parts) >= 4:
-            out = {
-                "act": parts[0],
-                "operator": parts[1],
-                "band": parts[2],
-                "channel": _safe_int(parts[3]),
-            }
+            entries.append(
+                {
+                    "act": parts[0],
+                    "operator": parts[1],
+                    "band": parts[2],
+                    "channel": _safe_int(parts[3]),
+                }
+            )
+    if not entries:
+        return None
+    lte_e = next((e for e in entries if "LTE" in str(e.get("act") or "").upper()), None)
+    nr_e = next((e for e in entries if "NR" in str(e.get("act") or "").upper()), None)
+    primary = lte_e or entries[0]
+    out: dict[str, Any] = {
+        "act": primary["act"],
+        "operator": primary["operator"],
+        "band": primary["band"],
+        "channel": primary["channel"],
+        "entries": entries,
+    }
+    if nr_e:
+        out["nr_act"] = nr_e["act"]
+        out["nr_band"] = nr_e["band"]
+        out["nr_channel"] = nr_e["channel"]
     return out
 
 
@@ -171,9 +189,13 @@ def _parse_cgmr(lines: list[str]) -> str | None:
     return fw_line
 
 
-def _parse_four_path_metric(lines: list[str], prefix: str) -> dict[str, Any] | None:
-    # Expected: +QRSRP: <PRX>,<DRX>,<RX2>,<RX3>,<sysmode>
-    parsed: dict[str, Any] | None = None
+def _pick_nr5g_four_path(modes: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    return modes.get("NR5G") or modes.get("NR")
+
+
+def _parse_four_path_metrics_by_sysmode(lines: list[str], prefix: str) -> dict[str, dict[str, Any]]:
+    """Quectel may return multiple ``+QRSRP`` / ``+QRSRQ`` / ``+QSINR`` lines (LTE and NR5G). Keyed by upper ``sysmode`` (e.g. ``LTE``, ``NR5G``)."""
+    out: dict[str, dict[str, Any]] = {}
     for raw in lines:
         if not raw.startswith(prefix):
             continue
@@ -181,14 +203,25 @@ def _parse_four_path_metric(lines: list[str], prefix: str) -> dict[str, Any] | N
         parts = _parse_csv_payload(payload)
         if len(parts) < 5:
             continue
-        parsed = {
+        mode = str(parts[4]).strip().upper()
+        out[mode] = {
             "prx": _safe_int(parts[0]),
             "drx": _safe_int(parts[1]),
             "rx2": _safe_int(parts[2]),
             "rx3": _safe_int(parts[3]),
             "sysmode": parts[4],
         }
-    return parsed
+    return out
+
+
+def _parse_four_path_metric(lines: list[str], prefix: str) -> dict[str, Any] | None:
+    # Prefer LTE row when multiple ``sysmode`` lines exist.
+    modes = _parse_four_path_metrics_by_sysmode(lines, prefix)
+    if not modes:
+        return None
+    if "LTE" in modes:
+        return modes["LTE"]
+    return next(iter(modes.values()), None)
 
 
 def _parse_qeng_servingcell(lines: list[str]) -> dict[str, Any] | None:
@@ -427,6 +460,132 @@ def _parse_qeng_strongest_inter_neighbour(
     ):
         return None
     return chosen
+
+
+def _parse_qeng_strongest_nr_neighbour(
+    lines: list[str],
+    serving_pci: int | None = None,
+    serving_arfcn: int | None = None,
+) -> dict[str, int | None] | None:
+    """Strongest NR neighbour on ``neighbourcell intra`` (NR5G/NR rows), same NR ARFCN as serving when known."""
+    best: dict[str, int | None] | None = None
+    fallback: dict[str, int | None] | None = None
+    for raw in lines:
+        if not raw.startswith("+QENG:"):
+            continue
+        low = raw.lower()
+        if "neighbourcell intra" not in low:
+            continue
+        parts = _parse_csv_payload(raw.split(":", 1)[1].strip())
+        for i, token in enumerate(parts):
+            rat = token.upper()
+            if rat not in ("NR5G", "NR"):
+                continue
+            if len(parts) <= i + 4:
+                continue
+            arfcn = _safe_int(parts[i + 1])
+            pci = _safe_int(parts[i + 2])
+            rsrq = _safe_int(parts[i + 3])
+            rsrp = _safe_int(parts[i + 4])
+            rssi = _safe_int(parts[i + 5]) if len(parts) > i + 5 else None
+            sinr = _safe_int(parts[i + 6]) if len(parts) > i + 6 else None
+            if rsrp is None or pci is None:
+                continue
+            if serving_arfcn is not None and arfcn is not None and arfcn != serving_arfcn:
+                continue
+            cand: dict[str, int | None] = {
+                "pci": pci,
+                "rsrp": rsrp,
+                "arfcn": arfcn,
+                "rsrq": rsrq,
+                "rssi": rssi,
+                "sinr": sinr,
+            }
+            if serving_pci is not None and pci == serving_pci:
+                if fallback is None or rsrp > fallback["rsrp"]:
+                    fallback = cand
+                continue
+            if best is None or rsrp > best["rsrp"]:
+                best = cand
+    chosen = best if best is not None else fallback
+    if chosen is None:
+        return None
+    if _qeng_lte_row_echoes_serving_cell(
+        int(chosen["arfcn"]) if chosen.get("arfcn") is not None else None,
+        int(chosen["pci"]) if chosen.get("pci") is not None else None,
+        serving_pci,
+        serving_arfcn,
+    ):
+        return None
+    return chosen
+
+
+def _compose_nr_rf_kpi(
+    net: dict[str, Any] | None,
+    serving: dict[str, Any] | None,
+    qrsrp_lines: list[str],
+    qrsrq_lines: list[str],
+    qsinr_lines: list[str],
+    nr_neighbour: dict[str, int | None] | None,
+) -> dict[str, Any]:
+    mr = _parse_four_path_metrics_by_sysmode(qrsrp_lines, "+QRSRP:")
+    mq = _parse_four_path_metrics_by_sysmode(qrsrq_lines, "+QRSRQ:")
+    ms = _parse_four_path_metrics_by_sysmode(qsinr_lines, "+QSINR:")
+    nr_r = _pick_nr5g_four_path(mr)
+    nr_q = _pick_nr5g_four_path(mq)
+    nr_s = _pick_nr5g_four_path(ms)
+
+    nr_serv: dict[str, Any] | None = None
+    if isinstance(serving, dict):
+        nn = serving.get("nr_nsa")
+        ns = serving.get("nr_sa")
+        if isinstance(nn, dict):
+            nr_serv = nn
+        elif isinstance(ns, dict):
+            nr_serv = ns
+
+    has_nr_net = bool(isinstance(net, dict) and (net.get("nr_band") is not None or net.get("nr_channel") is not None))
+    has_nr = bool(nr_serv or nr_r or nr_q or nr_s or has_nr_net)
+
+    primary: dict[str, Any] = {
+        "band": net.get("nr_band") if isinstance(net, dict) else None,
+        "arfcn": None,
+        "pci": None,
+        "rssi": None,
+        "rsrp": None,
+        "rsrq": None,
+        "sinr": None,
+    }
+    if isinstance(nr_serv, dict):
+        primary["arfcn"] = nr_serv.get("arfcn")
+        primary["pci"] = nr_serv.get("pcid")
+        primary["rsrp"] = nr_serv.get("rsrp")
+        primary["rsrq"] = nr_serv.get("rsrq")
+        primary["sinr"] = nr_serv.get("sinr")
+        primary["rssi"] = nr_serv.get("rssi")
+
+    if primary["arfcn"] is None and isinstance(net, dict):
+        primary["arfcn"] = net.get("nr_channel")
+
+    if nr_r and nr_r.get("prx") is not None:
+        primary["rsrp"] = nr_r["prx"]
+    if nr_q and nr_q.get("prx") is not None:
+        primary["rsrq"] = nr_q["prx"]
+    if nr_s and nr_s.get("prx") is not None:
+        primary["sinr"] = nr_s["prx"]
+
+    nbr_out: dict[str, Any] | None = None
+    if nr_neighbour:
+        nbr_out = {
+            "pci": nr_neighbour.get("pci"),
+            "arfcn": nr_neighbour.get("arfcn"),
+            "rsrp": nr_neighbour.get("rsrp"),
+            "rsrq": nr_neighbour.get("rsrq"),
+            "rssi": nr_neighbour.get("rssi"),
+            "sinr": nr_neighbour.get("sinr"),
+        }
+
+    return {"available": has_nr, "primary": primary, "neighbour": nbr_out}
 
 
 def _count_qeng_intra_neighbours(
@@ -835,6 +994,20 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                         serving_pci = lte.get("pcid")
                         serving_earfcn = lte.get("earfcn")
 
+                serving_nr_pci = None
+                serving_nr_arfcn = None
+                if isinstance(serving, dict):
+                    nr_nsa = serving.get("nr_nsa")
+                    nr_sa = serving.get("nr_sa")
+                    if isinstance(nr_nsa, dict):
+                        serving_nr_pci = nr_nsa.get("pcid")
+                        serving_nr_arfcn = nr_nsa.get("arfcn")
+                    if isinstance(nr_sa, dict):
+                        if serving_nr_pci is None:
+                            serving_nr_pci = nr_sa.get("pcid")
+                        if serving_nr_arfcn is None:
+                            serving_nr_arfcn = nr_sa.get("arfcn")
+
                 sample_ts = time.time()
                 carrier_resel = _carrier_reselection_step(
                     runtime.carrier_resel,
@@ -849,6 +1022,9 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                 )
                 intra_n_count = _count_qeng_intra_neighbours(nb_lines, serving_pci=serving_pci, serving_earfcn=serving_earfcn)
                 inter_n_count = _count_qeng_inter_neighbours(nb_lines, serving_pci=serving_pci, serving_earfcn=serving_earfcn)
+                nr_intra_n = _parse_qeng_strongest_nr_neighbour(
+                    nb_lines, serving_pci=serving_nr_pci, serving_arfcn=serving_nr_arfcn
+                )
                 try:
                     intra_rows = _list_qeng_neighbour_lte_channel_rows(
                         nb_lines, inter=False, serving_pci=serving_pci, serving_earfcn=serving_earfcn
@@ -882,6 +1058,15 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                     "inter_neighbour_count": inter_n_count,
                 }
 
+                nr_rf = _compose_nr_rf_kpi(
+                    net if isinstance(net, dict) else None,
+                    serving if isinstance(serving, dict) else None,
+                    list(qrsrp.get("lines") or []),
+                    list(qrsrq.get("lines") or []),
+                    list(qsinr.get("lines") or []),
+                    nr_intra_n,
+                )
+
                 parsed = {
                     "sample_ts": sample_ts,
                     "servingcell": serving,
@@ -895,6 +1080,7 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                     "qrsrq": _parse_four_path_metric(qrsrq.get("lines", []), "+QRSRQ:"),
                     "qsinr": _parse_four_path_metric(qsinr.get("lines", []), "+QSINR:"),
                     "neighbour": neighbour,
+                    "nr_rf": nr_rf,
                     "carrier_reselection": carrier_resel,
                     "raw": {
                         "cgmr": cgmr if need_fw else None,

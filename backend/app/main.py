@@ -30,7 +30,7 @@ from app.sim_usim_services import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.13"
+APP_VERSION = "1.14"
 
 
 def _serial_state_file_path() -> str:
@@ -238,6 +238,17 @@ class VolteTestBody(BaseModel):
     number: str = Field(min_length=3, max_length=40, description="Dial number, e.g. +447700900123")
     hold_sec: int = Field(default=10, ge=3, le=120, description="Call hold duration before hangup")
     password: str | None = Field(default=None, description="Unlock password (same as data allow password)")
+
+
+class AutoAnswerSetBody(BaseModel):
+    enabled: bool = Field(description="False → ATS0=0 (no auto-answer); True → ATS0=rings")
+    rings: int = Field(
+        default=1,
+        ge=1,
+        le=255,
+        description="Number of rings before auto-answer (only used when enabled=True)",
+    )
+    password: str | None = Field(default=None, description="Unlock password (same as data allow / VoLTE test)")
 
 
 class IperfTestBody(BaseModel):
@@ -591,6 +602,26 @@ def _clcc_stat_label(stat: int | None) -> str:
     if stat is None:
         return "unknown"
     return m.get(stat, f"stat_{stat}")
+
+
+def _parse_ats0_rings(lines: list[str]) -> int | None:
+    """Parse ``ATS0?`` response: S0 ring count before auto-answer (0 = disabled)."""
+    for raw in lines:
+        s = raw.strip()
+        ul = s.upper()
+        if ul in ("OK", "ERROR", ">", ".") or not s:
+            continue
+        if ul.startswith("+CME ERROR") or ul.startswith("+CMS ERROR"):
+            continue
+        m = re.match(r"^ATS0:\s*(\d+)\s*$", s, re.I)
+        if m:
+            return int(m.group(1))
+        m2 = re.match(r"^S0:\s*(\d+)\s*$", s, re.I)
+        if m2:
+            return int(m2.group(1))
+        if re.fullmatch(r"\d{1,3}", s):
+            return int(s)
+    return None
 
 
 def _parse_ceer(lines: list[str]) -> str | None:
@@ -1130,7 +1161,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="1.13.0",
+    version="1.14.0",
     lifespan=lifespan,
 )
 
@@ -1332,6 +1363,28 @@ async def home() -> HTMLResponse:
       <div class="row"><span class="label">1st strongest neighbour EARFCN (intra)</span><span id="nearfcn1">-</span></div>
       <div class="row"><span class="label">Intra-frequency neighbour count (LTE)</span><span id="nbr-intra-count">-</span></div>
       <div class="row"><span class="label">Inter-frequency neighbour count (LTE)</span><span id="nbr-inter-count">-</span></div>
+    </div>
+
+    <div class="card">
+      <div class="label">NR5G RF KPI</div>
+      <div class="label" style="font-size:11px; margin-top:4px; line-height:1.35;">
+        Primary: <code>AT+QNWINFO</code> NR row (band, channel), <code>AT+QENG</code> serving NR, and NR5G row of <code>AT+QRSRP</code> / <code>AT+QRSRQ</code> / <code>AT+QSINR</code> (PRX). Neighbour: strongest NR row on <code>AT+QENG="neighbourcell"</code> intra when the modem lists NR neighbours on that carrier. RSSI shown only if reported for NR.
+      </div>
+      <div class="label" style="margin-top:10px;">Primary NR cell</div>
+      <div class="row"><span class="label">Band</span><span id="nr-rf-band">-</span></div>
+      <div class="row"><span class="label">ARFCN</span><span id="nr-rf-arfcn">-</span></div>
+      <div class="row"><span class="label">PCI</span><span id="nr-rf-pci">-</span></div>
+      <div class="row"><span class="label">RSSI</span><span id="nr-rf-rssi">-</span></div>
+      <div class="row"><span class="label">RSRP</span><span id="nr-rf-rsrp">-</span></div>
+      <div class="row"><span class="label">RSRQ</span><span id="nr-rf-rsrq">-</span></div>
+      <div class="row"><span class="label">SNIR (QSINR PRX)</span><span id="nr-rf-sinr">-</span></div>
+      <div class="label" style="margin-top:10px;">1st strongest NR neighbour (intra)</div>
+      <div class="row"><span class="label">ARFCN</span><span id="nr-nbr-arfcn">-</span></div>
+      <div class="row"><span class="label">PCI</span><span id="nr-nbr-pci">-</span></div>
+      <div class="row"><span class="label">RSSI</span><span id="nr-nbr-rssi">-</span></div>
+      <div class="row"><span class="label">RSRP</span><span id="nr-nbr-rsrp">-</span></div>
+      <div class="row"><span class="label">RSRQ</span><span id="nr-nbr-rsrq">-</span></div>
+      <div class="row"><span class="label">SNIR</span><span id="nr-nbr-sinr">-</span></div>
     </div>
 
     <div class="card">
@@ -1562,6 +1615,24 @@ async def home() -> HTMLResponse:
 
     <div class="card">
       <div class="label">VoLTE Call Test</div>
+      <div class="label" style="margin-top:8px;">Incoming call auto-answer (ATS0)</div>
+      <div class="row"><span class="label">Modem S0</span><span id="autoanswer-s0">-</span></div>
+      <div class="label" style="font-size:11px; margin-top:4px; line-height:1.35;">
+        <code>ATS0=0</code> disables auto-answer. <code>ATS0=N</code> answers after N rings (1–255). Standard modem S-register; use <code>AT&amp;W</code> yourself if the module should retain it across power cycles.
+      </div>
+      <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+        <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6;">
+          <input id="autoanswer-enabled" type="checkbox" />
+          Enable auto-answer
+        </label>
+        <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6;">
+          Rings
+          <input id="autoanswer-rings" type="number" min="1" max="255" value="1"
+            style="width:4em; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:3px 6px;" />
+        </label>
+        <button id="btn-autoanswer-read" type="button">Read</button>
+        <button id="btn-autoanswer-apply" type="button">Apply</button>
+      </div>
       <div class="row"><span class="label">Hold time</span><span>10 seconds</span></div>
       <div style="margin-top:8px;">
         <div class="label">Dial number:</div>
@@ -2220,6 +2291,28 @@ async def home() -> HTMLResponse:
         ic !== null && ic !== undefined && Number.isFinite(Number(ic)) ? String(ic) : "-";
       el("nbr-inter-count").textContent =
         xc !== null && xc !== undefined && Number.isFinite(Number(xc)) ? String(xc) : "-";
+
+      const nrf = sample.nr_rf || {};
+      const nrp = nrf.primary || {};
+      const nrn = nrf.neighbour || {};
+      const nrDash = "-";
+      el("nr-rf-band").textContent =
+        nrp.band !== null && nrp.band !== undefined && `${nrp.band}`.length ? String(nrp.band) : nrDash;
+      el("nr-rf-arfcn").textContent =
+        nrp.arfcn !== null && nrp.arfcn !== undefined && Number.isFinite(Number(nrp.arfcn)) ? String(nrp.arfcn) : nrDash;
+      el("nr-rf-pci").textContent = fmt(nrp.pci);
+      el("nr-rf-rssi").textContent = fmt(nrp.rssi, " dBm");
+      el("nr-rf-rsrp").textContent = fmt(nrp.rsrp, " dBm");
+      el("nr-rf-rsrq").textContent = fmt(nrp.rsrq, " dB");
+      el("nr-rf-sinr").textContent = fmt(nrp.sinr, " dB");
+      el("nr-nbr-arfcn").textContent =
+        nrn && nrn.arfcn !== null && nrn.arfcn !== undefined && Number.isFinite(Number(nrn.arfcn)) ? String(nrn.arfcn) : nrDash;
+      el("nr-nbr-pci").textContent = nrn ? fmt(nrn.pci) : nrDash;
+      el("nr-nbr-rssi").textContent = nrn ? fmt(nrn.rssi, " dBm") : nrDash;
+      el("nr-nbr-rsrp").textContent = nrn ? fmt(nrn.rsrp, " dBm") : nrDash;
+      el("nr-nbr-rsrq").textContent = nrn ? fmt(nrn.rsrq, " dB") : nrDash;
+      el("nr-nbr-sinr").textContent = nrn ? fmt(nrn.sinr, " dB") : nrDash;
+
       if (idleMob.intra_freq_pci_reselections_per_min === undefined || idleMob.intra_freq_pci_reselections_per_min === null) {
         el("idle-pci-rate").textContent = "-";
       } else {
@@ -2950,6 +3043,65 @@ async def home() -> HTMLResponse:
         el("volte-trace").textContent = `VoLTE error: ${msg}`;
       } finally {
         await fetch("/api/kpi/poll/start", { method: "POST" });
+      }
+    }
+
+    async function readAutoAnswerStatus() {
+      const st = el("autoanswer-s0");
+      try {
+        const r = await fetch("/api/tools/auto-answer");
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "Read failed"));
+        const rings = j.s0_rings;
+        if (rings === null || rings === undefined) {
+          if (st) st.textContent = "-";
+        } else if (rings === 0) {
+          if (st) st.textContent = "0 (off)";
+        } else {
+          if (st) st.textContent = `${rings} (${rings} ring${rings === 1 ? "" : "s"} before answer)`;
+        }
+        const cb = el("autoanswer-enabled");
+        const rn = el("autoanswer-rings");
+        if (cb && rings !== null && rings !== undefined) {
+          cb.checked = rings > 0;
+          if (rn && rings > 0) rn.value = String(rings);
+        }
+        el("volte-msg").textContent = "Auto-answer (ATS0) read OK.";
+      } catch (e) {
+        el("volte-msg").textContent = `Auto-answer read error: ${e?.message || e}`;
+        if (st) st.textContent = "-";
+      }
+    }
+
+    async function applyAutoAnswer() {
+      const password = String(el("volte-password")?.value || "");
+      const enabled = !!el("autoanswer-enabled")?.checked;
+      let rings = Math.round(Number(el("autoanswer-rings")?.value || 1));
+      if (!Number.isFinite(rings) || rings < 1) rings = 1;
+      if (rings > 255) rings = 255;
+      try {
+        el("volte-msg").textContent = "Applying auto-answer (ATS0)...";
+        const r = await fetch("/api/tools/auto-answer", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled, rings, password })
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "Apply failed"));
+        const ringsAfter = j.s0_rings;
+        const st = el("autoanswer-s0");
+        if (st) {
+          if (ringsAfter === null || ringsAfter === undefined) {
+            st.textContent = "-";
+          } else if (ringsAfter === 0) {
+            st.textContent = "0 (off)";
+          } else {
+            st.textContent = `${ringsAfter} (${ringsAfter} ring${ringsAfter === 1 ? "" : "s"} before answer)`;
+          }
+        }
+        el("volte-msg").textContent = "Auto-answer (ATS0) applied.";
+      } catch (e) {
+        el("volte-msg").textContent = `Auto-answer apply error: ${e?.message || e}`;
       }
     }
 
@@ -4723,6 +4875,10 @@ async def home() -> HTMLResponse:
     el("btn-sim-high-read").addEventListener("click", () => readSimHighLevel());
     el("btn-sim-inspect-read").addEventListener("click", () => readSimInspector());
     el("btn-volte-test").addEventListener("click", () => runVolteTest());
+    const btnAaRead = el("btn-autoanswer-read");
+    if (btnAaRead) btnAaRead.addEventListener("click", () => readAutoAnswerStatus());
+    const btnAaApply = el("btn-autoanswer-apply");
+    if (btnAaApply) btnAaApply.addEventListener("click", () => applyAutoAnswer());
     el("btn-iperf-test").addEventListener("click", () => runIperfTest());
     el("iperf-bind-select").addEventListener("change", () => syncIperfBindUi());
     el("btn-iperf-refresh-ifaces").addEventListener("click", () => loadBindInterfaces());
@@ -5861,6 +6017,40 @@ async def tools_icmp_ping(body: IcmpPingSweepBody) -> dict:
         "command": cmd,
         "exit_code": proc.returncode,
         "stdout_tail": stdout[-4000:] if stdout else "",
+    }
+
+
+@app.get("/api/tools/auto-answer")
+async def tools_auto_answer_read() -> dict[str, Any]:
+    """Read S0 (rings before auto-answer). ``ATS0=0`` means auto-answer disabled."""
+    res = await engine.send_command("ATS0?", timeout_sec=4.0)
+    rings = _parse_ats0_rings(res.get("lines") or [])
+    ok_cmd = bool(res.get("ok"))
+    return {
+        "ok": ok_cmd,
+        "s0_rings": rings,
+        "auto_answer_enabled": rings is not None and rings > 0,
+        "raw": res,
+    }
+
+
+@app.post("/api/tools/auto-answer")
+async def tools_auto_answer_set(body: AutoAnswerSetBody) -> dict[str, Any]:
+    if (body.password or "") != DATA_GATE_UNLOCK_PASSWORD:
+        raise HTTPException(status_code=403, detail="Invalid password for auto-answer control.")
+
+    cmd = "ATS0=0" if not body.enabled else f"ATS0={int(body.rings)}"
+    set_res = await engine.send_command(cmd, timeout_sec=4.0)
+    read_res = await engine.send_command("ATS0?", timeout_sec=4.0)
+    rings_after = _parse_ats0_rings(read_res.get("lines") or [])
+    ok = bool(set_res.get("ok")) and bool(read_res.get("ok"))
+    return {
+        "ok": ok,
+        "s0_rings": rings_after,
+        "auto_answer_enabled": rings_after is not None and rings_after > 0,
+        "set_command": cmd,
+        "raw_set": set_res,
+        "raw_readback": read_res,
     }
 
 

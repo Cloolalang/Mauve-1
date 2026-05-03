@@ -9,7 +9,7 @@ Exact behavior can vary by module firmware; for final semantics, verify with the
 
 Most useful commands for VoLTE call test flows:
 
-- `ATD<number>;` dial MO voice call
+- `ATS0`, `ATS0?` — S0 ring count before modem auto-answers incoming voice (`ATS0=0` disables)
 - `AT+CLCC` read call state list (`active`, `held`, `dialing`, `alerting`, etc.)
 - `ATH` / `AT+CHUP` hang up
 - `AT+CEER` get release/error reason

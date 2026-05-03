@@ -1,8 +1,13 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 1.13** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.13.0**).
+**Version 1.14** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.14.0**).
 
-Notes for **v1.13**:
+Notes for **v1.14**:
+
+- **`GET /api/kpi/latest`** / **`/ws/kpi`**: **`sample.nr_rf`** NR5G RF KPI block (multi-row **`AT+QNWINFO`**, serving NR from **`AT+QENG`**, NR5G rows of **`AT+QRSRP`/`AT+QRSRQ`/`AT+QSINR`**, strongest intra NR neighbour when listed).
+- **`GET /`**: **NR5G RF KPI** dashboard card; VoLTE card adds **ATS0** auto-answer **Read**/**Apply** (**`GET`/`POST /api/tools/auto-answer`**).
+
+Notes for **v1.13** (historical):
 
 - **`GET /`**: toolbar **σ samples (N)** (2–600) caps how many recent primary-cell points in the RF chart window are used for **σ** KPIs; **Inter-frequency neighbour EARFCN** card shows **`inter_text`** only (intra UI removed). **`/api/kpi/neighbour-channels`** response shape unchanged.
 
@@ -82,7 +87,7 @@ $env:MD_BAUDRATE="115200"
 
 Failures from the modem (**`+CME ERROR`**, **`ERROR`**, **TIMEOUT**, etc.) surface as **`ok: false`**, **`error`**, and often **`modem_detail`** on **`/api/network/*`**, **`/api/network/apn`**, **`/api/tools/modem-reset`**, etc. (decoded in **`app/at_modem_errors.py`**).
 
-- `GET /` **5G ModemTestDriver** KPI page (**v1.13** in browser tab title and main heading): compact **Serial Port** tile; **Access / Operator** + **Registration Control (COPS)** combined; modem reset; lock controls + re-apply guard; roaming MNO [Vodafone/VMO2/EE/H3G/Auto]; data gate; CA/NRDC; **Primary Cell** (serving + RF + **σ** variability KPIs + **σ** sample count **N** + neighbour + dominance + neighbour counts); **Inter-frequency neighbour EARFCN** card (**inter** list via separate API poll); intra overlay + **inter-frequency** neighbour trends; **LTE carrier re-selection** KPI + dual-trace chart; Data Service KPI; SIM + PLMN; AT console; **iperf3** + ICMP sweep; VoLTE test; charts (window, gaps, thresholds, smoothing, hover tooltips); **Apply UI defaults**
+- `GET /` **5G ModemTestDriver** KPI page (**v1.14** in browser tab title and main heading): compact **Serial Port** tile; **Access / Operator** + **Registration Control (COPS)** combined; modem reset; lock controls + re-apply guard; roaming MNO [Vodafone/VMO2/EE/H3G/Auto]; data gate; CA/NRDC; **Primary Cell** (serving + RF + **σ** variability KPIs + **σ** sample count **N** + neighbour + dominance + neighbour counts); **NR5G RF KPI** card; **Inter-frequency neighbour EARFCN** card (**inter** list via separate API poll); intra overlay + **inter-frequency** neighbour trends; **LTE carrier re-selection** KPI + dual-trace chart; Data Service KPI; SIM + PLMN; AT console; **iperf3** + ICMP sweep; VoLTE test + **ATS0** auto-answer controls; charts (window, gaps, thresholds, smoothing, hover tooltips); **Apply UI defaults**
 - `GET /api/serial/status`
 - `GET /api/serial/ports`
 - `POST /api/at/send`
@@ -130,6 +135,11 @@ Failures from the modem (**`+CME ERROR`**, **`ERROR`**, **TIMEOUT**, etc.) surfa
   - bundled `iperf3` TCP client (JSON `-J`); optional `bind_ip`, `bitrate_limit_mbps`, `direction`, etc.
 - `POST /api/tools/icmp-ping`
   - host OS ICMP ping sweep; body defaults `host` `8.8.8.8`, `count` `10`; optional `bind_ipv4` (Windows `ping -S`)
+- `GET /api/tools/auto-answer`
+  - reads **`ATS0?`** (modem **S0** rings before auto-answer; **0** = off); returns **`s0_rings`**, **`auto_answer_enabled`**, **`raw`**
+- `POST /api/tools/auto-answer`
+  - password-gated (**same unlock as data allow / VoLTE**)
+  - body example: `{ "enabled": true, "rings": 1, "password": "nacelle" }` — **`ATS0=N`** when **`enabled`**, else **`ATS0=0`**; includes read-back
 - `POST /api/tools/volte-test`
   - password-gated call test (`password: "nacelle"`)
   - body example: `{ "number": "+447700900123", "hold_sec": 10, "password": "nacelle" }`
@@ -160,7 +170,7 @@ UK-only COPS scan scope currently applies:
 - LTE bands: `1:3:7:8:20:28:32:38`
 - NR bands: `1:3:8:28:78`
 
-VoLTE call testing uses the same unlock secret as data allow (`nacelle`).
+VoLTE call testing and **`POST /api/tools/auto-answer`** use the same unlock secret as data allow (`nacelle`).
 
 Example:
 
@@ -177,3 +187,5 @@ Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:8011/api/kpi/latest"
 ```
 
 `sample.carrier_reselection` (v1.3+): rolling-window LTE PCell mobility counts from QENG (`primary_earfcn_reselections_per_min`, `intra_freq_pci_reselections_per_min`, `window_sec`).
+
+`sample.nr_rf` (v1.14+): NR5G RF KPI summary (`available`, `primary`, `neighbour`) for the dashboard NR card.
