@@ -30,7 +30,7 @@ from app.sim_usim_services import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.14"
+APP_VERSION = "1.15"
 
 
 def _serial_state_file_path() -> str:
@@ -254,7 +254,7 @@ class AutoAnswerSetBody(BaseModel):
 class IperfTestBody(BaseModel):
     host: str = Field(default="iperf.as42831.net", min_length=1)
     port: int = Field(default=5361, ge=1, le=65535)
-    duration_sec: int = Field(default=10, ge=1, le=300)
+    duration_sec: int = Field(default=1, ge=1, le=300)
     direction: str = Field(default="download", description="download=server->client, upload=client->server")
     protocol: str = Field(default="tcp", description="Traffic mode. Currently only tcp is supported.")
     mobile_only: bool = Field(default=True, description="Bind iperf to mobile data interface/IP only.")
@@ -1161,7 +1161,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="1.14.0",
+    version="1.15.0",
     lifespan=lifespan,
 )
 
@@ -1240,7 +1240,7 @@ async def home() -> HTMLResponse:
         <option value="60">60s</option>
         <option value="120">2m</option>
         <option value="300">5m</option>
-        <option value="600">10m</option>
+        <option value="600" selected>10m</option>
         <option value="900">15m</option>
         <option value="1800">30m</option>
         <option value="3600">60m</option>
@@ -1401,97 +1401,85 @@ async def home() -> HTMLResponse:
     <div class="card">
       <div class="label">Primary and 1st strongest intra-cell neighbour RSRP Trend (dBm)</div>
       <canvas id="rsrpchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
     </div>
 
     <div class="card">
       <div class="label">Primary and 1st strongest intra-cell neighbour RSRQ Trend (dB)</div>
       <canvas id="rsrqchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
     </div>
 
     <div class="card">
       <div class="label">Primary SNIR Trend (dB)</div>
       <canvas id="sinrchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
     </div>
 
     <div class="card">
       <div class="label">Primary and 1st strongest intra-cell neighbour RSSI Trend (dBm)</div>
       <canvas id="rssichart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
     </div>
 
     <div class="card">
       <div class="label">Primary and 1st strongest intra-cell neighbour RSRP dominance Trend (dB)</div>
       <canvas id="dominancechart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
     </div>
 
     <div class="card">
       <div class="label">RSRQ vs RSRP-stable session baseline — static UE congestion proxy (dB)</div>
       <canvas id="congestionproxychart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
     </div>
 
     <div class="card">
       <div class="label">1st strongest inter-cell neighbour RSRP Trend (dBm)</div>
       <canvas id="nbrintersrpchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
     </div>
 
     <div class="card">
       <div class="label">1st strongest inter-cell neighbour RSRQ Trend (dB)</div>
       <canvas id="nbrintersrqchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
     </div>
 
     <div class="card">
       <div class="label">1st strongest inter-cell neighbour RSSI Trend (dBm)</div>
       <canvas id="nbrinterrssichart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
     </div>
 
     <div class="card">
       <div class="label">Primary and 1st strongest inter-cell neighbour RSRP dominance Trend (dB)</div>
       <canvas id="nbridomchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
     </div>
 
     <div class="card">
-      <div class="label">Intra-frequency neighbour cell count Trend (LTE, QENG intra)</div>
-      <canvas id="nbrintracountchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
-    </div>
-
-    <div class="card">
-      <div class="label">Inter-frequency neighbour cell count Trend (LTE, QENG inter)</div>
-      <canvas id="nbrintercountchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
-    </div>
-
-    <div class="card">
-      <div class="label">Primary cell Bandwidth Trend (DL BW)</div>
-      <canvas id="bwchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+      <div class="label">Neighbour cell count trend — intra &amp; inter (LTE)</div>
+      <canvas id="nbrcountcombinedchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
     </div>
 
     <div class="card">
       <div class="label">State Trend</div>
       <canvas id="statechart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
     </div>
 
     <div class="card">
-      <div class="label">Primary cell Band Trend</div>
-      <canvas id="bandchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+      <div class="label">Primary cell band &amp; DL bandwidth trend</div>
+      <canvas id="bandbwcombinedchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
     </div>
 
     <div class="card">
       <div class="label">Primary Carrier re-selection rate — LTE PCell /min</div>
       <canvas id="carrier-resel-chart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
     </div>
 
     <div class="card">
@@ -1662,14 +1650,14 @@ async def home() -> HTMLResponse:
         </div>
         <div>
           <div class="label">Duration (s):</div>
-          <input id="iperf-duration" type="number" min="1" max="300" value="10" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+          <input id="iperf-duration" type="number" min="1" max="300" value="1" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
         </div>
       </div>
       <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:8px;">
         <div>
           <div class="label">Direction:</div>
           <select id="iperf-direction" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;">
-            <option value="both" selected>Download then Upload</option>
+            <option value="both" selected>Upload then Download</option>
             <option value="download">Download (-R)</option>
             <option value="upload">Upload</option>
           </select>
@@ -1721,7 +1709,7 @@ async def home() -> HTMLResponse:
     <div class="card">
       <div class="label">Iperf Throughput Trend (Mbps)</div>
       <canvas id="iperfchart" width="420" height="180" style="width:100%; height:180px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
     </div>
 
     <div class="card">
@@ -1777,7 +1765,7 @@ async def home() -> HTMLResponse:
     <div class="card">
       <div class="label">ICMP Ping Trend (ms)</div>
       <canvas id="ph-sweep-chart" width="420" height="180" style="width:100%; height:180px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 60s</div>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
     </div>
 
     <div class="card" style="grid-column: 1 / -1;">
@@ -1814,6 +1802,11 @@ async def home() -> HTMLResponse:
       "#baffd0",
       "#eabfff"
     ];
+    /** Fixed chart colours for combined KPI charts — avoid carrier re-selection EARFCN/PCI (#ff8ec8 / #87ceeb) and cell-key palette. */
+    const CHART_COLOR_BAND_TREND = "#f39c12";
+    const CHART_COLOR_DL_BW_TREND = "#1abc9c";
+    const CHART_COLOR_NBR_COUNT_INTRA = "#b8e986";
+    const CHART_COLOR_NBR_COUNT_INTER = "#af7ac5";
     const cellColorMap = new Map();
     let nextColorSeed = 0;
     function liftRgbForDarkBg(r, g, b, minMax = 108) {
@@ -1901,7 +1894,7 @@ async def home() -> HTMLResponse:
     const carrierReselPciHistory = [];
     const carrierReselEarfcnHistory = [];
     const categoryHistory = { state: [], band: [] };
-    let chartWindowMs = 60 * 1000;
+    let chartWindowMs = 600 * 1000;
     const RF_SMOOTH_WINDOW = 10;
     const RF_STD_SAMPLE_MIN = 2;
     const RF_STD_SAMPLE_MAX = 600;
@@ -1922,8 +1915,8 @@ async def home() -> HTMLResponse:
       "nbrintersrqchart",
       "nbrinterrssichart",
       "nbridomchart",
-      "nbrintracountchart",
-      "nbrintercountchart"
+      "nbrcountcombinedchart",
+      "bandbwcombinedchart"
     ];
     const RF_CHART_TITLE_BY_ID = {
       rsrpchart: "Primary and 1st strongest intra-cell neighbour RSRP Trend (dBm)",
@@ -1936,8 +1929,8 @@ async def home() -> HTMLResponse:
       nbrintersrqchart: "1st strongest inter-cell neighbour RSRQ Trend (dB)",
       nbrinterrssichart: "1st strongest inter-cell neighbour RSSI Trend (dBm)",
       nbridomchart: "Primary and 1st strongest inter-cell neighbour RSRP dominance Trend (dB)",
-      nbrintracountchart: "Intra-frequency neighbour cell count Trend (LTE, QENG intra)",
-      nbrintercountchart: "Inter-frequency neighbour cell count Trend (LTE, QENG inter)"
+      nbrcountcombinedchart: "Neighbour cell count trend — intra & inter (LTE)",
+      bandbwcombinedchart: "Primary cell band & DL bandwidth trend"
     };
     const copsModeName = (m) => {
       if (m === 0) return "0 (Auto)";
@@ -2028,7 +2021,7 @@ async def home() -> HTMLResponse:
       drawRfCharts();
       drawInterNbrRfCharts();
       drawNeighbourCountCharts();
-      drawBwChart();
+      drawBandBwCombinedChart();
       drawCarrierReselChart();
       drawCategoryCharts();
     }
@@ -3210,7 +3203,7 @@ async def home() -> HTMLResponse:
       iperfBusy = true;
       const host = String(el("iperf-host")?.value || "").trim();
       const port = Number(el("iperf-port")?.value || 5361);
-      const durationSec = Number(el("iperf-duration")?.value || 10);
+      const durationSec = Number(el("iperf-duration")?.value || 1);
       const direction = String(el("iperf-direction")?.value || "both").trim().toLowerCase();
       const protocol = String(el("iperf-protocol")?.value || "tcp").trim().toLowerCase();
       const bindIp = resolveIperfBindIp();
@@ -3276,8 +3269,12 @@ async def home() -> HTMLResponse:
         };
 
         const results = [];
-        const dirs = direction === "both" ? ["download", "upload"] : [direction];
-        for (const dir of dirs) {
+        const dirs = direction === "both" ? ["upload", "download"] : [direction];
+        for (let i = 0; i < dirs.length; i++) {
+          const dir = dirs[i];
+          if (direction === "both" && i > 0) {
+            await new Promise((r) => setTimeout(r, 800));
+          }
           el("iperf-msg").textContent = `Running iperf ${dir} test...`;
           const j = await runOne(dir);
           const mbps = Number(j.throughput_mbps);
@@ -3292,7 +3289,7 @@ async def home() -> HTMLResponse:
 
         const dlTxt = Number.isFinite(lastIperfDlMbps) ? `${lastIperfDlMbps.toFixed(3)} Mbps` : "-";
         const ulTxt = Number.isFinite(lastIperfUlMbps) ? `${lastIperfUlMbps.toFixed(3)} Mbps` : "-";
-        const modeTxt = direction === "both" ? "download+upload" : direction;
+        const modeTxt = direction === "both" ? "upload then download" : direction;
         el("iperf-msg").textContent = `Iperf ${modeTxt} complete: DL ${dlTxt}, UL ${ulTxt}`;
 
         const lines = [];
@@ -3590,7 +3587,7 @@ async def home() -> HTMLResponse:
           : null;
       bwHistory.push({ t, v, c: cellKey });
       pruneHistoryByAge(bwHistory, t);
-      drawBwChart();
+      drawBandBwCombinedChart();
     }
 
     function addCategorySample(kind, value, tsSec = null) {
@@ -3604,6 +3601,7 @@ async def home() -> HTMLResponse:
       categoryHistory[kind].push({ t, v, c: cellKey });
       pruneHistoryByAge(categoryHistory[kind], t);
       drawCategoryCharts();
+      if (kind === "band") drawBandBwCombinedChart();
     }
 
     function addCarrierReselSamples(idleMob, tsSec) {
@@ -4393,8 +4391,10 @@ async def home() -> HTMLResponse:
     }
 
     function metricHoverXFor(p, i, h) {
-      const { x0, x1, samples, cwMs, chartNowMs, gapMode } = h;
-      const n = samples.length;
+      const { x0, x1, cwMs, chartNowMs, gapMode } = h;
+      let n = 1;
+      if (Number(h.xStepCount) > 0) n = Number(h.xStepCount);
+      else if (Array.isArray(h.samples) && h.samples.length) n = h.samples.length;
       const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
       const windowStartMs = chartNowMs - cwMs;
       if (!gapMode) return x0 + i * xStep;
@@ -4536,6 +4536,97 @@ async def home() -> HTMLResponse:
         return;
       }
 
+      if (
+        hover &&
+        hover.countDual &&
+        Array.isArray(hover.intraSamples) &&
+        Array.isArray(hover.interSamples) &&
+        (hover.intraSamples.length || hover.interSamples.length)
+      ) {
+        const { intraSamples, interSamples, y0, y1, yMin, span } = hover;
+        let best = null;
+        let bestD = Infinity;
+        const hitR = 22;
+        const hitR2 = hitR * hitR;
+        const tryCnt = (arr, tag) => {
+          for (let i = 0; i < arr.length; i++) {
+            const p = arr[i];
+            const x = metricHoverXFor(p, i, hover);
+            const vy = Number(p?.v);
+            if (!Number.isFinite(vy)) continue;
+            const y = y0 - ((vy - yMin) / span) * (y0 - y1);
+            const dx = mx - x;
+            const dy = my - y;
+            const d2 = dx * dx + dy * dy;
+            if (d2 < bestD) {
+              bestD = d2;
+              best = { p, v: vy, tag };
+            }
+          }
+        };
+        tryCnt(intraSamples, "intra");
+        tryCnt(interSamples, "inter");
+        if (!best || bestD > hitR2) {
+          hideRfChartTooltip();
+          return;
+        }
+        const chartTitle = RF_CHART_TITLE_BY_ID[canvas.id] || canvas.id;
+        const sub = best.tag === "intra" ? "Intra-frequency" : "Inter-frequency";
+        const shown =
+          Number.isFinite(best.v) ? (Math.abs(best.v % 1) < 0.05 ? best.v.toFixed(1) : best.v.toFixed(2)) : "-";
+        showRfChartTooltip(
+          ev.clientX,
+          ev.clientY,
+          `${chartTitle} — ${sub}`,
+          shown,
+          hover.unitLabel || "",
+          best.p?.c
+        );
+        return;
+      }
+
+      if (hover && hover.bandBw && typeof hover.xFor === "function" && Array.isArray(hover.bandBwRows)) {
+        const rows = hover.bandBwRows;
+        let best = null;
+        let bestD = Infinity;
+        const hitR = 22;
+        const hitR2 = hitR * hitR;
+        for (let i = 0; i < rows.length; i++) {
+          const r = rows[i];
+          const x = hover.xFor(r, i);
+          const ix = hover.labels ? hover.labels.indexOf(r.bandEff) : -1;
+          const idx = ix < 0 ? 0 : ix;
+          const yBandPt = hover.yForBand(idx);
+          const dxb = mx - x;
+          const dyb = my - yBandPt;
+          const d2b = dxb * dxb + dyb * dyb;
+          if (d2b < bestD) {
+            bestD = d2b;
+            best = { row: r, curve: "band" };
+          }
+          if (r.bw !== null && Number.isFinite(Number(r.bw))) {
+            const yw = hover.yForBw(Number(r.bw));
+            const dxw = mx - x;
+            const dyw = my - yw;
+            const d2w = dxw * dxw + dyw * dyw;
+            if (d2w < bestD) {
+              bestD = d2w;
+              best = { row: r, curve: "bw" };
+            }
+          }
+        }
+        if (!best || bestD > hitR2) {
+          hideRfChartTooltip();
+          return;
+        }
+        const chartTitle = RF_CHART_TITLE_BY_ID[canvas.id] || canvas.id;
+        const bwTxt =
+          best.row.bw !== null && Number.isFinite(Number(best.row.bw)) ? `${Number(best.row.bw).toFixed(1)} MHz` : "—";
+        const tipBody = `Band: ${best.row.bandEff || "—"}\\nDL BW: ${bwTxt}`;
+        showRfChartTooltip(ev.clientX, ev.clientY, `${chartTitle} — sample`, tipBody, "", best.row.c);
+        return;
+      }
+
       if (!hover || !Array.isArray(hover.samples) || hover.samples.length === 0) {
         hideRfChartTooltip();
         return;
@@ -4619,23 +4710,311 @@ async def home() -> HTMLResponse:
     }
 
     function drawNeighbourCountCharts() {
-      const currentCellKey =
-        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
-          ? `${currentServingEarfcn}/${currentServingPci}`
-          : null;
-      const cIntra = colorForCellKey(currentCellKey, "#7ee787");
-      const cInter = colorForCellKey(currentCellKey, "#c678dd");
-      drawMetricChart("nbrintracountchart", nbrIntraCountHistory, "cells", cIntra, null, true);
-      drawMetricChart("nbrintercountchart", nbrInterCountHistory, "cells", cInter, null, true);
+      const canvas = el("nbrcountcombinedchart");
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#101010";
+      ctx.fillRect(0, 0, w, h);
+
+      const intra = nbrIntraCountHistory;
+      const inter = nbrInterCountHistory;
+      if (!intra.length && !inter.length) {
+        canvas._metricHover = null;
+        ctx.fillStyle = "#777";
+        ctx.font = "12px Arial";
+        ctx.fillText("No neighbour count samples yet", 12, 24);
+        return;
+      }
+
+      const values = [...intra, ...inter]
+        .map((p) => Number(p?.v))
+        .filter((x) => Number.isFinite(x));
+      const minV = values.length ? Math.min(...values) : 0;
+      const maxV = values.length ? Math.max(...values) : 0;
+      const pad = Math.max(0.25, (maxV - minV) * 0.15);
+      const yMin = 0;
+      const yMax = Math.max(maxV + pad, 1);
+      const span = Math.max(1e-6, yMax - yMin);
+
+      ctx.strokeStyle = "#2a2a2a";
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = 10 + (i * (h - 20)) / 4;
+        ctx.beginPath();
+        ctx.moveTo(40, y);
+        ctx.lineTo(w - 8, y);
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = "#aaa";
+      ctx.font = "11px Arial";
+      ctx.fillText(`${yMax.toFixed(1)} cells`, 4, 14);
+      ctx.fillText(`${yMin.toFixed(1)} cells`, 4, h - 8);
+
+      const refN = Math.max(intra.length, inter.length, 1);
+      const x0 = 44;
+      const x1 = w - 12;
+      const y0 = h - 12;
+      const y1 = 10;
+      const xStep = refN > 1 ? (x1 - x0) / (refN - 1) : 0;
+      const nowMs = Date.now();
+      const windowStartMs = nowMs - chartWindowMs;
+      const expectedStepMs = Math.max(50, 1000 / Math.max(1, Number(currentPollHz) || 2));
+      const gapBreakMs = expectedStepMs * 1.8;
+      const xFor = (p, i) => {
+        if (!chartGapModeEnabled) return x0 + i * xStep;
+        const t = Number(p?.t);
+        if (!Number.isFinite(t)) return x0 + i * xStep;
+        const ratio = Math.max(0, Math.min(1, (t - windowStartMs) / chartWindowMs));
+        return x0 + ratio * (x1 - x0);
+      };
+      const yFor = (v) => y0 - ((Number(v) - yMin) / span) * (y0 - y1);
+
+      const drawSeries = (samples, lineHex, pointHex) => {
+        if (!samples.length) return;
+        ctx.strokeStyle = lineHex;
+        ctx.lineWidth = 2;
+        for (let i = 1; i < samples.length; i++) {
+          const p0 = samples[i - 1];
+          const p1 = samples[i];
+          const t0 = Number(p0?.t);
+          const t1 = Number(p1?.t);
+          if (chartGapModeEnabled && Number.isFinite(t0) && Number.isFinite(t1) && t1 - t0 > gapBreakMs) continue;
+          const xA = xFor(p0, i - 1);
+          const xB = xFor(p1, i);
+          const yA = yFor(p0.v);
+          const yB = yFor(p1.v);
+          ctx.beginPath();
+          ctx.moveTo(xA, yA);
+          ctx.lineTo(xB, yB);
+          ctx.stroke();
+        }
+        ctx.fillStyle = pointHex;
+        samples.forEach((p, i) => {
+          ctx.beginPath();
+          ctx.arc(xFor(p, i), yFor(p.v), 2.1, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      };
+
+      drawSeries(intra, CHART_COLOR_NBR_COUNT_INTRA, CHART_COLOR_NBR_COUNT_INTRA);
+      drawSeries(inter, CHART_COLOR_NBR_COUNT_INTER, CHART_COLOR_NBR_COUNT_INTER);
+
+      ctx.font = "11px Arial";
+      ctx.fillStyle = CHART_COLOR_NBR_COUNT_INTRA;
+      ctx.fillRect(w - 148, 8, 10, 3);
+      ctx.fillStyle = "#dff7cf";
+      ctx.fillText("Intra-frequency", w - 134, 12);
+      ctx.fillStyle = CHART_COLOR_NBR_COUNT_INTER;
+      ctx.fillRect(w - 148, 20, 10, 3);
+      ctx.fillStyle = "#efd9f5";
+      ctx.fillText("Inter-frequency", w - 134, 24);
+
+      canvas._metricHover = {
+        countDual: true,
+        intraSamples: intra,
+        interSamples: inter,
+        xStepCount: refN,
+        unitLabel: "cells",
+        x0,
+        x1,
+        y0,
+        y1,
+        yMin,
+        yMax,
+        span,
+        gapBreakMs,
+        chartNowMs: nowMs,
+        cwMs: chartWindowMs,
+        gapMode: chartGapModeEnabled
+      };
     }
 
-    function drawBwChart() {
-      const currentCellKey =
-        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
-          ? `${currentServingEarfcn}/${currentServingPci}`
-          : null;
-      const cellColor = colorForCellKey(currentCellKey, "#00d1b2");
-      drawMetricChart("bwchart", bwHistory, "MHz", cellColor, null, true);
+    function mergeBandBwTimelineRows() {
+      const nowMs = Date.now();
+      const cutoff = nowMs - chartWindowMs;
+      const bands = categoryHistory.band.filter((p) => Number(p?.t) >= cutoff);
+      const bws = bwHistory.filter((p) => Number(p?.t) >= cutoff);
+      const map = new Map();
+      for (const p of bands) {
+        const k = Number(p.t);
+        if (!Number.isFinite(k)) continue;
+        const row = map.get(k) || { t: k, band: null, bw: null, c: null };
+        row.band = p.v;
+        row.c = p.c;
+        map.set(k, row);
+      }
+      for (const p of bws) {
+        const k = Number(p.t);
+        if (!Number.isFinite(k)) continue;
+        const row = map.get(k) || { t: k, band: null, bw: null, c: null };
+        const bv = Number(p.v);
+        if (Number.isFinite(bv)) row.bw = bv;
+        row.c = row.c || p.c;
+        map.set(k, row);
+      }
+      const sorted = [...map.values()].sort((a, b) => a.t - b.t);
+      let lastBand = "-";
+      return sorted.map((m) => {
+        const b = m.band !== null && m.band !== undefined && String(m.band).trim() ? String(m.band).trim() : null;
+        if (b) lastBand = b;
+        return { t: m.t, bandEff: lastBand, bw: Number.isFinite(Number(m.bw)) ? Number(m.bw) : null, c: m.c };
+      });
+    }
+
+    function drawBandBwCombinedChart() {
+      const canvas = el("bandbwcombinedchart");
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#101010";
+      ctx.fillRect(0, 0, w, h);
+
+      const rows = mergeBandBwTimelineRows();
+      if (!rows.length) {
+        canvas._metricHover = null;
+        ctx.fillStyle = "#777";
+        ctx.font = "12px Arial";
+        ctx.fillText("No band / DL BW samples yet", 12, 24);
+        return;
+      }
+
+      const labels = [];
+      for (const r of rows) {
+        const lb = r.bandEff || "-";
+        if (!labels.includes(lb)) labels.push(lb);
+      }
+      const levels = Math.max(1, labels.length - 1);
+
+      const bwVals = rows.map((r) => r.bw).filter((v) => v !== null && Number.isFinite(v));
+      const padBw = bwVals.length ? Math.max(0.5, (Math.max(...bwVals) - Math.min(...bwVals)) * 0.12) : 1;
+      const yMinBw = 0;
+      const yMaxBw = bwVals.length ? Math.max(Math.max(...bwVals) + padBw, 1) : 1;
+      const spanBw = Math.max(1e-6, yMaxBw - yMinBw);
+
+      const leftPad = 92;
+      const rightPad = 52;
+      const x0 = leftPad;
+      const x1 = w - rightPad;
+      const y0 = h - 12;
+      const y1 = 10;
+      const n = rows.length;
+      const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
+      const nowMs = Date.now();
+      const windowStartMs = nowMs - chartWindowMs;
+      const expectedStepMs = Math.max(50, 1000 / Math.max(1, Number(currentPollHz) || 2));
+      const gapBreakMs = expectedStepMs * 1.8;
+      const xFor = (row, i) => {
+        if (!chartGapModeEnabled) return x0 + i * xStep;
+        const t = Number(row?.t);
+        if (!Number.isFinite(t)) return x0 + i * xStep;
+        const ratio = Math.max(0, Math.min(1, (t - windowStartMs) / chartWindowMs));
+        return x0 + ratio * (x1 - x0);
+      };
+      const yForBand = (idx) => y0 - (idx / Math.max(1, levels)) * (y0 - y1);
+      const yForBw = (mhz) => y0 - ((mhz - yMinBw) / spanBw) * (y0 - y1);
+
+      ctx.strokeStyle = "#2a2a2a";
+      ctx.lineWidth = 1;
+      labels.forEach((lbl, idx) => {
+        const y = yForBand(idx);
+        ctx.beginPath();
+        ctx.moveTo(x0, y);
+        ctx.lineTo(x1, y);
+        ctx.stroke();
+        ctx.fillStyle = "#888";
+        ctx.font = "10px Arial";
+        const shown = lbl.length > 14 ? `${lbl.slice(0, 14)}…` : lbl;
+        ctx.fillText(shown, 4, y + 3);
+      });
+
+      ctx.fillStyle = "#aaa";
+      ctx.font = "11px Arial";
+      ctx.fillText(`${yMaxBw.toFixed(1)} MHz`, w - rightPad + 6, 14);
+      ctx.fillText(`${yMinBw.toFixed(1)} MHz`, w - rightPad + 6, h - 8);
+
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = CHART_COLOR_BAND_TREND;
+      for (let i = 1; i < rows.length; i++) {
+        const p0 = rows[i - 1];
+        const p1 = rows[i];
+        const t0 = Number(p0?.t);
+        const t1 = Number(p1?.t);
+        if (chartGapModeEnabled && Number.isFinite(t0) && Number.isFinite(t1) && t1 - t0 > gapBreakMs) continue;
+        const i0 = labels.indexOf(p0.bandEff);
+        const i1 = labels.indexOf(p1.bandEff);
+        const idx0 = i0 < 0 ? 0 : i0;
+        const idx1 = i1 < 0 ? 0 : i1;
+        ctx.beginPath();
+        ctx.moveTo(xFor(p0, i - 1), yForBand(idx0));
+        ctx.lineTo(xFor(p1, i), yForBand(idx1));
+        ctx.stroke();
+      }
+      rows.forEach((p, i) => {
+        const ix = labels.indexOf(p.bandEff);
+        const idx = ix < 0 ? 0 : ix;
+        ctx.fillStyle = CHART_COLOR_BAND_TREND;
+        ctx.beginPath();
+        ctx.arc(xFor(p, i), yForBand(idx), 2.1, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      ctx.strokeStyle = CHART_COLOR_DL_BW_TREND;
+      for (let i = 1; i < rows.length; i++) {
+        const p0 = rows[i - 1];
+        const p1 = rows[i];
+        if (p0.bw === null || p1.bw === null) continue;
+        const t0 = Number(p0?.t);
+        const t1 = Number(p1?.t);
+        if (chartGapModeEnabled && Number.isFinite(t0) && Number.isFinite(t1) && t1 - t0 > gapBreakMs) continue;
+        ctx.beginPath();
+        ctx.moveTo(xFor(p0, i - 1), yForBw(p0.bw));
+        ctx.lineTo(xFor(p1, i), yForBw(p1.bw));
+        ctx.stroke();
+      }
+      rows.forEach((p, i) => {
+        if (p.bw === null) return;
+        ctx.fillStyle = CHART_COLOR_DL_BW_TREND;
+        ctx.beginPath();
+        ctx.arc(xFor(p, i), yForBw(p.bw), 2.1, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      ctx.font = "11px Arial";
+      ctx.fillStyle = CHART_COLOR_BAND_TREND;
+      ctx.fillRect(w - 132, 8, 10, 3);
+      ctx.fillStyle = "#fdebd0";
+      ctx.fillText("Band", w - 118, 12);
+      ctx.fillStyle = CHART_COLOR_DL_BW_TREND;
+      ctx.fillRect(w - 132, 20, 10, 3);
+      ctx.fillStyle = "#d5f5ee";
+      ctx.fillText("DL BW", w - 118, 24);
+
+      canvas._metricHover = {
+        bandBw: true,
+        bandBwRows: rows,
+        labels,
+        levels,
+        x0,
+        x1,
+        y0,
+        y1,
+        yMinBw,
+        yMaxBw,
+        spanBw,
+        xFor,
+        yForBand,
+        yForBw,
+        gapBreakMs,
+        chartNowMs: nowMs,
+        cwMs: chartWindowMs,
+        gapMode: chartGapModeEnabled
+      };
     }
 
     function drawCategoryChart(canvasId, samples, color) {
@@ -4735,7 +5114,6 @@ async def home() -> HTMLResponse:
           : null;
       const cellColor = colorForCellKey(currentCellKey, "#8be9fd");
       drawCategoryChart("statechart", categoryHistory.state, cellColor);
-      drawCategoryChart("bandchart", categoryHistory.band, cellColor);
     }
 
     function clearDataServiceKpi() {
@@ -4794,7 +5172,7 @@ async def home() -> HTMLResponse:
       drawRfCharts();
       drawInterNbrRfCharts();
       drawNeighbourCountCharts();
-      drawBwChart();
+      drawBandBwCombinedChart();
       drawCarrierReselChart();
       drawCategoryCharts();
       clearDataServiceKpi();
@@ -4895,7 +5273,7 @@ async def home() -> HTMLResponse:
     if (btnUiDefaults) btnUiDefaults.addEventListener("click", () => applyUiDefaults());
     el("btn-chart-gap-mode").addEventListener("click", () => setChartGapMode(!chartGapModeEnabled));
     el("chart-window-select").addEventListener("change", (ev) => {
-      applyChartWindowSec(Number(ev.target?.value || 60));
+      applyChartWindowSec(Number(ev.target?.value || 600));
     });
     el("rf-smooth-toggle").addEventListener("change", (ev) => {
       rfSmoothingEnabled = !!ev.target.checked;
@@ -4931,7 +5309,7 @@ async def home() -> HTMLResponse:
     readMnoState();
     readDataGate();
     readSimHighLevel();
-    applyChartWindowSec(Number(el("chart-window-select")?.value || 60));
+    applyChartWindowSec(Number(el("chart-window-select")?.value || 600));
     updateChartGapButton();
     redrawAllCharts();
     loadBindInterfaces();
@@ -5882,7 +6260,12 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
         cmd.extend(["-B", bind_ip])
     if limit_mbps is not None:
         cmd.extend(["-b", f"{float(limit_mbps):g}M"])
-    timeout_sec = int(body.duration_sec) + 15
+    dur = int(body.duration_sec)
+    # Wall-clock often exceeds iperf -t: TCP slow-start, JSON flush, cellular UL teardown.
+    # Upload (no -R) is slower and needs more headroom than download (-R).
+    slack_dl = 40
+    slack_ul = max(75, dur // 2 + 60)
+    timeout_sec = dur + (slack_dl if reverse else slack_ul)
     try:
         proc = await asyncio.to_thread(
             subprocess.run,

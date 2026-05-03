@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 1.14**
+**Version 1.15**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.14** is shown in the page header).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.15** is shown in the page header).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -78,6 +78,12 @@ In **PowerShell**, click the window where **`.\start.ps1`** is running and press
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v1.15**
+
+- **Dashboard charts**: single combined **Primary cell band & DL bandwidth trend** (dual Y-axis: categorical band + MHz); single **Neighbour cell count trend — intra & inter (LTE)** with fixed intra/inter colours (distinct from carrier EARFCN/PCI re-selection chart colours). **State trend** remains separate.
+- **Neighbour count chart** title and legend use **intra-frequency** / **inter-frequency** wording only (no **QENG** in UI labels).
+- **Default chart window** is **10 minutes** (toolbar **Chart window** defaults to **10m**; placeholder axis text matches).
 
 **Changes in v1.14**
 
@@ -184,6 +190,7 @@ AT command catalog from current modem firmware:
   - Neighbour Cells RF KPI (strongest intra-frequency neighbour RSRP + PCI + EARFCN, plus intra/inter neighbour counts) under **Primary Cell**
   - **NR5G RF KPI** card (primary + strongest intra NR neighbour when data is available; see **`sample.nr_rf`**)
   - **LTE neighbour channels** card: distinct **EARFCN** lists (intra / inter) via **`GET /api/kpi/neighbour-channels`** (~3 s refresh); not merged into live WebSocket KPI JSON
+  - **Band lock and inter-cell neighbours:** With **RAT/band lock** applied (`AT+QNWPREFCFG`), firmware commonly omits or clears **inter-frequency** (**inter-cell**) neighbour rows on **`AT+QENG="neighbourcell"`**. Expect **inter-cell** KPIs (strongest inter neighbour, inter neighbour count, **`nbr-*-inter*`** trend charts, **Inter-frequency neighbour EARFCN**) to show **no data** or **—**; **intra-frequency** neighbours may still be reported.
   - Mobility / LTE carrier re-selection KPI (PCell EARFCN vs intra-frequency PCI rates) with dual-trace chart
   - Data Service KPI section:
     - APN (live read plus **Set APN** form using `AT+CGDCONT`, same unlock password as Allow Data)
