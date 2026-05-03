@@ -1,8 +1,17 @@
 # 5G ModemTestDriver
 
-**Version 1.11**
+**Version 1.13**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.11** is shown in the page header).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.13** is shown in the page header).
+
+**Changes in v1.13**
+
+- **σ samples (N)**: toolbar **number control** (2–600, default **60**) sets how many **most recent** primary-cell **raw** samples **inside the chart time window** feed each **σ** KPI; **Apply UI defaults** resets **N** to 60.
+- **Inter-frequency neighbour EARFCN** dashboard card: renamed and reduced to **inter-frequency** distinct EARFCNs only (intra list and long helper text removed). **`GET /api/kpi/neighbour-channels`** unchanged and still returns **`intra_text`** / **`inter_text`**.
+
+**Changes in v1.12**
+
+- **Primary Cell variability KPIs**: text-only **sample standard deviation** (**σ**, \(n-1\)) for **RSRP**, **RSRQ**, **SNIR (QSINR PRX)**, and **RSSI** over the **same sliding window** as the RF trend charts. Values use **raw** samples (not RF smoothing), require **at least two** points in-window, and include only samples tagged for the **current serving** **EARFCN/PCI** so cell changes do not mix populations.
 
 **Changes in v1.11**
 
@@ -134,6 +143,7 @@ AT command catalog from current modem firmware:
   - **RF trend hover tooltips**: on the RSRP / RSRQ / SNIR / RSSI / dominance / intra and inter-frequency neighbour canvases, moving the pointer near a plotted sample shows a tooltip with the metric value and **EARFCN/PCI** where applicable (same cell key used for segment colouring).
   - Primary Cell bandwidth KPI (`DL/UL BW`)
   - Primary cell intra-cell dominance KPI (`Primary RSRP - strongest intra-frequency neighbour RSRP` on serving EARFCN)
+  - Primary cell **σ** KPIs (sample stdev of RSRP, RSRQ, SNIR, RSSI; **last N** primary-cell samples in the chart window with configurable **N**, current cell only)
 - Exposes REST and WebSocket endpoints for control and integration
 
 ## Planned RF features

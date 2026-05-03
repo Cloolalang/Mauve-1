@@ -30,7 +30,7 @@ from app.sim_usim_services import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.11"
+APP_VERSION = "1.13"
 
 
 def _serial_state_file_path() -> str:
@@ -1130,7 +1130,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="1.11.0",
+    version="1.13.0",
     lifespan=lifespan,
 )
 
@@ -1218,6 +1218,11 @@ async def home() -> HTMLResponse:
     <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6;">
       <input id="rf-smooth-toggle" type="checkbox" />
       RF smoothing (rolling avg, last 10 samples — primary + intra overlay)
+    </label>
+    <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6;" title="Last N primary-cell raw samples inside the chart window used for σ (sample stdev, n−1).">
+      σ samples (N)
+      <input id="rf-std-sample-count" type="number" min="2" max="600" step="1" value="60"
+        style="width:4.2em; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:3px 6px;" />
     </label>
   </div>
 
@@ -1312,6 +1317,11 @@ async def home() -> HTMLResponse:
       <div class="row"><span class="label">RSRQ</span><span id="rsrq">-</span></div>
       <div class="row"><span class="label">SINR (QSINR PRX)</span><span id="sinr">-</span></div>
       <div class="row"><span class="label">RSSI</span><span id="rssi">-</span></div>
+      <div class="label" style="margin-top:8px; font-size:11px; line-height:1.35;">Sample σ (n−1) from the last <strong>N</strong> primary-cell raw samples in the chart time window (toolbar <strong>σ samples (N)</strong>); EARFCN/PCI tag per sample. Not RF-smoothed.</div>
+      <div class="row"><span class="label">σ RSRP</span><span id="rsrp-std">-</span></div>
+      <div class="row"><span class="label">σ RSRQ</span><span id="rsrq-std">-</span></div>
+      <div class="row"><span class="label">σ SNIR (QSINR PRX)</span><span id="sinr-std">-</span></div>
+      <div class="row"><span class="label">σ RSSI</span><span id="rssi-std">-</span></div>
       <div class="row"><span class="label">Primary cell intra-cell RSRP dominance</span><span id="dominance">-</span></div>
       <div class="row" title="Same LTE cell only. Builds median RSRQ from samples where |RSRP − rolling median RSRP| ≤ 3 dB. Value = baseline − current RSRQ (dB). Positive ⇒ current RSRQ worse than session baseline — RF/airtime congestion proxy for a static UE; not scheduler load. Resets on cell change.">
         <span class="label">RSRQ vs baseline (static UE proxy)</span><span id="rsrq-static-proxy">-</span>
@@ -1331,11 +1341,7 @@ async def home() -> HTMLResponse:
     </div>
 
     <div class="card">
-      <div class="label">LTE neighbour channels (+QENG)</div>
-      <div class="label" style="margin-top:6px; font-size:11px; line-height:1.35;">Distinct LTE EARFCNs from QENG neighbourcell (one per line). Updated via a separate API; strongest neighbour per carrier listed first. Up to 32 carriers per list.</div>
-      <div class="label" style="margin-top:10px;">Intra-frequency (neighbourcell intra)</div>
-      <pre id="nbr-intra-channels" class="nbr-channels-pre">-</pre>
-      <div class="label" style="margin-top:10px;">Inter-frequency (neighbourcell inter)</div>
+      <div class="label">Inter-frequency neighbour EARFCN</div>
       <pre id="nbr-inter-channels" class="nbr-channels-pre">-</pre>
     </div>
 
@@ -1826,6 +1832,8 @@ async def home() -> HTMLResponse:
     const categoryHistory = { state: [], band: [] };
     let chartWindowMs = 60 * 1000;
     const RF_SMOOTH_WINDOW = 10;
+    const RF_STD_SAMPLE_MIN = 2;
+    const RF_STD_SAMPLE_MAX = 600;
     let rfSmoothingEnabled = false;
     let chartGapModeEnabled = false;
     let currentPollHz = 2.0;
@@ -2870,6 +2878,10 @@ async def home() -> HTMLResponse:
         await setLocks();
         await applyMnoSelection();
 
+        const rstd = el("rf-std-sample-count");
+        if (rstd) rstd.value = "60";
+        updatePrimaryRfStdDevKpis();
+
         el("status").textContent =
           "UI defaults: 10m chart window, smoothing on, locks (AUTO LTE " +
           UI_DEFAULT_LTE_BANDS +
@@ -3356,6 +3368,64 @@ async def home() -> HTMLResponse:
       rfHistory[kind].push({ t, v, c: cellKey });
       pruneHistoryByAge(rfHistory[kind], t);
       if (!deferDraw) drawRfCharts();
+    }
+
+    function sampleStdDev(values) {
+      if (!Array.isArray(values) || values.length < 2) return null;
+      let sum = 0;
+      for (const x of values) sum += x;
+      const mean = sum / values.length;
+      let acc = 0;
+      for (const x of values) {
+        const d = x - mean;
+        acc += d * d;
+      }
+      return Math.sqrt(acc / (values.length - 1));
+    }
+
+    function getRfStdSampleCount() {
+      const raw = Number(el("rf-std-sample-count")?.value);
+      if (!Number.isFinite(raw)) return 60;
+      return Math.max(RF_STD_SAMPLE_MIN, Math.min(RF_STD_SAMPLE_MAX, Math.round(raw)));
+    }
+
+    function primaryRfValuesForCellInWindow(history, cellKey, nowMs = Date.now()) {
+      if (!cellKey || !Array.isArray(history) || !history.length) return [];
+      const cutoff = nowMs - chartWindowMs;
+      const out = [];
+      for (const p of history) {
+        if (p.c !== cellKey) continue;
+        if (Number(p.t) < cutoff) continue;
+        const v = Number(p.v);
+        if (!Number.isFinite(v)) continue;
+        out.push(v);
+      }
+      const cap = getRfStdSampleCount();
+      if (out.length > cap) return out.slice(-cap);
+      return out;
+    }
+
+    function updatePrimaryRfStdDevKpis() {
+      const nowMs = Date.now();
+      const cellKey =
+        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
+          ? `${currentServingEarfcn}/${currentServingPci}`
+          : null;
+      const apply = (elemId, kind) => {
+        const node = el(elemId);
+        if (!node) return;
+        if (!cellKey) {
+          node.textContent = "-";
+          return;
+        }
+        const vals = primaryRfValuesForCellInWindow(rfHistory[kind], cellKey, nowMs);
+        const s = sampleStdDev(vals);
+        node.textContent = s !== null && Number.isFinite(s) ? `${s.toFixed(2)} dB` : "-";
+      };
+      apply("rsrp-std", "rsrp");
+      apply("rsrq-std", "rsrq");
+      apply("sinr-std", "sinr");
+      apply("rssi-std", "rssi");
     }
 
     function addBwSample(value, tsSec = null) {
@@ -4380,6 +4450,7 @@ async def home() -> HTMLResponse:
       drawMetricChartWithIntraNeighbour("rssichart", rssi, ovRssi, "dBm", pciColor, -25);
       drawMetricChart("dominancechart", dominance, "dB", "#50fa7b", 6);
       drawMetricChart("congestionproxychart", primaryCellDataAvailable ? congestionProxyHistory : [], "dB", "#ffb86c", 0);
+      updatePrimaryRfStdDevKpis();
     }
 
     function drawInterNbrRfCharts() {
@@ -4575,6 +4646,11 @@ async def home() -> HTMLResponse:
       drawCarrierReselChart();
       drawCategoryCharts();
       clearDataServiceKpi();
+      const _z = ["rsrp-std", "rsrq-std", "sinr-std", "rssi-std"];
+      for (const id of _z) {
+        const n = el(id);
+        if (n) n.textContent = "-";
+      }
     }
 
     async function pollFallback() {
@@ -4597,11 +4673,8 @@ async def home() -> HTMLResponse:
         const r = await fetch("/api/kpi/neighbour-channels");
         if (!r.ok) return;
         const j = await r.json();
-        const t1 = j.intra_text;
         const t2 = j.inter_text;
-        const p1 = document.getElementById("nbr-intra-channels");
         const p2 = document.getElementById("nbr-inter-channels");
-        if (p1) p1.textContent = typeof t1 === "string" ? t1 : "-";
         if (p2) p2.textContent = typeof t2 === "string" ? t2 : "-";
       } catch (e) {
         console.error("Neighbour channels poll error:", e);
@@ -4672,6 +4745,12 @@ async def home() -> HTMLResponse:
       rfSmoothingEnabled = !!ev.target.checked;
       redrawAllCharts();
     });
+    const rfStdSampleInput = el("rf-std-sample-count");
+    if (rfStdSampleInput) {
+      const onStdN = () => updatePrimaryRfStdDevKpis();
+      rfStdSampleInput.addEventListener("change", onStdN);
+      rfStdSampleInput.addEventListener("input", onStdN);
+    }
     el("btn-serial-refresh").addEventListener("click", () => refreshSerialPorts(false));
     el("btn-serial-autopick").addEventListener("click", () => autoPickSerialPort());
     el("btn-serial-reconnect").addEventListener("click", () => reconnectSerial());
