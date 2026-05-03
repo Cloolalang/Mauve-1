@@ -19,26 +19,37 @@ Do these in order on **Windows** with a **Robustel** modem/router (tested on **R
 
 ### 2. Install Python and application dependencies
 
-**Install Python 3.12** once: [python.org/downloads](https://www.python.org/downloads/) or Microsoft Store. In the installer, enable **Add python.exe to PATH** (and the **py** launcher if offered). Close and reopen **PowerShell** after installing.
+**Install Python 3.12** from [python.org/downloads](https://www.python.org/downloads/) (**Windows installer**, not the Store, avoids most “wrong Python” problems). Run the installer as administrator if your PC is locked down. Enable **Add python.exe to PATH** and the **py** launcher. Finish the wizard, then **close every PowerShell window** and open a **new** one so PATH updates apply.
 
-In PowerShell, check Python:
+Check that Windows is really using **3.12** for the commands below:
 
 ```powershell
+py --list
 py -3.12 --version
 ```
 
-Expect Python 3.12.x.
+You should see **`Python 3.12.x`**. If **`py -3.12`** is missing, install/repair **Python 3.12** from python.org. If **`py`** opens the wrong version, don’t use bare **`python`** for the venv—always **`py -3.12`** as shown. If the Store’s **`python.exe`** steals the name, turn off **Settings → Apps → Advanced app settings → App execution aliases** for **python.exe** / **python3.exe**, then open a new PowerShell.
 
-Download the app from GitHub: open the **[repository page](https://github.com/Cloolalang/Mauve-1)**, click **Code**, then **Download ZIP**. Unzip it somewhere easy to find (for example your **Desktop**). After unzip you should see a folder that contains **`backend`**—often named **`Mauve-1-main`** (GitHub adds **`-main`** to the folder name).
+**Put the project on local disk.** Unzip the GitHub ZIP into a folder that is **not** synced by **OneDrive**, **SharePoint**, Dropbox, or similar (avoid **Desktop** / **Documents** when those point at cloud drives). Sync and “files on demand” often cause **`venv`** or **`pip install`** to fail (locks, long paths, half-written files). Example: create **`C:\dev`**, unzip there—you should get **`C:\dev\Mauve-1-main`** (GitHub adds **`-main`**).
 
-In PowerShell, create the virtual environment and install packages (adjust the path if your Desktop or folder name differs):
+Download from GitHub: **[repository page](https://github.com/Cloolalang/Mauve-1)** → **Code** → **Download ZIP** → unzip into your **local** folder.
+
+In PowerShell, create the virtual environment and install packages (change **`C:\dev`** if you used another location):
 
 ```powershell
-cd $HOME\Desktop\Mauve-1-main\backend
+cd C:\dev\Mauve-1-main\backend
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
+
+**PowerShell blocking scripts:** If you see *running scripts is disabled on this system*, check **`Get-ExecutionPolicy`**. For your own login you can allow locally created scripts with:
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+```
+
+Files from a **Download ZIP** may be marked as from the internet; from **`backend`**, run **`Unblock-File .\start.ps1`** (or unzip after unblocking the ZIP in **File Explorer → Properties → Unblock**). Locked-down PCs may disable script execution entirely via Group Policy—your administrator has to allow PowerShell or you run the **`uvicorn`** line under **Start the app** instead of **`start.ps1`**.
 
 ### 3. Confirm the Quectel AT COM port, then start the server
 
@@ -47,7 +58,7 @@ In **Windows Device Manager**, open **Ports (COM & LPT)** and find **Quectel USB
 In PowerShell, start the backend from the **`backend`** folder:
 
 ```powershell
-cd $HOME\Desktop\Mauve-1-main\backend
+cd C:\dev\Mauve-1-main\backend
 .\start.ps1
 ```
 
@@ -223,7 +234,7 @@ AT command catalog from current modem firmware:
 Same as **Quick start**, step **2** (Python 3.12 + GitHub ZIP + `backend\.venv` + `pip install -r requirements.txt`). Copy-paste from step **2**; minimal recap:
 
 ```powershell
-cd $HOME\Desktop\Mauve-1-main\backend
+cd C:\dev\Mauve-1-main\backend
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
@@ -236,28 +247,28 @@ Default: **Quick start**, steps **3**–**4** (COM port + **`.\start.ps1`** + br
 From `backend` folder (adjust path if your unzip location differs):
 
 ```powershell
-cd $HOME\Desktop\Mauve-1-main\backend
+cd C:\dev\Mauve-1-main\backend
 .\.venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8011
 ```
 
 Safer start helper (auto-clears stale listener on selected port before launch):
 
 ```powershell
-cd $HOME\Desktop\Mauve-1-main\backend
+cd C:\dev\Mauve-1-main\backend
 .\start.ps1
 ```
 
 Optional custom port/host:
 
 ```powershell
-cd $HOME\Desktop\Mauve-1-main\backend
+cd C:\dev\Mauve-1-main\backend
 .\start.ps1 -Port 8012 -BindHost 127.0.0.1
 ```
 
 From the unzipped project folder (parent of `backend`):
 
 ```powershell
-cd $HOME\Desktop\Mauve-1-main
+cd C:\dev\Mauve-1-main
 .\backend\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir .\backend --host 127.0.0.1 --port 8011
 ```
 
