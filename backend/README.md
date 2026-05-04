@@ -1,6 +1,12 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 1.18** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.18.0**).
+**Version 1.19** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.19.0**).
+
+Notes for **v1.19**:
+
+- **`GET /`**: **Primary Cell** adds **Duplex (FDD/TDD)** from **`AT+QENG`** LTE serving. **NR5G RF KPI** adds **NR serving**, **Duplex**, and **NR band** display (QENG SA band preferred; see root **Changes in v1.19**).
+- **`POST /api/network/locks`**: Longer **`AT+QNWPREFCFG`** timeouts, settle + re-verify after **`mode_pref`**; serial **`send_command`** uses extra **wait_for** slack (`serial_engine`).
+- OpenAPI / page header: **v1.19**.
 
 Notes for **v1.18**:
 

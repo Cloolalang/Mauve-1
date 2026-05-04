@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 1.18**
+**Version 1.19**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.18** is shown in the page header with a **Lord Kelvin** quotation on measurement).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.19** is shown in the page header with a **Lord Kelvin** quotation on measurement).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -78,6 +78,13 @@ In **PowerShell**, click the window where **`.\start.ps1`** is running and press
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v1.19**
+
+- **NR5G RF KPI** (dashboard + **`sample.nr_rf.primary`**): **NR serving** row (**NR5G-SA** / **NR5G-NSA** from **`AT+QENG`**); **Duplex** (**FDD** / **TDD**) from NR5G-SA serving line; **NR band** prefers the **QENG** serving band index in **SA** (shown as **`nNN`**) when **`AT+QNWINFO`** alone would not match the serving cell line.
+- **Primary Cell**: **Duplex** row under **Band** — **FDD** / **TDD** from **`AT+QENG`** LTE serving (`sample.servingcell.lte.duplex`); modem values **0** / **1** are shown as **FDD** / **TDD**.
+- **RAT / band lock** (**`POST /api/network/locks`**, **`AT+QNWPREFCFG`**): Longer timeouts for **`mode_pref`** (slow RAT changes) and other lock keys; serial **`send_command`** outer wait adds proportional slack so late **OK** lines are not dropped; after **`mode_pref`**, a short settle delay and a second read/verify pass reduce spurious **TIMEOUT** and empty readback when applying locks.
+- **Serial engine**: See above — more tolerant **wait_for** around slow modem responses.
 
 **Changes in v1.18**
 
@@ -216,9 +223,9 @@ AT command catalog from current modem firmware:
   - CA policy switch for LTE (single-band vs multi/all)
   - NRDC on/off switch
   - Neighbour Cells RF KPI (strongest intra-frequency neighbour RSRP + PCI + EARFCN, plus intra/inter neighbour counts) under **Primary Cell**
-  - **LTE CA (QCAINFO)** under **Primary Cell**: live **EARFCN active (CA)** and **CA aggregated DL BW** (MHz); combined **CA EARFCN config & aggregated bandwidth** trend chart (see **Changes in v1.18**)
+  - **LTE CA (QCAINFO)** under **Primary Cell**: live **EARFCN active (CA)** and **CA aggregated DL BW** (MHz); combined **CA EARFCN config & aggregated bandwidth** trend chart (see **Changes in v1.18**). **Duplex (FDD/TDD)** on the LTE **QENG** serving row (see **Changes in v1.19**).
   - **Static-UE congestion proxy** (primary cell only): KPI compares current RSRQ to a session **RSRQ baseline** built when RSRP is stable vs a rolling median; trend chart **RSRQ vs RSRP-stable session baseline** (dB); resets on serving-cell change
-  - **NR5G RF KPI** card (primary + strongest intra NR neighbour when data is available; see **`sample.nr_rf`**)
+  - **NR5G RF KPI** card (**NR serving**, **Duplex**, **NR band** from QENG in SA, primary + strongest intra NR neighbour; see **`sample.nr_rf`** and **Changes in v1.19**)
   - **LTE neighbour channels** card: distinct **EARFCN** lists (intra / inter) via **`GET /api/kpi/neighbour-channels`** (~3 s refresh); not merged into live WebSocket KPI JSON
   - **Band lock and inter-cell neighbours:** With **RAT/band lock** applied (`AT+QNWPREFCFG`), firmware commonly omits or clears **inter-frequency** (**inter-cell**) neighbour rows on **`AT+QENG="neighbourcell"`**. Expect **inter-cell** KPIs (strongest inter neighbour, inter neighbour count, **`nbr-*-inter*`** trend charts, **Inter-frequency neighbour EARFCN**) to show **no data** or **—**; **intra-frequency** neighbours may still be reported.
   - Mobility / LTE carrier re-selection KPI (PCell EARFCN vs intra-frequency PCI rates) with dual-trace chart
@@ -382,7 +389,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8011/api/at/send" `
 Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:8011/api/kpi/latest"
 ```
 
-The JSON includes `sample.carrier_reselection` with `window_sec` (60), `primary_earfcn_reselections_per_min`, and `intra_freq_pci_reselections_per_min` when the KPI poll has parsed LTE PCell identity from QENG. When NR data is available, **`sample.nr_rf`** carries **NR5G RF KPI** fields for the dashboard card (`available`, `primary`, `neighbour`). **`sample.qcainfo`** carries **AT+QCAINFO** parsing (`carriers`, `earfcn_active`, `earfcn_active_text`, `dl_bw_aggregate_mhz`, `dl_bw_components_mhz`, `query_ok`); see **Changes in v1.18**.
+The JSON includes `sample.carrier_reselection` with `window_sec` (60), `primary_earfcn_reselections_per_min`, and `intra_freq_pci_reselections_per_min` when the KPI poll has parsed LTE PCell identity from QENG. When NR data is available, **`sample.nr_rf`** carries **NR5G RF KPI** fields for the dashboard card (`available`, `primary`, `neighbour`); **`primary`** may include **`serving_nr_type`**, **`duplex`**, and band display logic per **Changes in v1.19**. **`sample.qcainfo`** carries **AT+QCAINFO** parsing (`carriers`, `earfcn_active`, `earfcn_active_text`, `dl_bw_aggregate_mhz`, `dl_bw_components_mhz`, `query_ok`); see **Changes in v1.18**.
 
 ## API quick reference
 

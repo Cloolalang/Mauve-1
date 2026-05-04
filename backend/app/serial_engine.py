@@ -110,7 +110,10 @@ class SerialEngine:
         await self._queue.put(req)
 
         try:
-            return await asyncio.wait_for(req.done, timeout=req.timeout_sec + 0.5)
+            # Allow the reader slightly more slack than *timeout_sec* so slow OK lines
+            # (common during QNWPREFCFG RAT changes) are not cut off by this outer wait.
+            slack = max(5.0, min(30.0, float(timeout_sec) * 0.35))
+            return await asyncio.wait_for(req.done, timeout=float(req.timeout_sec) + slack)
         except asyncio.TimeoutError:
             if self._active_request is req:
                 self._active_request = None

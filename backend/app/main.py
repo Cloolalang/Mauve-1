@@ -30,7 +30,7 @@ from app.sim_usim_services import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.18"
+APP_VERSION = "1.19"
 
 
 def _serial_state_file_path() -> str:
@@ -885,12 +885,12 @@ def _parse_qnwprefcfg_value(lines: list[str], key: str) -> str | None:
     return None
 
 
-async def _read_lock_status() -> dict:
+async def _read_lock_status(timeout_per_key: float = 8.0) -> dict:
     keys = ["mode_pref", "lte_band", "nr5g_band", "nsa_nr5g_band", "nrdc_mode"]
     raw_map: dict[str, dict] = {}
     out: dict[str, str | None] = {}
     for k in keys:
-        res = await engine.send_command(f'AT+QNWPREFCFG="{k}"', timeout_sec=4.0)
+        res = await engine.send_command(f'AT+QNWPREFCFG="{k}"', timeout_sec=float(timeout_per_key))
         raw_map[k] = res
         out[k] = _parse_qnwprefcfg_value(res.get("lines", []), k)
     return {"values": out, "raw": raw_map}
@@ -958,24 +958,75 @@ def _lock_value_matches(key: str, want: str, current: dict[str, str | None]) -> 
 
 async def _apply_lock_requests(requested: dict[str, str]) -> dict[str, dict]:
     set_results: dict[str, dict] = {}
+    # RAT / band preference changes can take many seconds; short timeouts produce false
+    # TIMEOUT results, confuse verify readback, and interleave badly with follow-up ATs.
     if "mode_pref" in requested:
         rat = requested["mode_pref"]
-        set_results["mode_pref"] = await engine.send_command(f'AT+QNWPREFCFG="mode_pref",{rat}', timeout_sec=8.0)
+        set_results["mode_pref"] = await engine.send_command(
+            f'AT+QNWPREFCFG="mode_pref",{rat}', timeout_sec=75.0
+        )
     if "lte_band" in requested:
         band = requested["lte_band"]
-        set_results["lte_band"] = await engine.send_command(f'AT+QNWPREFCFG="lte_band",{band}', timeout_sec=8.0)
+        set_results["lte_band"] = await engine.send_command(
+            f'AT+QNWPREFCFG="lte_band",{band}', timeout_sec=25.0
+        )
     if "nr5g_band" in requested:
         band = requested["nr5g_band"]
-        set_results["nr5g_band"] = await engine.send_command(f'AT+QNWPREFCFG="nr5g_band",{band}', timeout_sec=8.0)
+        set_results["nr5g_band"] = await engine.send_command(
+            f'AT+QNWPREFCFG="nr5g_band",{band}', timeout_sec=25.0
+        )
         final_nr = str(set_results["nr5g_band"].get("final", "")).upper()
         if final_nr == "OK":
             set_results["nsa_nr5g_band"] = await engine.send_command(
-                f'AT+QNWPREFCFG="nsa_nr5g_band",{band}', timeout_sec=8.0
+                f'AT+QNWPREFCFG="nsa_nr5g_band",{band}', timeout_sec=25.0
             )
     if "nrdc_mode" in requested:
         mode = requested["nrdc_mode"]
-        set_results["nrdc_mode"] = await engine.send_command(f'AT+QNWPREFCFG="nrdc_mode",{mode}', timeout_sec=8.0)
+        set_results["nrdc_mode"] = await engine.send_command(
+            f'AT+QNWPREFCFG="nrdc_mode",{mode}', timeout_sec=25.0
+        )
     return set_results
+
+
+def _collect_lock_verify_errors(
+    normalized_requested: dict[str, str],
+    set_results: dict[str, dict],
+    locks: dict[str, str | None],
+) -> list[str]:
+    errors: list[str] = []
+    if "mode_pref" in normalized_requested:
+        want = normalized_requested["mode_pref"]
+        if not _lock_value_matches("mode_pref", want, locks):
+            final = set_results.get("mode_pref", {}).get("final", "UNKNOWN")
+            got = _normalize_lock_value("mode_pref", locks.get("mode_pref"))
+            errors.append(f"mode_pref verify failed (wanted {want}, got {got or '-'}, final={final})")
+
+    if "lte_band" in normalized_requested:
+        want = normalized_requested["lte_band"]
+        if not _lock_value_matches("lte_band", want, locks):
+            final = set_results.get("lte_band", {}).get("final", "UNKNOWN")
+            got = _normalize_lock_value("lte_band", locks.get("lte_band"))
+            errors.append(f"lte_band verify failed (wanted {want}, got {got or '-'}, final={final})")
+
+    if "nr5g_band" in normalized_requested:
+        want = normalized_requested["nr5g_band"]
+        if not _lock_value_matches("nr5g_band", want, locks):
+            final_nr = set_results.get("nr5g_band", {}).get("final", "UNKNOWN")
+            final_nsa = set_results.get("nsa_nr5g_band", {}).get("final", "N/A")
+            got_nr = _normalize_lock_value("nr5g_band", locks.get("nr5g_band"))
+            got_nsa = _normalize_lock_value("nsa_nr5g_band", locks.get("nsa_nr5g_band"))
+            errors.append(
+                f"nr5g_band verify failed (wanted {want}, got nr5g={got_nr or '-'}, "
+                f"nsa_nr5g={got_nsa or '-'}, finals={final_nr}/{final_nsa})"
+            )
+
+    if "nrdc_mode" in normalized_requested:
+        want = normalized_requested["nrdc_mode"]
+        if not _lock_value_matches("nrdc_mode", want, locks):
+            final = set_results.get("nrdc_mode", {}).get("final", "UNKNOWN")
+            got = _normalize_lock_value("nrdc_mode", locks.get("nrdc_mode"))
+            errors.append(f"nrdc_mode verify failed (wanted {want}, got {got or '-'}, final={final})")
+    return errors
 
 
 async def _lock_guard_loop() -> None:
@@ -1331,7 +1382,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="1.18.0",
+    version="1.19.0",
     lifespan=lifespan,
 )
 
@@ -1595,6 +1646,7 @@ async def home() -> HTMLResponse:
       <div class="row"><span class="label">RAT</span><span id="rat">-</span></div>
       <div class="row"><span class="label">State</span><span id="state">-</span></div>
       <div class="row"><span class="label">Band</span><span id="band">-</span></div>
+      <div class="row" title="FDD or TDD from AT+QENG serving LTE cell (field after RAT on the LTE row)."><span class="label">Duplex</span><span id="lte-duplex">-</span></div>
       <div class="row"><span class="label">DL/UL BW</span><span id="bwpair">-</span></div>
       <div class="row"><span class="label">EARFCN/PCI</span><span id="earfcnpci">-</span></div>
       <div class="row" title="LTE carrier aggregation component carriers from AT+QCAINFO (PCC then SCC)."><span class="label">EARFCN active (CA)</span><span id="earfcn-active-ca">-</span></div>
@@ -1625,10 +1677,12 @@ async def home() -> HTMLResponse:
     <div class="card">
       <div class="label">NR5G RF KPI</div>
       <div class="label" style="font-size:11px; margin-top:4px; line-height:1.35;">
-        Primary: <code>AT+QNWINFO</code> NR row (band, channel), <code>AT+QENG</code> serving NR (including DL bandwidth when present), and NR5G row of <code>AT+QRSRP</code> / <code>AT+QRSRQ</code> / <code>AT+QSINR</code> (PRX). Neighbour: strongest NR row on <code>AT+QENG="neighbourcell"</code> intra when the modem lists NR neighbours (bandwidth usually not available there).
+        Primary: <strong>NR serving</strong> and <strong>duplex</strong> follow <code>AT+QENG</code> (NR5G-SA shows FDD/TDD and band index as n<b>NN</b>). In SA, that band index is preferred over <code>AT+QNWINFO</code> so it matches the serving line. Channel/RF: <code>AT+QNWINFO</code> NR row, QENG, <code>AT+QRSRP</code> / <code>AT+QRSRQ</code> / <code>AT+QSINR</code> (PRX). Neighbour: strongest NR on <code>AT+QENG="neighbourcell"</code> intra when listed.
       </div>
       <div class="label" style="margin-top:10px;">Primary NR cell</div>
-      <div class="row"><span class="label">Band</span><span id="nr-rf-band">-</span></div>
+      <div class="row" title="NR layer reported on AT+QENG serving cell: NR5G-SA or NR5G-NSA."><span class="label">NR serving</span><span id="nr-rf-serving-type">-</span></div>
+      <div class="row" title="In NR5G-SA this is the band index from the same AT+QENG line (shown as nNN). In NR5G-NSA, AT+QNWINFO is preferred when present, otherwise QENG."><span class="label">NR band</span><span id="nr-rf-band">-</span></div>
+      <div class="row" title="Duplex mode from the AT+QENG NR5G-SA serving line (FDD or TDD). Not reported on NR5G-NSA rows."><span class="label">Duplex</span><span id="nr-rf-duplex">-</span></div>
       <div class="row"><span class="label">ARFCN</span><span id="nr-rf-arfcn">-</span></div>
       <div class="row"><span class="label">PCI</span><span id="nr-rf-pci">-</span></div>
       <div class="row"><span class="label">DL bandwidth</span><span id="nr-rf-dl-bw">-</span></div>
@@ -2649,6 +2703,18 @@ async def home() -> HTMLResponse:
       }
 
       el("band").textContent = net.band || "-";
+      {
+        const dpx = lte.duplex;
+        let dpxText = "-";
+        if (dpx !== null && dpx !== undefined && `${dpx}`.trim()) {
+          const s = String(dpx).trim();
+          const n = Number(s);
+          if (s === "0" || (Number.isFinite(n) && n === 0)) dpxText = "FDD";
+          else if (s === "1" || (Number.isFinite(n) && n === 1)) dpxText = "TDD";
+          else dpxText = s.toUpperCase();
+        }
+        el("lte-duplex").textContent = dpxText;
+      }
       el("modemfw").textContent = modem.firmware || "-";
       el("ds-apn").textContent = ds.apn || "-";
       if (ds.active_pdp_contexts === null || ds.active_pdp_contexts === undefined || ds.pdp_contexts === null || ds.pdp_contexts === undefined) {
@@ -2772,8 +2838,18 @@ async def home() -> HTMLResponse:
       const nrp = nrf.primary || {};
       const nrn = nrf.neighbour || {};
       const nrDash = "-";
+      el("nr-rf-serving-type").textContent =
+        nrp.serving_nr_type !== null &&
+        nrp.serving_nr_type !== undefined &&
+        String(nrp.serving_nr_type).trim().length
+          ? String(nrp.serving_nr_type).trim()
+          : nrDash;
       el("nr-rf-band").textContent =
         nrp.band !== null && nrp.band !== undefined && `${nrp.band}`.length ? String(nrp.band) : nrDash;
+      el("nr-rf-duplex").textContent =
+        nrp.duplex !== null && nrp.duplex !== undefined && String(nrp.duplex).trim().length
+          ? String(nrp.duplex).trim().toUpperCase()
+          : nrDash;
       el("nr-rf-arfcn").textContent =
         nrp.arfcn !== null && nrp.arfcn !== undefined && Number.isFinite(Number(nrp.arfcn)) ? String(nrp.arfcn) : nrDash;
       el("nr-rf-pci").textContent = fmt(nrp.pci);
@@ -7770,42 +7846,16 @@ async def network_locks_set(body: LockSetBody) -> dict:
     }
 
     set_results = await _apply_lock_requests(requested)
+    if "mode_pref" in requested:
+        await asyncio.sleep(2.5)
     lock_state = await _read_lock_status()
     locks = lock_state["values"]
-    errors: list[str] = []
-
-    if "mode_pref" in normalized_requested:
-        want = normalized_requested["mode_pref"]
-        if not _lock_value_matches("mode_pref", want, locks):
-            final = set_results.get("mode_pref", {}).get("final", "UNKNOWN")
-            got = _normalize_lock_value("mode_pref", locks.get("mode_pref"))
-            errors.append(f"mode_pref verify failed (wanted {want}, got {got or '-'}, final={final})")
-
-    if "lte_band" in normalized_requested:
-        want = normalized_requested["lte_band"]
-        if not _lock_value_matches("lte_band", want, locks):
-            final = set_results.get("lte_band", {}).get("final", "UNKNOWN")
-            got = _normalize_lock_value("lte_band", locks.get("lte_band"))
-            errors.append(f"lte_band verify failed (wanted {want}, got {got or '-'}, final={final})")
-
-    if "nr5g_band" in normalized_requested:
-        want = normalized_requested["nr5g_band"]
-        if not _lock_value_matches("nr5g_band", want, locks):
-            final_nr = set_results.get("nr5g_band", {}).get("final", "UNKNOWN")
-            final_nsa = set_results.get("nsa_nr5g_band", {}).get("final", "N/A")
-            got_nr = _normalize_lock_value("nr5g_band", locks.get("nr5g_band"))
-            got_nsa = _normalize_lock_value("nsa_nr5g_band", locks.get("nsa_nr5g_band"))
-            errors.append(
-                f"nr5g_band verify failed (wanted {want}, got nr5g={got_nr or '-'}, "
-                f"nsa_nr5g={got_nsa or '-'}, finals={final_nr}/{final_nsa})"
-            )
-
-    if "nrdc_mode" in normalized_requested:
-        want = normalized_requested["nrdc_mode"]
-        if not _lock_value_matches("nrdc_mode", want, locks):
-            final = set_results.get("nrdc_mode", {}).get("final", "UNKNOWN")
-            got = _normalize_lock_value("nrdc_mode", locks.get("nrdc_mode"))
-            errors.append(f"nrdc_mode verify failed (wanted {want}, got {got or '-'}, final={final})")
+    errors = _collect_lock_verify_errors(normalized_requested, set_results, locks)
+    if errors:
+        await asyncio.sleep(2.8)
+        lock_state = await _read_lock_status()
+        locks = lock_state["values"]
+        errors = _collect_lock_verify_errors(normalized_requested, set_results, locks)
 
     if not errors:
         async with _desired_locks_lock:

@@ -639,6 +639,56 @@ def _parse_qeng_strongest_nr_neighbour(
     return chosen
 
 
+def _nr_primary_band_label(
+    net: dict[str, Any] | None,
+    nr_serv: dict[str, Any] | None,
+    *,
+    prefer_qeng_serving: bool,
+) -> str | None:
+    """Human-readable NR band: optional QNWINFO NR row and/or 3GPP index from QENG serving NR."""
+
+    def from_nwinfo() -> str | None:
+        if not isinstance(net, dict):
+            return None
+        nb = net.get("nr_band")
+        if nb is None:
+            return None
+        s = str(nb).strip()
+        return s or None
+
+    def from_qeng() -> str | None:
+        if not isinstance(nr_serv, dict):
+            return None
+        b = nr_serv.get("band")
+        if isinstance(b, int):
+            return f"n{b}"
+        if b is not None:
+            s = str(b).strip()
+            return s or None
+        return None
+
+    q = from_qeng()
+    n = from_nwinfo()
+    if prefer_qeng_serving:
+        if q is not None:
+            return q
+        return n
+    if n is not None:
+        return n
+    return q
+
+
+def _nr_duplex_from_serving(nr_serv: dict[str, Any] | None) -> str | None:
+    """FDD/TDD from ``AT+QENG`` NR5G-SA serving cell (field after RAT). Not present on NR5G-NSA rows."""
+    if not isinstance(nr_serv, dict):
+        return None
+    d = nr_serv.get("duplex")
+    if d is None:
+        return None
+    s = str(d).strip().upper()
+    return s or None
+
+
 def _compose_nr_rf_kpi(
     net: dict[str, Any] | None,
     serving: dict[str, Any] | None,
@@ -655,6 +705,7 @@ def _compose_nr_rf_kpi(
     nr_s = _pick_nr5g_four_path(ms)
 
     nr_serv: dict[str, Any] | None = None
+    is_nr_sa = bool(isinstance(serving, dict) and isinstance(serving.get("nr_sa"), dict))
     if isinstance(serving, dict):
         nn = serving.get("nr_nsa")
         ns = serving.get("nr_sa")
@@ -666,11 +717,26 @@ def _compose_nr_rf_kpi(
     has_nr_net = bool(isinstance(net, dict) and (net.get("nr_band") is not None or net.get("nr_channel") is not None))
     has_nr = bool(nr_serv or nr_r or nr_q or nr_s or has_nr_net)
 
+    serving_nr_type: str | None = None
+    if isinstance(serving, dict):
+        nsa_d = serving.get("nr_sa")
+        nnsa_d = serving.get("nr_nsa")
+        if isinstance(nsa_d, dict):
+            serving_nr_type = nsa_d.get("mode") if isinstance(nsa_d.get("mode"), str) else None
+        elif isinstance(nnsa_d, dict):
+            serving_nr_type = nnsa_d.get("rat") if isinstance(nnsa_d.get("rat"), str) else None
+
     primary: dict[str, Any] = {
-        "band": net.get("nr_band") if isinstance(net, dict) else None,
+        "serving_nr_type": serving_nr_type,
+        "band": _nr_primary_band_label(
+            net if isinstance(net, dict) else None,
+            nr_serv,
+            prefer_qeng_serving=is_nr_sa,
+        ),
         "arfcn": None,
         "pci": None,
         "dl_bw": None,
+        "duplex": _nr_duplex_from_serving(nr_serv),
         "rsrp": None,
         "rsrq": None,
         "sinr": None,
