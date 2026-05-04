@@ -6,6 +6,7 @@ Notes for **v1.19**:
 
 - **`GET /`**: **Primary Cell** adds **Duplex (FDD/TDD)** from **`AT+QENG`** LTE serving. **NR5G RF KPI** adds **NR serving**, **Duplex**, and **NR band** display (QENG SA band preferred; see root **Changes in v1.19**).
 - **`POST /api/network/locks`**: Longer **`AT+QNWPREFCFG`** timeouts, settle + re-verify after **`mode_pref`**; serial **`send_command`** uses extra **wait_for** slack (`serial_engine`).
+- **PyInstaller (dev)**: from **`backend/`**, `pip install -r requirements.txt -r requirements-build.txt`, then **`.\build_exe.ps1`** → **`dist\5GModemTestDriver\`**. Entry: **`run_desktop.py`**; spec: **`modemtestdriver.spec`**. **Download:** prebuilt **`5GModemTestDriver-windows-amd64.zip`** on [GitHub Releases](https://github.com/Cloolalang/Mauve-1/releases) (see root **Download**). Planned: Windows **installer** (root **Planned features**).
 - OpenAPI / page header: **v1.19**.
 
 Notes for **v1.18**:

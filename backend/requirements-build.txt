@@ -1,0 +1,2 @@
+# Optional: create a Windows folder bundle with PyInstaller (see build_exe.ps1).
+pyinstaller>=6.3,<8

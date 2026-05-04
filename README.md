@@ -6,6 +6,55 @@ Local web app and backend for Quectel modem control and live LTE/NSA KPI monitor
 
 License: [GNU General Public License v2.0](LICENSE).
 
+## Download (prebuilt Windows app)
+
+Official binaries are **not** stored in the Git source tree. Each [GitHub Release](https://github.com/Cloolalang/Mauve-1/releases) includes a **`5GModemTestDriver-windows-amd64.zip`** asset (PyInstaller **onedir** bundle, built on **windows-latest** with **Python 3.12**).
+
+1. Open **[Releases](https://github.com/Cloolalang/Mauve-1/releases)** (or **Latest**).
+2. Download **`5GModemTestDriver-windows-amd64.zip`** for the version you want.
+3. Unzip to a **local folder** (avoid cloud-synced Desktop/Documents if those cause lock issues).
+4. Run **`5GModemTestDriver.exe`** inside the unzipped folder. Keep the console open; in a browser go to **`http://127.0.0.1:8011/`**.
+5. Windows / Defender may show a **SmartScreen** warning for an unsigned binary — use **More info → Run anyway** if you trust this project.
+
+Last-used COM port when using the exe is stored under **`%LOCALAPPDATA%\5GModemTestDriver\serial_last.json`**. Override bind/port with **`MODEM_DRIVER_BIND`**, **`MODEM_DRIVER_PORT`**, or **`--host` / `--port`**.
+
+## Build the Windows bundle from source
+
+Use this when you develop from git or need a local build without GitHub Actions.
+
+1. Clone or unzip the repo; use **Python 3.12** and create the venv (see **Quick start**, step **2**).
+2. From **`backend/`**:
+
+   ```powershell
+   .\.venv\Scripts\python.exe -m pip install -r requirements.txt -r requirements-build.txt
+   .\build_exe.ps1
+   ```
+
+   Or: **`pyinstaller --noconfirm modemtestdriver.spec`**.
+
+3. Output: **`backend\dist\5GModemTestDriver\`**. Close any running **`5GModemTestDriver.exe`** (or **`start.ps1`**) before rebuilding, or **`dist`** may be locked.
+
+Details: **`backend/run_desktop.py`**, **`backend/modemtestdriver.spec`**, **`backend/build_exe.ps1`**.
+
+### Maintainers: publish a Release with binaries
+
+1. Commit and push source changes on **`main`** (no **`dist/`** in git).
+2. Create and push an annotated **version tag** matching **`v*`** (example **`v1.19.1`**):
+
+   ```powershell
+   git tag -a v1.19.1 -m "v1.19.1"
+   git push origin v1.19.1
+   ```
+
+3. GitHub Actions runs **[.github/workflows/release-windows.yml](.github/workflows/release-windows.yml)**, builds the zip, and attaches **`5GModemTestDriver-windows-amd64.zip`** to that Release.
+4. Optionally edit the Release notes on GitHub after the job completes.
+
+To **test the build without a Release**, use **Actions → Release Windows bundle → Run workflow**, then download the **workflow artifact** ZIP.
+
+## Planned features
+
+- **Windows installer** (e.g. Inno Setup / WiX): install under Program Files, Start Menu shortcut to the bundled app, optional “open dashboard” after install, uninstall entry. PyInstaller **onedir** bundle first (see below); installer packaging is deferred.
+
 ## Quick start
 
 Do these in order on **Windows** with a **Robustel** modem/router (tested on **R5010**). COM port names and router labels vary by model.
@@ -62,6 +111,8 @@ cd C:\dev\Mauve-1-main\backend
 .\start.ps1
 ```
 
+**Optional — standalone Windows folder (no Python on PATH for end users):** after `pip install -r requirements.txt`, install build deps and run **`.\build_exe.ps1`** (PyInstaller **onedir**). Output: **`backend\dist\5GModemTestDriver\5GModemTestDriver.exe`**. Run the exe, then open **`http://127.0.0.1:8011/`**. Last-used COM port is stored under **`%LOCALAPPDATA%\5GModemTestDriver\serial_last.json`** when frozen. Override bind with **`MODEM_DRIVER_BIND`**, port with **`MODEM_DRIVER_PORT`**, or **`--host` / `--port`** on the exe. **Rebuild:** close any running **`5GModemTestDriver.exe`** (and **`start.ps1`**) before **`build_exe.ps1`**, or PyInstaller cannot replace **`dist\5GModemTestDriver`**. If the console flashes and closes on double-click, run the exe from PowerShell in that folder to see the error; fatal startup errors also show **Press Enter to exit**.
+
 ### 4. Open the dashboard and connect to the modem
 
 In the browser go to **`http://127.0.0.1:8011/`**.
@@ -70,7 +121,7 @@ Under **Serial Port**, choose your modem COM port and click **Reconnect**. Use *
 
 ### 5. Stop the app
 
-In **PowerShell**, click the window where **`.\start.ps1`** is running and press `Ctrl + C` to stop the backend.
+If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`**. If you ran **`5GModemTestDriver.exe`**, close its console window (or **`Ctrl + C`** there).
 
 ## Requirements
 
@@ -85,6 +136,7 @@ In **PowerShell**, click the window where **`.\start.ps1`** is running and press
 - **Primary Cell**: **Duplex** row under **Band** — **FDD** / **TDD** from **`AT+QENG`** LTE serving (`sample.servingcell.lte.duplex`); modem values **0** / **1** are shown as **FDD** / **TDD**.
 - **RAT / band lock** (**`POST /api/network/locks`**, **`AT+QNWPREFCFG`**): Longer timeouts for **`mode_pref`** (slow RAT changes) and other lock keys; serial **`send_command`** outer wait adds proportional slack so late **OK** lines are not dropped; after **`mode_pref`**, a short settle delay and a second read/verify pass reduce spurious **TIMEOUT** and empty readback when applying locks.
 - **Serial engine**: See above — more tolerant **wait_for** around slow modem responses.
+- **PyInstaller (optional dev build)**: **`backend/build_exe.ps1`** produces **`dist\5GModemTestDriver\`** (**onedir**); entry **`run_desktop.py`**. When frozen, last COM port preference is persisted under **`%LOCALAPPDATA%\5GModemTestDriver\`**. A downloadable **Windows installer** remains **planned** (see **Planned features**).
 
 **Changes in v1.18**
 

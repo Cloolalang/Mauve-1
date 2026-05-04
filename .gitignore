@@ -2,3 +2,5 @@ backend/.venv/
 backend/.state/
 backend/**/__pycache__/
 backend/**/*.pyc
+backend/build/
+backend/dist/

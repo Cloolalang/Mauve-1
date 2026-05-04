@@ -5,6 +5,7 @@ import ipaddress
 import json
 import logging
 import os
+import sys
 import re
 import shutil
 import subprocess
@@ -34,8 +35,13 @@ APP_VERSION = "1.19"
 
 
 def _serial_state_file_path() -> str:
-    # Keep per-project state under backend/.state
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".state", "serial_last.json"))
+    """Persist last-used serial port. Dev: ``backend/.state``; PyInstaller: ``%LOCALAPPDATA%\\5GModemTestDriver``."""
+    if getattr(sys, "frozen", False):
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        d = os.path.join(base, "5GModemTestDriver")
+    else:
+        d = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".state"))
+    return os.path.join(d, "serial_last.json")
 
 
 def _load_last_serial_state() -> dict | None:
