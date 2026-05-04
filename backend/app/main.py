@@ -30,7 +30,7 @@ from app.sim_usim_services import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.16"
+APP_VERSION = "1.17"
 
 
 def _serial_state_file_path() -> str:
@@ -1325,7 +1325,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="1.16.0",
+    version="1.17.0",
     lifespan=lifespan,
 )
 
@@ -2471,10 +2471,22 @@ async def home() -> HTMLResponse:
         el("ds-pdp").textContent = `${ds.active_pdp_contexts}/${ds.pdp_contexts}`;
       }
 
-      const cid1State = ds.cid1_active === true ? "UP" : ds.cid1_active === false ? "DOWN" : "-";
-      el("ds-cid1").textContent = cid1State;
-      el("ds-cid1").className = ds.cid1_active === true ? "ok" : ds.cid1_active === false ? "warn" : "";
-      el("ds-ip").textContent = ds.cid1_ip || "-";
+      /* QIACT can stay UP with a stale IP while RRC is searching — hide CID1/IP when not plausibly on-net. */
+      const suppressCid1IpKpi =
+        !inService ||
+        /\bSEARCH\b/i.test(String(srv.state || "")) ||
+        ds.eps_registered === false;
+
+      const cid1StateRaw = ds.cid1_active === true ? "UP" : ds.cid1_active === false ? "DOWN" : "-";
+      el("ds-cid1").textContent = suppressCid1IpKpi ? "-" : cid1StateRaw;
+      el("ds-cid1").className = suppressCid1IpKpi
+        ? ""
+        : ds.cid1_active === true
+          ? "ok"
+          : ds.cid1_active === false
+            ? "warn"
+            : "";
+      el("ds-ip").textContent = suppressCid1IpKpi ? "-" : ds.cid1_ip || "-";
 
       const attachText =
         ds.packet_attached === true ? "Attached" : ds.packet_attached === false ? "Detached" : "-";
@@ -2515,11 +2527,16 @@ async def home() -> HTMLResponse:
       const pci = lte.pcid;
       currentServingEarfcn = Number.isFinite(Number(earfcn)) ? Number(earfcn) : null;
       currentServingPci = Number.isFinite(Number(pci)) ? Number(pci) : null;
+      const lteRsrpN = Number(lte.rsrp);
+      const lteStateNoRf = /\bSEARCH\b/i.test(String(srv.state || ""));
+      /* Camped / connected LTE RF: RSRP must be a finite negative dBm. Non‑negative (e.g. 0) appears during invalid parse; SEARCH has no usable serving RF — do not feed charts or derivative KPIs. */
       primaryCellDataAvailable =
         inService &&
+        !lteStateNoRf &&
         Number.isFinite(currentServingEarfcn) &&
         Number.isFinite(currentServingPci) &&
-        Number.isFinite(Number(lte.rsrp));
+        Number.isFinite(lteRsrpN) &&
+        lteRsrpN < 0;
       if (earfcn === null || earfcn === undefined || pci === null || pci === undefined) {
         el("earfcnpci").textContent = "-";
       } else {
@@ -2527,16 +2544,20 @@ async def home() -> HTMLResponse:
       }
       el("cellid").textContent = lte.cell_id_hex || "-";
 
-      el("rsrp").textContent = fmt(lte.rsrp, " dBm");
-      el("nrsrp1").textContent = fmt(nb.strongest_rsrp, " dBm");
-      el("npci1").textContent = fmt(nb.strongest_pci);
-      el("nearfcn1").textContent = fmt(nb.strongest_earfcn);
+      el("rsrp").textContent = primaryCellDataAvailable ? fmt(lte.rsrp, " dBm") : "-";
+      el("nrsrp1").textContent = primaryCellDataAvailable ? fmt(nb.strongest_rsrp, " dBm") : "-";
+      el("npci1").textContent = primaryCellDataAvailable ? fmt(nb.strongest_pci) : "-";
+      el("nearfcn1").textContent = primaryCellDataAvailable ? fmt(nb.strongest_earfcn) : "-";
       const ic = nb.intra_neighbour_count;
       const xc = nb.inter_neighbour_count;
       el("nbr-intra-count").textContent =
-        ic !== null && ic !== undefined && Number.isFinite(Number(ic)) ? String(ic) : "-";
+        primaryCellDataAvailable && ic !== null && ic !== undefined && Number.isFinite(Number(ic))
+          ? String(ic)
+          : "-";
       el("nbr-inter-count").textContent =
-        xc !== null && xc !== undefined && Number.isFinite(Number(xc)) ? String(xc) : "-";
+        primaryCellDataAvailable && xc !== null && xc !== undefined && Number.isFinite(Number(xc))
+          ? String(xc)
+          : "-";
 
       const nrf = sample.nr_rf || {};
       const nrp = nrf.primary || {};
@@ -2569,9 +2590,9 @@ async def home() -> HTMLResponse:
       } else {
         el("idle-earfcn-rate").textContent = String(idleMob.primary_earfcn_reselections_per_min);
       }
-      el("rsrq").textContent = fmt(lte.rsrq, " dB");
-      el("sinr").textContent = fmt(qsinr.prx, " dB");
-      el("rssi").textContent = fmt(lte.rssi, " dBm");
+      el("rsrq").textContent = primaryCellDataAvailable ? fmt(lte.rsrq, " dB") : "-";
+      el("sinr").textContent = primaryCellDataAvailable ? fmt(qsinr.prx, " dB") : "-";
+      el("rssi").textContent = primaryCellDataAvailable ? fmt(lte.rssi, " dBm") : "-";
       const trendTs = sample.sample_ts || null;
       const advanceRfHistory = trendTs !== null && trendTs !== lastTrendSampleTs;
       const dominance =
@@ -2584,7 +2605,7 @@ async def home() -> HTMLResponse:
         Number.isFinite(Number(nb.strongest_rsrp))
           ? Number(lte.rsrp) - Number(nb.strongest_rsrp)
           : null;
-      el("dominance").textContent = fmt(dominance, " dB");
+      el("dominance").textContent = primaryCellDataAvailable ? fmt(dominance, " dB") : "-";
       const spEl = el("rsrq-static-proxy");
       if (!primaryCellDataAvailable) {
         resetCongestionProxyState();
@@ -2619,19 +2640,26 @@ async def home() -> HTMLResponse:
 
       if (trendTs !== lastTrendSampleTs) {
         lastTrendSampleTs = trendTs;
-        addRfSample("rsrp", lte.rsrp, trendTs, true);
-        addRfSample("rsrq", lte.rsrq, trendTs, true);
-        addRfSample("sinr", qsinr.prx, trendTs, true);
-        addRfSample("rssi", lte.rssi, trendTs, true);
-        addRfSample("dominance", dominance, trendTs, true);
-        pushRfNeighborIntraOverlap(nb, lte, trendTs);
-        drawRfCharts();
-        addBwSample(lte.dl_bw, trendTs);
         addCategorySample("state", srv.state || "-", trendTs);
-        addCategorySample("band", net.band || "-", trendTs);
         addCarrierReselSamples(idleMob, trendTs);
-        addInterNeighbourTrendSamples(nb, lte, trendTs);
-        addNeighbourCountTrendSamples(nb, trendTs);
+        if (primaryCellDataAvailable) {
+          addRfSample("rsrp", lte.rsrp, trendTs, true);
+          addRfSample("rsrq", lte.rsrq, trendTs, true);
+          addRfSample("sinr", qsinr.prx, trendTs, true);
+          addRfSample("rssi", lte.rssi, trendTs, true);
+          addRfSample("dominance", dominance, trendTs, true);
+          pushRfNeighborIntraOverlap(nb, lte, trendTs);
+          drawRfCharts();
+          addBwSample(lte.dl_bw, trendTs);
+          addCategorySample("band", net.band || "-", trendTs);
+          addInterNeighbourTrendSamples(nb, lte, trendTs);
+          addNeighbourCountTrendSamples(nb, trendTs);
+        } else {
+          drawRfCharts();
+          drawInterNbrRfCharts();
+          drawNeighbourCountCharts();
+          drawBandBwCombinedChart();
+        }
       }
       const hz = Number(payload?.poll_hz);
       if (Number.isFinite(hz) && hz > 0) currentPollHz = hz;
@@ -5109,10 +5137,10 @@ async def home() -> HTMLResponse:
       const ovRsrp = rfSmoothingEnabled ? smoothSeries(rfNeighborOverlap.rsrp, RF_SMOOTH_WINDOW) : rfNeighborOverlap.rsrp;
       const ovRsrq = rfSmoothingEnabled ? smoothSeries(rfNeighborOverlap.rsrq, RF_SMOOTH_WINDOW) : rfNeighborOverlap.rsrq;
       const ovRssi = rfSmoothingEnabled ? smoothSeries(rfNeighborOverlap.rssi, RF_SMOOTH_WINDOW) : rfNeighborOverlap.rssi;
-      drawMetricChartWithIntraNeighbour("rsrpchart", rsrp, ovRsrp, "dBm", pciColor, -105);
+      drawMetricChartWithIntraNeighbour("rsrpchart", rsrp, ovRsrp, "dBm", pciColor, -126);
       drawMetricChartWithIntraNeighbour("rsrqchart", rsrq, ovRsrq, "dB", pciColor, -15);
       drawMetricChart("sinrchart", sinr, "dB", pciColor, 0);
-      drawMetricChartWithIntraNeighbour("rssichart", rssi, ovRssi, "dBm", pciColor, -100);
+      drawMetricChartWithIntraNeighbour("rssichart", rssi, ovRssi, "dBm", pciColor, -95);
       drawMetricChart("dominancechart", dominance, "dB", "#50fa7b", 6);
       drawMetricChart("congestionproxychart", primaryCellDataAvailable ? congestionProxyHistory : [], "dB", "#ffb86c", 0);
       updatePrimaryRfStdDevKpis();
@@ -5125,9 +5153,9 @@ async def home() -> HTMLResponse:
       const rssi = rfSmoothingEnabled ? smoothSeries(nbrInterRssiHistory, RF_SMOOTH_WINDOW) : nbrInterRssiHistory;
       const domSource = rfSmoothingEnabled ? smoothSeries(nInterDomHistory, RF_SMOOTH_WINDOW) : nInterDomHistory;
       const dominanceInter = primaryCellDataAvailable ? domSource : [];
-      drawMetricChart("nbrintersrpchart", rsrp, "dBm", base, -105);
+      drawMetricChart("nbrintersrpchart", rsrp, "dBm", base, -126);
       drawMetricChart("nbrintersrqchart", rsrq, "dB", base, -15);
-      drawMetricChart("nbrinterrssichart", rssi, "dBm", base, -100);
+      drawMetricChart("nbrinterrssichart", rssi, "dBm", base, -95);
       drawMetricChart("nbridomchart", dominanceInter, "dB", "#bd93f9", 6);
     }
 

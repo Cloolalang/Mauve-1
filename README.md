@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 1.16**
+**Version 1.17**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.16** is shown in the page header).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.17** is shown in the page header).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -78,6 +78,12 @@ In **PowerShell**, click the window where **`.\start.ps1`** is running and press
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v1.17**
+
+- **RF chart thresholds** (red guide lines): **RSRP** **−126 dBm**, **RSSI** **−95 dBm** (primary + inter-neighbour traces).
+- **Search / no usable LTE RF**: trend buffers no longer gain points from placeholder zeros — **primary RF**, **intra neighbour overlays**, **inter-neighbour** RSRP/RSRQ/RSSI/dominance, **neighbour counts**, **band**, and **DL bandwidth** samples are appended only when the modem has plausible **camp** data (**QNWINFO** in service, **`AT+QENG` “servingcell”** not **SEARCH**, finite **RSRP &lt; 0 dBm**). **State** and **carrier re-selection** trends still update. Primary **Neighbour Cells RF** summary rows show **“—”** in that case.
+- **Data Service** card: **CID1** and **CID1 IP** show **“—”** when there is **no network service**, serving state is **SEARCH**, or **EPS** is **not registered** (avoids stale **QIACT** UP/IP while searching).
 
 **Changes in v1.16**
 
@@ -227,10 +233,10 @@ AT command catalog from current modem firmware:
   - State and Band trend charts now use the same per-cell color-changing segmented plotting as RF/BW/PCI charts
   - Intra-cell dominance trend is hidden when primary serving-cell data is unavailable
   - Thin red threshold lines on RF charts:
-    - RSRP min `-105 dBm`
+    - RSRP min `-126 dBm`
     - RSRQ min `-15 dB`
     - SINR min `0 dB`
-    - RSSI max `-25 dBm`
+    - RSSI min `-95 dBm`
     - Intra-cell dominance min `6 dB`
   - **Near-cell RF (field observation):** when very close to the site and **RSSI is above ~−25 dBm**, reported RF levels may look **compressed or capped**, as if **receiver gain reduction** (AGC / RF front-end behaviour) is limiting how strong the modem reports the signal—not an artefact of the dashboard.
   - Optional RF smoothing toggle (rolling average of last 10 samples) for RSRP/RSRQ/SINR/RSSI/dominance
