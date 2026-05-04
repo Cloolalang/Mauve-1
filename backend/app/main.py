@@ -31,7 +31,7 @@ from app.sim_usim_services import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.19"
+APP_VERSION = "1.20"
 
 
 def _serial_state_file_path() -> str:
@@ -87,6 +87,46 @@ _desired_locks: dict[str, str] = {}
 _desired_locks_lock = asyncio.Lock()
 _lock_guard_paused: bool = False
 _modem_exclusive_lock = asyncio.Lock()
+
+# Shared AT+CLCC for `/api/tools/voice-call-status` and host auto-answer (single serial queue).
+_voice_clcc_cache_ts: float = 0.0
+_voice_clcc_rows: list[dict] | None = None
+_voice_clcc_res_ok: bool = False
+_voice_clcc_data_lock = asyncio.Lock()
+_voice_clcc_fetch_lock = asyncio.Lock()
+VOICE_CLCC_CACHE_TTL_SEC = 0.7
+VOICE_CLCC_TIMEOUT_SEC = 2.5
+HOST_AUTO_ANSWER_POLL_SEC = 0.85
+VOICE_STATUS_POLL_MS = 1700
+
+
+async def _voice_clcc_snapshot(*, force: bool = False) -> tuple[list[dict], bool]:
+    """
+    One AT+CLCC path for VoLTE widget + host auto-answer.
+
+    When *force* is False, reuse a snapshot younger than ``VOICE_CLCC_CACHE_TTL_SEC`` so the
+    dashboard poll often skips the modem while the auto-answer worker is already polling CLCC.
+    """
+    global _voice_clcc_cache_ts, _voice_clcc_rows, _voice_clcc_res_ok
+    if not force:
+        now = time.time()
+        async with _voice_clcc_data_lock:
+            if _voice_clcc_rows is not None and (now - _voice_clcc_cache_ts) <= VOICE_CLCC_CACHE_TTL_SEC:
+                return list(_voice_clcc_rows), _voice_clcc_res_ok
+    async with _voice_clcc_fetch_lock:
+        now2 = time.time()
+        if not force:
+            async with _voice_clcc_data_lock:
+                if _voice_clcc_rows is not None and (now2 - _voice_clcc_cache_ts) <= VOICE_CLCC_CACHE_TTL_SEC:
+                    return list(_voice_clcc_rows), _voice_clcc_res_ok
+        clcc_res = await engine.send_command("AT+CLCC", timeout_sec=VOICE_CLCC_TIMEOUT_SEC)
+        rows = _parse_clcc_lines(clcc_res.get("lines", []))
+        ok = bool(clcc_res.get("ok"))
+        async with _voice_clcc_data_lock:
+            _voice_clcc_cache_ts = time.time()
+            _voice_clcc_rows = rows
+            _voice_clcc_res_ok = ok
+        return list(rows), ok
 
 
 def _exclusive_section_resume_kpi_snapshot() -> bool:
@@ -721,13 +761,12 @@ async def _host_auto_answer_worker(rings_target: int, password: str) -> None:
     sent_ata = False
     try:
         while True:
-            await asyncio.sleep(0.55)
+            await asyncio.sleep(HOST_AUTO_ANSWER_POLL_SEC)
             if (password or "") != DATA_GATE_UNLOCK_PASSWORD:
                 break
             try:
                 entries = list(engine.urc_log)
-                clcc_res = await engine.send_command("AT+CLCC", timeout_sec=3.0)
-                rows = _parse_clcc_lines(clcc_res.get("lines", []))
+                rows, _ = await _voice_clcc_snapshot(force=True)
                 voice_rows = _clcc_rows_voice_only(rows)
                 summary = _summarize_voice_call_state(voice_rows)
                 stats = [r.get("stat") for r in voice_rows]
@@ -1388,7 +1427,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="1.19.0",
+    version="1.20.0",
     lifespan=lifespan,
 )
 
@@ -1406,17 +1445,6 @@ async def home() -> HTMLResponse:
     h1 { margin: 0 0 12px 0; font-size: 22px; }
     .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
     .card { border: 1px solid #333; border-radius: 10px; padding: 12px; background: #1b1b1b; }
-    .card-compact-tile {
-      align-self: start;
-      max-width: min(264px, 100%);
-      width: 100%;
-      aspect-ratio: 1 / 1;
-      overflow-x: hidden;
-      overflow-y: auto;
-      padding: 10px;
-      box-sizing: border-box;
-    }
-    .card-compact-tile .row { margin-top: 6px; }
     .label { color: #9aa0a6; font-size: 12px; }
     .value { font-size: 20px; font-weight: 700; margin-top: 4px; }
     .row { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-top: 8px; }
@@ -1570,10 +1598,16 @@ async def home() -> HTMLResponse:
   </div>
 
   <div class="grid" style="margin-top:12px;">
-    <div class="card card-compact-tile">
+    <div class="card">
       <div class="label">Serial Port</div>
       <div class="row"><span class="label">Current</span><span id="serial-current">-</span></div>
+      <div class="row"><span class="label">Baud</span><span id="serial-baud">-</span></div>
       <div class="row"><span class="label">Open</span><span id="serial-open">-</span></div>
+      <div class="row"><span class="label">Queue depth</span><span id="serial-queue">-</span></div>
+      <div class="row" title="Command currently owning the AT port (if any)."><span class="label">AT active</span><span id="serial-at-active" class="mono" style="font-size:11px;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right;">-</span></div>
+      <div class="row" title="Estimated command rate from the last 60s window; /s uses recent 10s span."><span class="label">AT rate</span><span id="serial-at-rate">-</span></div>
+      <div class="row" title="Mean time from enqueue until OK/ERROR/+CME (includes waiting in queue)."><span class="label">AT avg turn</span><span id="serial-at-avg-ms">-</span></div>
+      <div class="row" title="Last completed command and worst in the rolling 60s window."><span class="label">AT last / max</span><span id="serial-at-last-max">-</span></div>
       <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
         <select id="serial-port-select" style="min-width:180px; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:4px 6px;"></select>
         <button id="btn-serial-refresh">Refresh Ports</button>
@@ -1682,9 +1716,6 @@ async def home() -> HTMLResponse:
 
     <div class="card">
       <div class="label">NR5G RF KPI</div>
-      <div class="label" style="font-size:11px; margin-top:4px; line-height:1.35;">
-        Primary: <strong>NR serving</strong> and <strong>duplex</strong> follow <code>AT+QENG</code> (NR5G-SA shows FDD/TDD and band index as n<b>NN</b>). In SA, that band index is preferred over <code>AT+QNWINFO</code> so it matches the serving line. Channel/RF: <code>AT+QNWINFO</code> NR row, QENG, <code>AT+QRSRP</code> / <code>AT+QRSRQ</code> / <code>AT+QSINR</code> (PRX). Neighbour: strongest NR on <code>AT+QENG="neighbourcell"</code> intra when listed.
-      </div>
       <div class="label" style="margin-top:10px;">Primary NR cell</div>
       <div class="row" title="NR layer reported on AT+QENG serving cell: NR5G-SA or NR5G-NSA."><span class="label">NR serving</span><span id="nr-rf-serving-type">-</span></div>
       <div class="row" title="In NR5G-SA this is the band index from the same AT+QENG line (shown as nNN). In NR5G-NSA, AT+QNWINFO is preferred when present, otherwise QENG."><span class="label">NR band</span><span id="nr-rf-band">-</span></div>
@@ -3320,9 +3351,43 @@ async def home() -> HTMLResponse:
         if (!r.ok) throw new Error(j.detail || "Serial status read failed");
         serialBaud = Number(j.baudrate) || serialBaud;
         el("serial-current").textContent = j.port || "-";
+        const baudEl = el("serial-baud");
+        if (baudEl) baudEl.textContent = j.baudrate != null && j.baudrate !== undefined ? String(j.baudrate) : "-";
         const openText = j.serial_open ? "Yes" : "No";
         el("serial-open").textContent = openText;
         el("serial-open").className = j.serial_open ? "ok" : "warn";
+
+        const fmtMsDisp = (v) =>
+          v === null || v === undefined || !Number.isFinite(Number(v)) ? "—" : `${Math.round(Number(v))} ms`;
+        const qn = j.queue_depth;
+        const qEl = el("serial-queue");
+        if (qEl) qEl.textContent = qn !== null && qn !== undefined ? String(qn) : "—";
+        const act = j.active_command;
+        const actEl = el("serial-at-active");
+        if (actEl) {
+          const s = act != null && String(act).length ? String(act) : "—";
+          actEl.textContent = s.length > 36 ? `${s.slice(0, 34)}…` : s;
+          actEl.title = act ? String(act) : "";
+        }
+        const rpm = Number(j.at_cmd_per_min_est);
+        const rps = Number(j.at_cmd_per_sec_10s);
+        const rateEl = el("serial-at-rate");
+        if (rateEl) {
+          const n60 = Number(j.at_cmd_count_60s);
+          if (!Number.isFinite(n60) || n60 <= 0) rateEl.textContent = "—";
+          else
+            rateEl.textContent = `${Number.isFinite(rpm) ? rpm.toFixed(1) : "—"}/min · ${
+              Number.isFinite(rps) ? rps.toFixed(2) : "—"
+            }/s`;
+        }
+        const avgEl = el("serial-at-avg-ms");
+        if (avgEl) avgEl.textContent = fmtMsDisp(j.at_cmd_latency_avg_ms);
+        const lmEl = el("serial-at-last-max");
+        if (lmEl) {
+          const last = fmtMsDisp(j.at_cmd_latency_last_ms);
+          const max = fmtMsDisp(j.at_cmd_latency_max_ms);
+          lmEl.textContent = last === "—" && max === "—" ? "—" : `${last} / ${max}`;
+        }
         if (showMessage) {
           el("serialmsg").textContent = j.last_open_error
             ? `Serial warning: ${j.last_open_error}`
@@ -3332,6 +3397,21 @@ async def home() -> HTMLResponse:
       } catch (e) {
         el("serial-open").textContent = "No";
         el("serial-open").className = "err";
+        const baudEl = el("serial-baud");
+        if (baudEl) baudEl.textContent = "-";
+        const qEl = el("serial-queue");
+        if (qEl) qEl.textContent = "—";
+        const actEl = el("serial-at-active");
+        if (actEl) {
+          actEl.textContent = "—";
+          actEl.title = "";
+        }
+        const rateEl = el("serial-at-rate");
+        if (rateEl) rateEl.textContent = "—";
+        const avgEl = el("serial-at-avg-ms");
+        if (avgEl) avgEl.textContent = "—";
+        const lmEl = el("serial-at-last-max");
+        if (lmEl) lmEl.textContent = "—";
         if (showMessage) el("serialmsg").textContent = `Serial status error: ${e.message || e}`;
         return null;
       }
@@ -7008,7 +7088,7 @@ async def home() -> HTMLResponse:
 
     setInterval(pollFallback, 2000);
     setInterval(pollNeighbourChannels, 3000);
-    setInterval(pollVoiceCallStatus, 1000);
+    setInterval(pollVoiceCallStatus, 1700);
     setInterval(pollAtLog, 1200);
     setInterval(() => readSerialStatus(false), 3000);
     setInterval(() => {
@@ -8204,8 +8284,7 @@ async def tools_host_auto_answer_set(body: HostAutoAnswerBody) -> dict[str, Any]
 @app.get("/api/tools/voice-call-status")
 async def tools_voice_call_status() -> dict[str, Any]:
     """Live voice indication from ``AT+CLCC`` plus *recent* URCs (RING / +CRING, time-limited)."""
-    clcc_res = await engine.send_command("AT+CLCC", timeout_sec=3.0)
-    rows = _parse_clcc_lines(clcc_res.get("lines", []))
+    rows, clcc_cmd_ok = await _voice_clcc_snapshot(force=False)
     voice_rows = _clcc_rows_voice_only(rows)
     summary = _summarize_voice_call_state(voice_rows)
     urc_entries = list(engine.urc_log)
@@ -8221,7 +8300,7 @@ async def tools_voice_call_status() -> dict[str, Any]:
         haa_snap = dict(_host_aa_status)
     return {
         "ok": True,
-        "clcc_ok": bool(clcc_res.get("ok")),
+        "clcc_ok": clcc_cmd_ok,
         "clcc": rows,
         "hook": summary["hook"],
         "line_state": summary["line_state"],

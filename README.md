@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 1.19**
+**Version 1.20**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.19** is shown in the page header with a **Lord Kelvin** quotation on measurement).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.20** is shown in the page header with a **Lord Kelvin** quotation on measurement).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -39,11 +39,11 @@ Details: **`backend/run_desktop.py`**, **`backend/modemtestdriver.spec`**, **`ba
 ### Maintainers: publish a Release with binaries
 
 1. Commit and push source changes on **`main`** (no **`dist/`** in git).
-2. Create and push an annotated **version tag** matching **`v*`** (example **`v1.19.1`**):
+2. Create and push an annotated **version tag** matching **`v*`** (example **`v1.20.0`**):
 
    ```powershell
-   git tag -a v1.19.1 -m "v1.19.1"
-   git push origin v1.19.1
+   git tag -a v1.20.0 -m "v1.20.0"
+   git push origin v1.20.0
    ```
 
 3. GitHub Actions runs **[.github/workflows/release-windows.yml](.github/workflows/release-windows.yml)**, builds the zip, and attaches **`5GModemTestDriver-windows-amd64.zip`** to that Release.
@@ -129,6 +129,12 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v1.20**
+
+- **Voice / CLCC load**: Shared **`AT+CLCC`** snapshot with short TTL for **`GET /api/tools/voice-call-status`** and host auto-answer (fewer duplicate modem round-trips when both run). Dashboard **`voice-call-status`** poll interval **~1.7 s**; host auto-answer loop **~0.85 s** (was more aggressive).
+- **Serial Port** card: **baud**, **queue depth**, **AT active** command, rolling **AT rate** (per minute + short window), **average / last / max** turnaround time (enqueue→final response, includes queue wait); **`GET /api/serial/status`** adds **`at_cmd_*`** metrics from **`serial_engine`**. Card layout is a normal grid card (no compact-tile scrollbar).
+- **NR5G RF KPI** card: removed the long inline “Primary: NR serving…” methodology blurb (row tooltips unchanged).
 
 **Changes in v1.19**
 

@@ -11,6 +11,9 @@ import serial
 
 FINAL_TOKENS = ("OK", "ERROR")
 
+AT_METRICS_WINDOW_SEC = 60.0
+AT_METRICS_SHORT_SEC = 10.0
+
 
 def _is_final_line(line: str) -> bool:
     up = line.strip().upper()
@@ -61,6 +64,9 @@ class SerialEngine:
         self.urc_log: deque[tuple[float, str]] = deque(maxlen=max_log_lines)
         self.tx_log: deque[str] = deque(maxlen=max_log_lines)
         self.at_trace: deque[str] = deque(maxlen=max_log_lines * 2)
+
+        self._at_metrics_lock = asyncio.Lock()
+        self._at_metric_events: deque[tuple[float, float]] = deque(maxlen=4000)
 
     @property
     def running(self) -> bool:
@@ -117,16 +123,62 @@ class SerialEngine:
         except asyncio.TimeoutError:
             if self._active_request is req:
                 self._active_request = None
+            elapsed_ms = int((time.time() - req.created_at) * 1000)
+            await self._record_at_command_complete(float(elapsed_ms))
             return {
                 "ok": False,
                 "command": req.command,
                 "final": "TIMEOUT",
                 "lines": list(req.lines),
-                "elapsed_ms": int((time.time() - req.created_at) * 1000),
+                "elapsed_ms": elapsed_ms,
             }
+
+    async def _record_at_command_complete(self, elapsed_ms: float) -> None:
+        """Rolling stats for completed AT commands (enqueue→final line, includes queue wait)."""
+        async with self._at_metrics_lock:
+            now = time.monotonic()
+            while self._at_metric_events and now - self._at_metric_events[0][0] > AT_METRICS_WINDOW_SEC:
+                self._at_metric_events.popleft()
+            self._at_metric_events.append((now, float(elapsed_ms)))
+
+    async def _at_metrics_snapshot(self) -> dict[str, Any]:
+        async with self._at_metrics_lock:
+            now = time.monotonic()
+            while self._at_metric_events and now - self._at_metric_events[0][0] > AT_METRICS_WINDOW_SEC:
+                self._at_metric_events.popleft()
+            events = list(self._at_metric_events)
+
+        if not events:
+            return {
+                "at_cmd_count_60s": 0,
+                "at_cmd_count_10s": 0,
+                "at_cmd_per_min_est": 0.0,
+                "at_cmd_per_sec_10s": 0.0,
+                "at_cmd_latency_avg_ms": None,
+                "at_cmd_latency_last_ms": None,
+                "at_cmd_latency_max_ms": None,
+            }
+
+        ms_all = [e[1] for e in events]
+        span = max(1e-6, now - events[0][0])
+        n = len(events)
+        ev10 = [e for e in events if now - e[0] <= AT_METRICS_SHORT_SEC]
+        n10 = len(ev10)
+        span10 = max(1e-6, min(AT_METRICS_SHORT_SEC, now - ev10[0][0])) if ev10 else 1.0
+
+        return {
+            "at_cmd_count_60s": n,
+            "at_cmd_count_10s": n10,
+            "at_cmd_per_min_est": (n / span) * 60.0,
+            "at_cmd_per_sec_10s": n10 / span10,
+            "at_cmd_latency_avg_ms": round(sum(ms_all) / n, 1),
+            "at_cmd_latency_last_ms": round(ms_all[-1], 1),
+            "at_cmd_latency_max_ms": round(max(ms_all), 1),
+        }
 
     async def status(self) -> dict[str, Any]:
         serial_open = bool(self._serial and getattr(self._serial, "is_open", False))
+        metrics = await self._at_metrics_snapshot()
         return {
             "running": self._running,
             "port": self.port,
@@ -139,6 +191,7 @@ class SerialEngine:
             "recent_rx": list(self.rx_log)[-30:],
             "recent_urc": [{"ts": ts, "line": ln} for ts, ln in list(self.urc_log)[-30:]],
             "recent_at_trace": list(self.at_trace)[-80:],
+            **metrics,
         }
 
     async def at_log(self, limit: int = 120) -> dict[str, Any]:
@@ -210,13 +263,15 @@ class SerialEngine:
                 await asyncio.to_thread(self._serial.flush)
             except Exception as exc:  # noqa: BLE001
                 if req.done and not req.done.done():
+                    elapsed_ms = int((time.time() - req.created_at) * 1000)
+                    await self._record_at_command_complete(float(elapsed_ms))
                     req.done.set_result(
                         {
                             "ok": False,
                             "command": req.command,
                             "final": f"WRITE_ERROR: {exc}",
                             "lines": list(req.lines),
-                            "elapsed_ms": int((time.time() - req.created_at) * 1000),
+                            "elapsed_ms": elapsed_ms,
                         }
                     )
                 self._active_request = None
@@ -255,13 +310,15 @@ class SerialEngine:
             if _is_final_line(line):
                 final = line.strip()
                 if req.done and not req.done.done():
+                    elapsed_ms = int((time.time() - req.created_at) * 1000)
+                    await self._record_at_command_complete(float(elapsed_ms))
                     req.done.set_result(
                         {
                             "ok": final.upper() == "OK",
                             "command": req.command,
                             "final": final,
                             "lines": list(req.lines),
-                            "elapsed_ms": int((time.time() - req.created_at) * 1000),
+                            "elapsed_ms": elapsed_ms,
                         }
                     )
                 self._active_request = None
