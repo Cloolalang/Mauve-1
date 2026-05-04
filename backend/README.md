@@ -1,6 +1,12 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 1.17** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.17.0**).
+**Version 1.18** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.18.0**).
+
+Notes for **v1.18**:
+
+- **`GET /`**: Page header includes the Lord Kelvin quotation next to **v1.18**; default unlock password for gated API actions is **kelvin** (see root changelog).
+- **`sample.qcainfo`**: **AT+QCAINFO** parse (`carriers`, `earfcn_active`, `dl_bw_aggregate_mhz`, …) on **`GET /api/kpi/latest`** / **`WS /ws/kpi`**; dashboard **Primary Cell** rows **EARFCN active (CA)** and **CA aggregated DL BW** plus combined CA trend chart (see root **Changes in v1.18**).
+- **iperf3** **`POST /api/tools/iperf-test`**: body may include **`parallel_streams`** (default in UI **10**).
 
 Notes for **v1.17**:
 
@@ -129,11 +135,11 @@ Failures from the modem (**`+CME ERROR`**, **`ERROR`**, **TIMEOUT**, etc.) surfa
 - `GET /api/network/data-gate`
   - reads packet-data gate status (attach + active PDP contexts)
 - `POST /api/network/apn`
-  - body example: `{ "apn": "key", "cid": 1, "pdp_type": "IP", "password": "nacelle", "reactivate": true }`
+  - body example: `{ "apn": "key", "cid": 1, "pdp_type": "IP", "password": "kelvin", "reactivate": true }`
   - writes `AT+CGDCONT`, mirrors **`AT+QICSGP`** (Quectel), optionally `QIDEACT`/`QIACT`; wrong password → `403`
 - `POST /api/network/data-gate`
   - body example: `{ "inhibit": true }` to inhibit data
-  - body example: `{ "inhibit": false, "password": "nacelle" }` to allow data
+  - body example: `{ "inhibit": false, "password": "kelvin" }` to allow data
   - `password` is required for allow-data operation; wrong password returns `403`
 - `GET /api/network/locks` (read QNWPREFCFG RAT/LTE/NR lock state)
 - `POST /api/network/locks`
@@ -151,10 +157,10 @@ Failures from the modem (**`+CME ERROR`**, **`ERROR`**, **TIMEOUT**, etc.) surfa
 - `GET /api/tools/host-auto-answer`
   - **auto-answer** watcher status (dashboard VoLTE card)
 - `POST /api/tools/host-auto-answer`
-  - body example: `{ "enabled": true, "rings": 2, "password": "nacelle" }` — PC **`ATA`** after N rings (URC or **`CLCC`** timed fallback)
+  - body example: `{ "enabled": true, "rings": 2, "password": "kelvin" }` — PC **`ATA`** after N rings (URC or **`CLCC`** timed fallback)
 - `POST /api/tools/volte-test`
-  - password-gated call test (`password: "nacelle"`)
-  - body example: `{ "number": "+447700900123", "hold_sec": 10, "connect_timeout_sec": 120, "password": "nacelle" }` — optional **`connect_timeout_sec`** (20–300, default **120**) waits for voice **CLCC** active/held
+  - password-gated call test (`password: "kelvin"`)
+  - body example: `{ "number": "+447700900123", "hold_sec": 10, "connect_timeout_sec": 120, "password": "kelvin" }` — optional **`connect_timeout_sec`** (20–300, default **120**) waits for voice **CLCC** active/held
   - dials, monitors via `AT+CLCC`, holds, hangs up (with retry), and returns call KPIs + release info (`AT+CEER`)
 - `GET /api/sim/high-level`
   - high-level SIM/operator reads (`AT+CGSN`, `AT+CIMI`, `AT+QSPN`, `AT+COPS?`, `AT+CPOL?`)
@@ -182,7 +188,7 @@ UK-only COPS scan scope currently applies:
 - LTE bands: `1:3:7:8:20:28:32:38`
 - NR bands: `1:3:8:28:78`
 
-VoLTE call testing and **`POST /api/tools/host-auto-answer`** use the same unlock secret as data allow (`nacelle`). **`POST /api/tools/auto-answer`** (modem S0) does too if used.
+VoLTE call testing and **`POST /api/tools/host-auto-answer`** use the same unlock secret as data allow (`kelvin`). **`POST /api/tools/auto-answer`** (modem S0) does too if used.
 
 Example:
 

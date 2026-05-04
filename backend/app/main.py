@@ -30,7 +30,7 @@ from app.sim_usim_services import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.17"
+APP_VERSION = "1.18"
 
 
 def _serial_state_file_path() -> str:
@@ -289,6 +289,12 @@ class IperfTestBody(BaseModel):
         default=None,
         gt=0,
         description="Optional TCP bitrate limit for iperf -b (Mbit/s), e.g. 10 → -b 10M.",
+    )
+    parallel_streams: int = Field(
+        default=10,
+        ge=1,
+        le=64,
+        description="iperf3 parallel streams (-P), 1–64.",
     )
 
 
@@ -1028,7 +1034,7 @@ MNO_PROFILES: dict[str, dict[str, str | None]] = {
     "h3g": {"label": "H3G", "plmn": "23420"},
     "auto": {"label": "Auto", "plmn": None},
 }
-DATA_GATE_UNLOCK_PASSWORD = "nacelle"
+DATA_GATE_UNLOCK_PASSWORD = "kelvin"
 
 _ALLOWED_APN_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_")
 
@@ -1325,7 +1331,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="1.17.0",
+    version="1.18.0",
     lifespan=lifespan,
 )
 
@@ -1444,13 +1450,39 @@ async def home() -> HTMLResponse:
       font-weight: 600;
       color: #c8c8c8;
     }
+    .page-title-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 8px 18px;
+      margin: 0 0 8px 0;
+    }
+    .page-title-row h1 {
+      margin: 0;
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .header-quote {
+      margin: 0;
+      font-size: 12px;
+      font-style: italic;
+      color: #9aa0a6;
+      line-height: 1.45;
+      max-width: 44em;
+    }
+    .header-quote-attrib {
+      font-style: normal;
+      color: #8a9099;
+    }
   </style>
 </head>
 <body>
-  <h1 style="display:flex; align-items:baseline; gap:10px; flex-wrap:wrap;">
-    5G ModemTestDriver
-    <span class="label" style="font-size:13px; font-weight:600; letter-spacing:0.02em;">v__APP_VERSION__</span>
-  </h1>
+  <div class="page-title-row">
+    <h1>5G ModemTestDriver <span class="label" style="font-size:13px; font-weight:600; letter-spacing:0.02em;">v__APP_VERSION__</span></h1>
+    <p class="header-quote">"When you can measure what you are speaking about, and express it in numbers, you know something about it" <span class="header-quote-attrib">— Lord Kelvin</span></p>
+  </div>
   <div class="label">Live modem snapshot from COM AT engine</div>
   <div id="status" class="label" style="margin-top:8px;">Connecting...</div>
   <div style="margin-top:10px; display:flex; gap:14px; align-items:center; flex-wrap:wrap;">
@@ -1565,6 +1597,8 @@ async def home() -> HTMLResponse:
       <div class="row"><span class="label">Band</span><span id="band">-</span></div>
       <div class="row"><span class="label">DL/UL BW</span><span id="bwpair">-</span></div>
       <div class="row"><span class="label">EARFCN/PCI</span><span id="earfcnpci">-</span></div>
+      <div class="row" title="LTE carrier aggregation component carriers from AT+QCAINFO (PCC then SCC)."><span class="label">EARFCN active (CA)</span><span id="earfcn-active-ca">-</span></div>
+      <div class="row" title="Sum of decoded DL bandwidths (MHz) for each PCC/SCC row in AT+QCAINFO where the bandwidth field maps to RB count or QENG-style 0–5 index. — if a component cannot be decoded it is omitted from the sum."><span class="label">CA aggregated DL BW</span><span id="ca-agg-dl-bw">-</span></div>
       <div class="row"><span class="label">Cell ID</span><span id="cellid">-</span></div>
       <div class="label" style="margin-top:10px;">Primary cell RF KPI</div>
       <div class="row"><span class="label">RSRP</span><span id="rsrp">-</span></div>
@@ -1591,20 +1625,20 @@ async def home() -> HTMLResponse:
     <div class="card">
       <div class="label">NR5G RF KPI</div>
       <div class="label" style="font-size:11px; margin-top:4px; line-height:1.35;">
-        Primary: <code>AT+QNWINFO</code> NR row (band, channel), <code>AT+QENG</code> serving NR, and NR5G row of <code>AT+QRSRP</code> / <code>AT+QRSRQ</code> / <code>AT+QSINR</code> (PRX). Neighbour: strongest NR row on <code>AT+QENG="neighbourcell"</code> intra when the modem lists NR neighbours on that carrier. RSSI shown only if reported for NR.
+        Primary: <code>AT+QNWINFO</code> NR row (band, channel), <code>AT+QENG</code> serving NR (including DL bandwidth when present), and NR5G row of <code>AT+QRSRP</code> / <code>AT+QRSRQ</code> / <code>AT+QSINR</code> (PRX). Neighbour: strongest NR row on <code>AT+QENG="neighbourcell"</code> intra when the modem lists NR neighbours (bandwidth usually not available there).
       </div>
       <div class="label" style="margin-top:10px;">Primary NR cell</div>
       <div class="row"><span class="label">Band</span><span id="nr-rf-band">-</span></div>
       <div class="row"><span class="label">ARFCN</span><span id="nr-rf-arfcn">-</span></div>
       <div class="row"><span class="label">PCI</span><span id="nr-rf-pci">-</span></div>
-      <div class="row"><span class="label">RSSI</span><span id="nr-rf-rssi">-</span></div>
+      <div class="row"><span class="label">DL bandwidth</span><span id="nr-rf-dl-bw">-</span></div>
       <div class="row"><span class="label">RSRP</span><span id="nr-rf-rsrp">-</span></div>
       <div class="row"><span class="label">RSRQ</span><span id="nr-rf-rsrq">-</span></div>
       <div class="row"><span class="label">SNIR (QSINR PRX)</span><span id="nr-rf-sinr">-</span></div>
       <div class="label" style="margin-top:10px;">1st strongest NR neighbour (intra)</div>
       <div class="row"><span class="label">ARFCN</span><span id="nr-nbr-arfcn">-</span></div>
       <div class="row"><span class="label">PCI</span><span id="nr-nbr-pci">-</span></div>
-      <div class="row"><span class="label">RSSI</span><span id="nr-nbr-rssi">-</span></div>
+      <div class="row"><span class="label">DL bandwidth</span><span id="nr-nbr-dl-bw">-</span></div>
       <div class="row"><span class="label">RSRP</span><span id="nr-nbr-rsrp">-</span></div>
       <div class="row"><span class="label">RSRQ</span><span id="nr-nbr-rsrq">-</span></div>
       <div class="row"><span class="label">SNIR</span><span id="nr-nbr-sinr">-</span></div>
@@ -1688,8 +1722,23 @@ async def home() -> HTMLResponse:
     </div>
 
     <div class="card">
+      <div class="label">CA EARFCN config &amp; aggregated bandwidth</div>
+      <canvas id="ca-combo-chart" width="420" height="180" style="width:100%; height:180px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
+    </div>
+
+    <div class="card">
       <div class="label">State Trend</div>
       <canvas id="statechart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
+    </div>
+
+    <div class="card">
+      <div class="label">RAT Trend</div>
+      <div class="label" style="font-size:11px; margin-top:4px; line-height:1.35;">
+        Same value as the RAT field above: LTE row from <code>AT+QENG</code> when present, else serving mode string (NR5G-NSA / NR5G-SA / …).
+      </div>
+      <canvas id="ratchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
     </div>
 
@@ -1702,6 +1751,42 @@ async def home() -> HTMLResponse:
     <div class="card">
       <div class="label">Primary Carrier re-selection rate — LTE PCell /min</div>
       <canvas id="carrier-resel-chart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
+    </div>
+
+    <div class="card">
+      <div class="label">NR5G — Primary &amp; 1st strongest intra NR neighbour RSRP (dBm)</div>
+      <canvas id="nr-rsrpchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
+    </div>
+    <div class="card">
+      <div class="label">NR5G — Primary &amp; 1st strongest intra NR neighbour RSRQ (dB)</div>
+      <canvas id="nr-rsrqchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
+    </div>
+    <div class="card">
+      <div class="label">NR5G — Primary &amp; 1st strongest intra NR neighbour SNIR (dB)</div>
+      <canvas id="nr-sinrchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
+    </div>
+    <div class="card">
+      <div class="label">NR5G — Primary &amp; 1st strongest intra NR neighbour RSRP dominance (dB)</div>
+      <canvas id="nr-dominancechart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
+    </div>
+    <div class="card">
+      <div class="label">NR5G — Primary ARFCN trend</div>
+      <canvas id="nr-arfcnchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
+    </div>
+    <div class="card">
+      <div class="label">NR5G — Primary PCI trend</div>
+      <canvas id="nr-pcichart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
+    </div>
+    <div class="card">
+      <div class="label">NR5G — Primary band &amp; DL bandwidth trend</div>
+      <canvas id="nr-bandbwcombinedchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
     </div>
 
@@ -1896,7 +1981,7 @@ async def home() -> HTMLResponse:
         <div class="label">Endpoint host:</div>
         <input id="iperf-host" value="iperf.as42831.net" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
       </div>
-      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:8px;">
+      <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; margin-top:8px;">
         <div>
           <div class="label">Port:</div>
           <input id="iperf-port" type="number" min="1" max="65535" value="5361" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
@@ -1904,6 +1989,10 @@ async def home() -> HTMLResponse:
         <div>
           <div class="label">Duration (s):</div>
           <input id="iperf-duration" type="number" min="1" max="300" value="1" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+        </div>
+        <div>
+          <div class="label">Parallel streams (-P):</div>
+          <input id="iperf-parallel" type="number" min="1" max="64" value="10" title="iperf3 -P: number of parallel client streams" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
         </div>
       </div>
       <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:8px;">
@@ -2058,6 +2147,8 @@ async def home() -> HTMLResponse:
     /** Fixed chart colours for combined KPI charts — avoid carrier re-selection EARFCN/PCI (#ff8ec8 / #87ceeb) and cell-key palette. */
     const CHART_COLOR_BAND_TREND = "#f39c12";
     const CHART_COLOR_DL_BW_TREND = "#1abc9c";
+    const CHART_COLOR_NR_BAND_TREND = "#7dcea0";
+    const CHART_COLOR_NR_DL_BW_TREND = "#58d68d";
     const CHART_COLOR_NBR_COUNT_INTRA = "#b8e986";
     const CHART_COLOR_NBR_COUNT_INTER = "#af7ac5";
     const cellColorMap = new Map();
@@ -2111,6 +2202,8 @@ async def home() -> HTMLResponse:
     let serialPorts = [];
     let currentServingEarfcn = null;
     let currentServingPci = null;
+    let currentNrArfcn = null;
+    let currentNrPci = null;
     let lastDataService = {};
     const iperfHistory = [];
     const iperfDlHistory = [];
@@ -2137,6 +2230,11 @@ async def home() -> HTMLResponse:
     let lastCongestionUi = { proxy: null, baselineCount: 0 };
     /** Intra-EARFCN strongest neighbour (QENG neighbourcell intra) per metric for RF trend overlays. */
     const rfNeighborOverlap = { rsrp: [], rsrq: [], rssi: [] };
+    const nrRfHistory = { rsrp: [], rsrq: [], sinr: [], dominance: [] };
+    const nrRfNeighborOverlap = { rsrp: [], rsrq: [], sinr: [] };
+    const nrBwHistory = [];
+    const nrArfcnHistory = [];
+    const nrPciHistory = [];
     const nbrInterRsrpHistory = [];
     const nbrInterRsrqHistory = [];
     const nbrInterRssiHistory = [];
@@ -2144,9 +2242,10 @@ async def home() -> HTMLResponse:
     const nbrIntraCountHistory = [];
     const nbrInterCountHistory = [];
     const bwHistory = [];
+    const caAggBwHistory = [];
     const carrierReselPciHistory = [];
     const carrierReselEarfcnHistory = [];
-    const categoryHistory = { state: [], band: [] };
+    const categoryHistory = { state: [], rat: [], band: [], caEarfcn: [], nrBand: [] };
     let chartWindowMs = 600 * 1000;
     const RF_SMOOTH_WINDOW = 10;
     const RF_STD_SAMPLE_MIN = 2;
@@ -2155,6 +2254,7 @@ async def home() -> HTMLResponse:
     let chartGapModeEnabled = false;
     let currentPollHz = 2.0;
     let primaryCellDataAvailable = false;
+    let nrCellDataAvailable = false;
     let lastTrendSampleTs = null;
     let rfChartTooltipEl = null;
     const RF_HOVER_CANVAS_IDS = [
@@ -2169,7 +2269,16 @@ async def home() -> HTMLResponse:
       "nbrinterrssichart",
       "nbridomchart",
       "nbrcountcombinedchart",
-      "bandbwcombinedchart"
+      "bandbwcombinedchart",
+      "nr-rsrpchart",
+      "nr-rsrqchart",
+      "nr-sinrchart",
+      "nr-dominancechart",
+      "nr-arfcnchart",
+      "nr-pcichart",
+      "nr-bandbwcombinedchart",
+      "ratchart",
+      "ca-combo-chart"
     ];
     const RF_CHART_TITLE_BY_ID = {
       rsrpchart: "Primary and 1st strongest intra-cell neighbour RSRP Trend (dBm)",
@@ -2183,7 +2292,16 @@ async def home() -> HTMLResponse:
       nbrinterrssichart: "1st strongest inter-cell neighbour RSSI Trend (dBm)",
       nbridomchart: "Primary and 1st strongest inter-cell neighbour RSRP dominance Trend (dB)",
       nbrcountcombinedchart: "Neighbour cell count trend — intra & inter (LTE)",
-      bandbwcombinedchart: "Primary cell band & DL bandwidth trend"
+      bandbwcombinedchart: "Primary cell band & DL bandwidth trend",
+      ratchart: "RAT Trend",
+      "ca-combo-chart": "CA EARFCN config & aggregated bandwidth",
+      "nr-rsrpchart": "NR5G — Primary & 1st strongest intra NR neighbour RSRP (dBm)",
+      "nr-rsrqchart": "NR5G — Primary & 1st strongest intra NR neighbour RSRQ (dB)",
+      "nr-sinrchart": "NR5G — Primary & 1st strongest intra NR neighbour SNIR (dB)",
+      "nr-dominancechart": "NR5G — Primary & 1st strongest intra NR neighbour RSRP dominance (dB)",
+      "nr-arfcnchart": "NR5G — Primary ARFCN trend",
+      "nr-pcichart": "NR5G — Primary PCI trend",
+      "nr-bandbwcombinedchart": "NR5G — Primary band & DL bandwidth trend"
     };
     const copsModeName = (m) => {
       if (m === 0) return "0 (Auto)";
@@ -2245,8 +2363,14 @@ async def home() -> HTMLResponse:
       pruneHistoryByAge(nbrIntraCountHistory, nowMs);
       pruneHistoryByAge(nbrInterCountHistory, nowMs);
       pruneHistoryByAge(bwHistory, nowMs);
+      pruneHistoryByAge(caAggBwHistory, nowMs);
       pruneHistoryByAge(carrierReselPciHistory, nowMs);
       pruneHistoryByAge(carrierReselEarfcnHistory, nowMs);
+      Object.values(nrRfHistory).forEach((h) => pruneHistoryByAge(h, nowMs));
+      Object.values(nrRfNeighborOverlap).forEach((h) => pruneHistoryByAge(h, nowMs));
+      pruneHistoryByAge(nrBwHistory, nowMs);
+      pruneHistoryByAge(nrArfcnHistory, nowMs);
+      pruneHistoryByAge(nrPciHistory, nowMs);
       Object.values(categoryHistory).forEach((h) => pruneHistoryByAge(h, nowMs));
     }
 
@@ -2275,8 +2399,11 @@ async def home() -> HTMLResponse:
       drawInterNbrRfCharts();
       drawNeighbourCountCharts();
       drawBandBwCombinedChart();
+      drawCaCombinedChart();
       drawCarrierReselChart();
       drawCategoryCharts();
+      drawNrRfCharts();
+      drawNrBandBwCombinedChart();
     }
 
     function updateChartGapButton() {
@@ -2311,7 +2438,10 @@ async def home() -> HTMLResponse:
         rollingSum += v;
         if (i >= windowSize) rollingSum -= Number(samples[i - windowSize].v) || 0;
         const count = Math.min(i + 1, windowSize);
-        out.push({ t: samples[i].t, v: rollingSum / count, c: samples[i].c });
+        const src = samples[i];
+        const row = { t: src.t, v: rollingSum / count, c: src.c };
+        if (Array.isArray(src.carriers)) row.carriers = src.carriers;
+        out.push(row);
       }
       return out;
     }
@@ -2348,6 +2478,62 @@ async def home() -> HTMLResponse:
         return false;
       }
       return true;
+    }
+
+    function nrServingKey() {
+      if (Number.isFinite(currentNrArfcn) && Number.isFinite(currentNrPci)) return `${currentNrArfcn}/${currentNrPci}`;
+      return null;
+    }
+
+    function nbrNrKey(nrn) {
+      const row = nrn || {};
+      const a = row.arfcn;
+      const p = row.pci;
+      if (a === null || a === undefined || p === null || p === undefined) return null;
+      const an = Number(a);
+      const pn = Number(p);
+      if (!Number.isFinite(an) || !Number.isFinite(pn)) return null;
+      return `${an}/${pn}`;
+    }
+
+    /** Same NR ARFCN as primary; exclude same PCI (modem may echo serving row in neighbour list). */
+    function intraNrStrongestDistinctFromServing(nrn, nrp) {
+      const N = nrn || {};
+      const P = nrp || {};
+      const pa = Number(P.arfcn);
+      const na = Number(N.arfcn);
+      if (!Number.isFinite(pa) || !Number.isFinite(na) || pa !== na) return false;
+      const sp = Number(P.pci);
+      const np = Number(N.pci);
+      if (
+        sp !== null &&
+        sp !== undefined &&
+        np !== null &&
+        np !== undefined &&
+        Number.isFinite(sp) &&
+        Number.isFinite(np) &&
+        sp === np
+      ) {
+        return false;
+      }
+      return true;
+    }
+
+    function pushNrNeighborIntraOverlap(nrn, nrp, trendTsSec) {
+      if (!intraNrStrongestDistinctFromServing(nrn, nrp)) return;
+      const nk = nbrNrKey(nrn);
+      if (!nk) return;
+      const t = Number(trendTsSec);
+      const tMs = Number.isFinite(t) ? t * 1000 : Date.now();
+      const pushOne = (kind, raw) => {
+        const vv = Number(raw);
+        if (!Number.isFinite(vv) || !nrRfNeighborOverlap[kind]) return;
+        nrRfNeighborOverlap[kind].push({ t: tMs, v: vv, c: nk });
+        pruneHistoryByAge(nrRfNeighborOverlap[kind], tMs);
+      };
+      pushOne("rsrp", nrn && nrn.rsrp);
+      pushOne("rsrq", nrn && nrn.rsrq);
+      pushOne("sinr", nrn && nrn.sinr);
     }
 
     /** Same EARFCN as LTE primary: push strongest intra-cell neighbour RF samples for overlay charts. */
@@ -2542,6 +2728,29 @@ async def home() -> HTMLResponse:
       } else {
         el("earfcnpci").textContent = `${earfcn}/${pci}`;
       }
+      const qca = sample.qcainfo || {};
+      const qcaTxt = qca.earfcn_active_text;
+      const qcaEl = el("earfcn-active-ca");
+      if (qcaEl) {
+        if (qcaTxt !== null && qcaTxt !== undefined && String(qcaTxt).trim()) {
+          qcaEl.textContent = String(qcaTxt).trim();
+        } else if (!inService || !qca.query_ok) {
+          qcaEl.textContent = "-";
+        } else {
+          qcaEl.textContent = "—";
+        }
+      }
+      const caAggEl = el("ca-agg-dl-bw");
+      if (caAggEl) {
+        const am = qca.dl_bw_aggregate_mhz;
+        if (am !== null && am !== undefined && Number.isFinite(Number(am)) && Number(am) > 0) {
+          caAggEl.textContent = `${Number(am)} MHz`;
+        } else if (!inService || !qca.query_ok) {
+          caAggEl.textContent = "-";
+        } else {
+          caAggEl.textContent = "—";
+        }
+      }
       el("cellid").textContent = lte.cell_id_hex || "-";
 
       el("rsrp").textContent = primaryCellDataAvailable ? fmt(lte.rsrp, " dBm") : "-";
@@ -2568,17 +2777,44 @@ async def home() -> HTMLResponse:
       el("nr-rf-arfcn").textContent =
         nrp.arfcn !== null && nrp.arfcn !== undefined && Number.isFinite(Number(nrp.arfcn)) ? String(nrp.arfcn) : nrDash;
       el("nr-rf-pci").textContent = fmt(nrp.pci);
-      el("nr-rf-rssi").textContent = fmt(nrp.rssi, " dBm");
+      el("nr-rf-dl-bw").textContent =
+        nrp.dl_bw !== null && nrp.dl_bw !== undefined && Number.isFinite(Number(nrp.dl_bw)) ? `${nrp.dl_bw} MHz` : nrDash;
       el("nr-rf-rsrp").textContent = fmt(nrp.rsrp, " dBm");
       el("nr-rf-rsrq").textContent = fmt(nrp.rsrq, " dB");
       el("nr-rf-sinr").textContent = fmt(nrp.sinr, " dB");
       el("nr-nbr-arfcn").textContent =
         nrn && nrn.arfcn !== null && nrn.arfcn !== undefined && Number.isFinite(Number(nrn.arfcn)) ? String(nrn.arfcn) : nrDash;
       el("nr-nbr-pci").textContent = nrn ? fmt(nrn.pci) : nrDash;
-      el("nr-nbr-rssi").textContent = nrn ? fmt(nrn.rssi, " dBm") : nrDash;
+      el("nr-nbr-dl-bw").textContent =
+        nrn && nrn.dl_bw !== null && nrn.dl_bw !== undefined && Number.isFinite(Number(nrn.dl_bw))
+          ? `${nrn.dl_bw} MHz`
+          : nrDash;
       el("nr-nbr-rsrp").textContent = nrn ? fmt(nrn.rsrp, " dBm") : nrDash;
       el("nr-nbr-rsrq").textContent = nrn ? fmt(nrn.rsrq, " dB") : nrDash;
       el("nr-nbr-sinr").textContent = nrn ? fmt(nrn.sinr, " dB") : nrDash;
+
+      const nrRsrpGate = Number(nrp.rsrp);
+      currentNrArfcn =
+        nrp.arfcn !== null && nrp.arfcn !== undefined && Number.isFinite(Number(nrp.arfcn)) ? Number(nrp.arfcn) : null;
+      currentNrPci =
+        nrp.pci !== null && nrp.pci !== undefined && Number.isFinite(Number(nrp.pci)) ? Number(nrp.pci) : null;
+      nrCellDataAvailable =
+        !!nrf.available &&
+        currentNrArfcn !== null &&
+        currentNrPci !== null &&
+        Number.isFinite(nrRsrpGate) &&
+        nrRsrpGate < 0;
+      const nrDominance =
+        intraNrStrongestDistinctFromServing(nrn, nrp) &&
+        nrp.rsrp !== null &&
+        nrp.rsrp !== undefined &&
+        nrn &&
+        nrn.rsrp !== null &&
+        nrn.rsrp !== undefined &&
+        Number.isFinite(Number(nrp.rsrp)) &&
+        Number.isFinite(Number(nrn.rsrp))
+          ? Number(nrp.rsrp) - Number(nrn.rsrp)
+          : null;
 
       if (idleMob.intra_freq_pci_reselections_per_min === undefined || idleMob.intra_freq_pci_reselections_per_min === null) {
         el("idle-pci-rate").textContent = "-";
@@ -2641,6 +2877,7 @@ async def home() -> HTMLResponse:
       if (trendTs !== lastTrendSampleTs) {
         lastTrendSampleTs = trendTs;
         addCategorySample("state", srv.state || "-", trendTs);
+        addCategorySample("rat", ratVal, trendTs);
         addCarrierReselSamples(idleMob, trendTs);
         if (primaryCellDataAvailable) {
           addRfSample("rsrp", lte.rsrp, trendTs, true);
@@ -2652,6 +2889,16 @@ async def home() -> HTMLResponse:
           drawRfCharts();
           addBwSample(lte.dl_bw, trendTs);
           addCategorySample("band", net.band || "-", trendTs);
+          {
+            const qcaTr = sample.qcainfo || {};
+            const ears = Array.isArray(qcaTr.earfcn_active)
+              ? qcaTr.earfcn_active.filter((x) => Number.isFinite(Number(x)))
+              : [];
+            const caTrVal = ears.length ? ears.map((x) => String(x)).join("+") : "-";
+            addCategorySample("caEarfcn", caTrVal, trendTs, { carriers: qcaTr.carriers });
+            const caAggMhz = Number(qcaTr.dl_bw_aggregate_mhz);
+            if (Number.isFinite(caAggMhz) && caAggMhz > 0) addCaAggBwSample(caAggMhz, trendTs, qcaTr.carriers);
+          }
           addInterNeighbourTrendSamples(nb, lte, trendTs);
           addNeighbourCountTrendSamples(nb, trendTs);
         } else {
@@ -2659,7 +2906,24 @@ async def home() -> HTMLResponse:
           drawInterNbrRfCharts();
           drawNeighbourCountCharts();
           drawBandBwCombinedChart();
+          drawCaCombinedChart();
+          drawCategoryCharts();
         }
+        if (nrCellDataAvailable) {
+          addNrRfSample("rsrp", nrp.rsrp, trendTs, true);
+          addNrRfSample("rsrq", nrp.rsrq, trendTs, true);
+          addNrRfSample("sinr", nrp.sinr, trendTs, true);
+          addNrRfSample("dominance", nrDominance, trendTs, true);
+          pushNrNeighborIntraOverlap(nrn, nrp, trendTs);
+          addNrBwSample(nrp.dl_bw, trendTs);
+          const nbStr =
+            nrp.band !== null && nrp.band !== undefined && String(nrp.band).trim() ? String(nrp.band).trim() : "-";
+          addCategorySample("nrBand", nbStr, trendTs);
+          addNrNumericSample(nrArfcnHistory, nrp.arfcn, trendTs);
+          addNrNumericSample(nrPciHistory, nrp.pci, trendTs);
+        }
+        drawNrRfCharts();
+        drawNrBandBwCombinedChart();
       }
       const hz = Number(payload?.poll_hz);
       if (Number.isFinite(hz) && hz > 0) currentPollHz = hz;
@@ -2709,11 +2973,27 @@ async def home() -> HTMLResponse:
       el("lock-ratmode").textContent = v.mode_pref || "-";
       el("lock-lteband").textContent = v.lte_band || "-";
       const lteVal = String(v.lte_band || "");
-      const caPolicy = !lteVal ? "-" : (lteVal === "0" || lteVal.includes(":") ? "ON (multi/all)" : "OFF (single band)");
+      const lteNorm = lteVal.replace(/\s/g, "");
+      const bandTokens = lteVal
+        .split(/[:,]/)
+        .map((s) => s.trim())
+        .filter((s) => /^\d+$/.test(s));
+      const caPolicy =
+        !lteVal
+          ? "-"
+          : lteNorm === "0"
+            ? "ON (multi/all)"
+            : bandTokens.length > 1
+              ? "ON (multi/all)"
+              : "OFF (single band)";
       el("lock-ca").textContent = caPolicy;
       el("lock-nrband").textContent = v.nr5g_band || v.nsa_nr5g_band || "-";
       el("lock-nrdc").textContent = String(v.nrdc_mode || "0") === "1" ? "ON" : "OFF";
       el("input-nrdc-enable").checked = String(v.nrdc_mode || "0") === "1";
+      const caChk = el("input-ca-enable");
+      if (caChk) {
+        caChk.checked = caPolicy === "ON (multi/all)";
+      }
       const ratSel = el("input-ratmode");
       if (v.mode_pref && Array.from(ratSel.options).some((o) => o.value === v.mode_pref)) {
         ratSel.value = v.mode_pref;
@@ -3185,12 +3465,23 @@ async def home() -> HTMLResponse:
       const nrBand = (el("input-nrband").value || "").trim();
       const body = {};
       if (ratMode) body.rat_mode = ratMode;
-      if (lteBandManual) {
-        body.lte_band = lteBandManual;
-      } else if (caOn && caOnBands) {
-        body.lte_band = caOnBands;
-      } else if (caSingle) {
-        body.lte_band = caSingle;
+      /* CA ON: multi-band / all bands. CA OFF: single band only — must NOT send Set LTE bands list or modem stays in CA. */
+      if (caOn) {
+        if (lteBandManual) body.lte_band = lteBandManual;
+        else if (caOnBands) body.lte_band = caOnBands;
+        else body.lte_band = "0";
+      } else {
+        if (caSingle) {
+          body.lte_band = caSingle;
+        } else if (lteBandManual) {
+          const parts = lteBandManual.split(/[:,]/).map((s) => s.trim()).filter(Boolean);
+          if (parts.length === 1) body.lte_band = parts[0];
+          else {
+            el("lockmsg").textContent =
+              "CA OFF: enter one LTE band in 'CA OFF single LTE band', or clear 'Set LTE bands' to a single value.";
+            return;
+          }
+        }
       }
       if (nrBand) body.nr5g_band = nrBand;
       body.nrdc_mode = el("input-nrdc-enable").checked ? 1 : 0;
@@ -3654,6 +3945,7 @@ async def home() -> HTMLResponse:
       const host = String(el("iperf-host")?.value || "").trim();
       const port = Number(el("iperf-port")?.value || 5361);
       const durationSec = Number(el("iperf-duration")?.value || 1);
+      const parallelStreams = Number(el("iperf-parallel")?.value || 10);
       const direction = String(el("iperf-direction")?.value || "both").trim().toLowerCase();
       const protocol = String(el("iperf-protocol")?.value || "tcp").trim().toLowerCase();
       const bindIp = resolveIperfBindIp();
@@ -3671,6 +3963,11 @@ async def home() -> HTMLResponse:
       }
       if (!Number.isFinite(durationSec) || durationSec < 1 || durationSec > 300) {
         el("iperf-msg").textContent = "Duration must be 1..300 seconds.";
+        iperfBusy = false;
+        return;
+      }
+      if (!Number.isFinite(parallelStreams) || parallelStreams < 1 || parallelStreams > 64 || parallelStreams !== Math.trunc(parallelStreams)) {
+        el("iperf-msg").textContent = "Parallel streams must be an integer 1..64.";
         iperfBusy = false;
         return;
       }
@@ -3694,7 +3991,8 @@ async def home() -> HTMLResponse:
             duration_sec: Math.trunc(durationSec),
             direction: dir,
             protocol,
-            mobile_only: true
+            mobile_only: true,
+            parallel_streams: Math.trunc(parallelStreams)
           };
           if (bindIp) body.bind_ip = bindIp;
           if (speedLimit !== null) body.bitrate_limit_mbps = speedLimit;
@@ -3753,6 +4051,7 @@ async def home() -> HTMLResponse:
             `Command: ${cmd}`,
             `Direction: ${j.direction || "-"}`,
             `Protocol: ${j.protocol || protocol}`,
+            `Parallel streams: ${j.parallel_streams != null ? j.parallel_streams : parallelStreams}`,
             `Bound IP: ${j.bind_ip || "-"}`,
             `Mobile adapter: ${j.detected_mobile_adapter || "-"}`,
             `Measured throughput: ${shownMbps}`,
@@ -3969,6 +4268,37 @@ async def home() -> HTMLResponse:
       if (!deferDraw) drawRfCharts();
     }
 
+    function addNrRfSample(kind, value, tsSec = null, deferDraw = false) {
+      if (value === null || value === undefined) return;
+      const v = Number(value);
+      if (!Number.isFinite(v) || !nrRfHistory[kind]) return;
+      const t = tsSec ? Number(tsSec) * 1000 : Date.now();
+      const cellKey = nrServingKey();
+      nrRfHistory[kind].push({ t, v, c: cellKey });
+      pruneHistoryByAge(nrRfHistory[kind], t);
+      if (!deferDraw) drawNrRfCharts();
+    }
+
+    function addNrBwSample(value, tsSec = null) {
+      const v = Number(value);
+      if (!Number.isFinite(v)) return;
+      const t = tsSec ? Number(tsSec) * 1000 : Date.now();
+      const cellKey = nrServingKey();
+      nrBwHistory.push({ t, v, c: cellKey });
+      pruneHistoryByAge(nrBwHistory, t);
+      drawNrBandBwCombinedChart();
+    }
+
+    function addNrNumericSample(historyArr, rawVal, tsSec) {
+      if (!Array.isArray(historyArr)) return;
+      const v = Number(rawVal);
+      if (!Number.isFinite(v)) return;
+      const t = tsSec ? Number(tsSec) * 1000 : Date.now();
+      const cellKey = nrServingKey();
+      historyArr.push({ t, v, c: cellKey });
+      pruneHistoryByAge(historyArr, t);
+    }
+
     function sampleStdDev(values) {
       if (!Array.isArray(values) || values.length < 2) return null;
       let sum = 0;
@@ -4040,7 +4370,22 @@ async def home() -> HTMLResponse:
       drawBandBwCombinedChart();
     }
 
-    function addCategorySample(kind, value, tsSec = null) {
+    function addCaAggBwSample(value, tsSec = null, carriers = null) {
+      const v = Number(value);
+      if (!Number.isFinite(v) || v <= 0) return;
+      const t = tsSec ? Number(tsSec) * 1000 : Date.now();
+      const cellKey =
+        Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
+          ? `${currentServingEarfcn}/${currentServingPci}`
+          : null;
+      const row = { t, v, c: cellKey };
+      if (Array.isArray(carriers)) row.carriers = carriers;
+      caAggBwHistory.push(row);
+      pruneHistoryByAge(caAggBwHistory, t);
+      drawCaCombinedChart();
+    }
+
+    function addCategorySample(kind, value, tsSec = null, meta = null) {
       if (!categoryHistory[kind]) return;
       const v = String(value || "-").trim() || "-";
       const t = tsSec ? Number(tsSec) * 1000 : Date.now();
@@ -4048,10 +4393,13 @@ async def home() -> HTMLResponse:
         Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci)
           ? `${currentServingEarfcn}/${currentServingPci}`
           : null;
-      categoryHistory[kind].push({ t, v, c: cellKey });
+      const row = { t, v, c: cellKey };
+      if (kind === "caEarfcn" && meta && Array.isArray(meta.carriers)) row.carriers = meta.carriers;
+      categoryHistory[kind].push(row);
       pruneHistoryByAge(categoryHistory[kind], t);
       drawCategoryCharts();
       if (kind === "band") drawBandBwCombinedChart();
+      if (kind === "nrBand") drawNrBandBwCombinedChart();
     }
 
     function addCarrierReselSamples(idleMob, tsSec) {
@@ -4904,6 +5252,29 @@ async def home() -> HTMLResponse:
       tip.style.top = `${Math.max(8, top)}px`;
     }
 
+    function showRfCategoryHoverTooltip(clientX, clientY, title, lines, cellKey) {
+      const tip = ensureRfChartTooltipEl();
+      const ck =
+        cellKey !== null && cellKey !== undefined && String(cellKey).trim() !== ""
+          ? String(cellKey).trim()
+          : "—";
+      const parts = Array.isArray(lines) ? lines.map((x) => String(x ?? "").trim()).filter(Boolean) : [String(lines || "").trim()].filter(Boolean);
+      const body = parts.join("\\n");
+      tip.textContent = body ? `${title}\\n${body}\\nEARFCN/PCI: ${ck}` : `${title}\\nEARFCN/PCI: ${ck}`;
+      tip.style.display = "block";
+      const pad = 14;
+      let left = clientX + pad;
+      let top = clientY + pad;
+      const tw = tip.offsetWidth;
+      const th = tip.offsetHeight;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      if (left + tw > vw - 8) left = vw - tw - 8;
+      if (top + th > vh - 8) top = vh - th - 8;
+      tip.style.left = `${Math.max(8, left)}px`;
+      tip.style.top = `${Math.max(8, top)}px`;
+    }
+
     function handleRfMetricChartHoverMove(ev) {
       const canvas = ev.currentTarget;
       if (!canvas || !RF_HOVER_CANVAS_IDS.includes(canvas.id)) return;
@@ -5077,6 +5448,249 @@ async def home() -> HTMLResponse:
         return;
       }
 
+      if (hover && hover.caCombo) {
+        const {
+          earfcnSamples,
+          catLabels,
+          catLevels,
+          topY0,
+          topY1,
+          mhzSamples,
+          mhzYMin,
+          mhzSpan,
+          botY0,
+          botY1,
+          x0,
+          x1,
+          gapBreakMs,
+          chartNowMs,
+          cwMs,
+          gapMode
+        } = hover;
+        const chartTitle = RF_CHART_TITLE_BY_ID[canvas.id] || canvas.id;
+        const inTop = my >= topY1 - 2 && my <= topY0 + 2;
+        const inBot = my >= botY1 - 2 && my <= botY0 + 2;
+        if (inTop && Array.isArray(earfcnSamples) && earfcnSamples.length && catLabels.length) {
+          const samples = earfcnSamples;
+          const labels = catLabels;
+          const levels = catLevels;
+          const y0 = topY0;
+          const y1 = topY1;
+          const vlab = "EARFCN (CA)";
+          const lv = Math.max(1, levels);
+          const n = samples.length;
+          const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
+          const windowStartMs = chartNowMs - cwMs;
+          const xFor = (p, i) => {
+            if (!gapMode) return x0 + i * xStep;
+            const t = Number(p?.t);
+            if (!Number.isFinite(t)) return x0 + i * xStep;
+            const ratio = Math.max(0, Math.min(1, (t - windowStartMs) / cwMs));
+            return x0 + ratio * (x1 - x0);
+          };
+          const yForVal = (vStr) => {
+            const idx = labels.indexOf(vStr);
+            const ix = idx < 0 ? 0 : idx;
+            return y0 - (ix / lv) * (y0 - y1);
+          };
+          const distPointToSeg = (px, py, xa, ya, xb, yb) => {
+            const dx = xb - xa;
+            const dy = yb - ya;
+            const len2 = dx * dx + dy * dy;
+            if (len2 < 1e-12) return Math.hypot(px - xa, py - ya);
+            let t = ((px - xa) * dx + (py - ya) * dy) / len2;
+            t = Math.max(0, Math.min(1, t));
+            const nx = xa + t * dx;
+            const ny = ya + t * dy;
+            return Math.hypot(px - nx, py - ny);
+          };
+          const fmtTime = (tsMs) => {
+            const t = Number(tsMs);
+            if (!Number.isFinite(t)) return "—";
+            return new Date(t).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+          };
+          let bestPtD2 = Infinity;
+          let bestPt = null;
+          for (let i = 0; i < samples.length; i++) {
+            const p = samples[i];
+            if (!caSampleHasScc(p)) continue;
+            const x = xFor(p, i);
+            const y = yForVal(p.v);
+            const d2 = (mx - x) * (mx - x) + (my - y) * (my - y);
+            if (d2 < bestPtD2) {
+              bestPtD2 = d2;
+              bestPt = { p, x, y };
+            }
+          }
+          const hitPtR = 22;
+          let bestSegD = Infinity;
+          let bestSeg = null;
+          for (let i = 1; i < samples.length; i++) {
+            const p0 = samples[i - 1];
+            const p1 = samples[i];
+            if (!caSampleHasScc(p0) || !caSampleHasScc(p1)) continue;
+            if (labels.indexOf(p0.v) < 0 || labels.indexOf(p1.v) < 0) continue;
+            const t0 = Number(p0?.t);
+            const t1 = Number(p1?.t);
+            if (gapMode && Number.isFinite(t0) && Number.isFinite(t1) && t1 - t0 > gapBreakMs) continue;
+            const xA = xFor(p0, i - 1);
+            const yA = yForVal(p0.v);
+            const xB = xFor(p1, i);
+            const yB = yForVal(p1.v);
+            const d = distPointToSeg(mx, my, xA, yA, xB, yB);
+            if (d < bestSegD) {
+              bestSegD = d;
+              bestSeg = { p0, p1 };
+            }
+          }
+          const hitLineR = 12;
+          if (bestPt && bestPtD2 <= hitPtR * hitPtR) {
+            const p = bestPt.p;
+            const rat = String(p.v ?? "—");
+            showRfCategoryHoverTooltip(ev.clientX, ev.clientY, `${chartTitle} — EARFCN active`, [`${vlab}: ${rat}`, `Time: ${fmtTime(p.t)}`], p.c);
+            return;
+          }
+          if (bestSeg && bestSegD <= hitLineR) {
+            const { p0, p1 } = bestSeg;
+            const a = String(p0.v ?? "—");
+            const b = String(p1.v ?? "—");
+            const ratLine = a === b ? `${vlab}: ${a}` : `${vlab}: ${a} → ${b}`;
+            showRfCategoryHoverTooltip(
+              ev.clientX,
+              ev.clientY,
+              `${chartTitle} — EARFCN active`,
+              [ratLine, `Time: ${fmtTime(p0.t)} – ${fmtTime(p1.t)}`],
+              p1.c || p0.c
+            );
+            return;
+          }
+        }
+        if (inBot && Array.isArray(mhzSamples) && mhzSamples.length) {
+          const samples = mhzSamples;
+          const y0 = botY0;
+          const y1 = botY1;
+          const yMin = mhzYMin;
+          const span = mhzSpan;
+          const subHover = { samples, x0, x1, cwMs, chartNowMs, gapMode };
+          let best = null;
+          let bestD = Infinity;
+          const hitR = 22;
+          const hitR2 = hitR * hitR;
+          for (let i = 0; i < samples.length; i++) {
+            const p = samples[i];
+            const x = metricHoverXFor(p, i, subHover);
+            const y = y0 - ((p.v - yMin) / span) * (y0 - y1);
+            const dx = mx - x;
+            const dy = my - y;
+            const d2 = dx * dx + dy * dy;
+            if (d2 < bestD) {
+              bestD = d2;
+              best = { p, v: Number(p?.v) };
+            }
+          }
+          if (best && bestD <= hitR2) {
+            const shown =
+              Number.isFinite(best.v) ? (Math.abs(best.v % 1) < 0.05 ? best.v.toFixed(1) : best.v.toFixed(2)) : "-";
+            showRfChartTooltip(ev.clientX, ev.clientY, `${chartTitle} — Aggregated DL BW`, shown, "MHz", best.p?.c);
+            return;
+          }
+        }
+        hideRfChartTooltip();
+        return;
+      }
+
+      if (hover && hover.categoryStep && Array.isArray(hover.samples) && hover.samples.length) {
+        const { samples, labels, levels, x0, x1, y0, y1, gapBreakMs, chartNowMs, cwMs, gapMode } = hover;
+        const vlab = hover.categoryValueLabel && String(hover.categoryValueLabel).trim() ? String(hover.categoryValueLabel).trim() : "RAT";
+        const lv = Math.max(1, levels);
+        const n = samples.length;
+        const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
+        const windowStartMs = chartNowMs - cwMs;
+        const xFor = (p, i) => {
+          if (!gapMode) return x0 + i * xStep;
+          const t = Number(p?.t);
+          if (!Number.isFinite(t)) return x0 + i * xStep;
+          const ratio = Math.max(0, Math.min(1, (t - windowStartMs) / cwMs));
+          return x0 + ratio * (x1 - x0);
+        };
+        const yForVal = (vStr) => {
+          const idx = labels.indexOf(vStr);
+          const ix = idx < 0 ? 0 : idx;
+          return y0 - (ix / lv) * (y0 - y1);
+        };
+        const distPointToSeg = (px, py, xa, ya, xb, yb) => {
+          const dx = xb - xa;
+          const dy = yb - ya;
+          const len2 = dx * dx + dy * dy;
+          if (len2 < 1e-12) return Math.hypot(px - xa, py - ya);
+          let t = ((px - xa) * dx + (py - ya) * dy) / len2;
+          t = Math.max(0, Math.min(1, t));
+          const nx = xa + t * dx;
+          const ny = ya + t * dy;
+          return Math.hypot(px - nx, py - ny);
+        };
+        const fmtTime = (tsMs) => {
+          const t = Number(tsMs);
+          if (!Number.isFinite(t)) return "—";
+          return new Date(t).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        };
+        let bestPtD2 = Infinity;
+        let bestPt = null;
+        for (let i = 0; i < samples.length; i++) {
+          const p = samples[i];
+          const x = xFor(p, i);
+          const y = yForVal(p.v);
+          const d2 = (mx - x) * (mx - x) + (my - y) * (my - y);
+          if (d2 < bestPtD2) {
+            bestPtD2 = d2;
+            bestPt = { p, x, y };
+          }
+        }
+        const hitPtR = 22;
+        let bestSegD = Infinity;
+        let bestSeg = null;
+        for (let i = 1; i < samples.length; i++) {
+          const p0 = samples[i - 1];
+          const p1 = samples[i];
+          const t0 = Number(p0?.t);
+          const t1 = Number(p1?.t);
+          if (gapMode && Number.isFinite(t0) && Number.isFinite(t1) && t1 - t0 > gapBreakMs) continue;
+          const xA = xFor(p0, i - 1);
+          const yA = yForVal(p0.v);
+          const xB = xFor(p1, i);
+          const yB = yForVal(p1.v);
+          const d = distPointToSeg(mx, my, xA, yA, xB, yB);
+          if (d < bestSegD) {
+            bestSegD = d;
+            bestSeg = { p0, p1 };
+          }
+        }
+        const hitLineR = 12;
+        const chartTitle = RF_CHART_TITLE_BY_ID[canvas.id] || canvas.id;
+        if (bestPt && bestPtD2 <= hitPtR * hitPtR) {
+          const p = bestPt.p;
+          const rat = String(p.v ?? "—");
+          showRfCategoryHoverTooltip(ev.clientX, ev.clientY, chartTitle, [`${vlab}: ${rat}`, `Time: ${fmtTime(p.t)}`], p.c);
+          return;
+        }
+        if (bestSeg && bestSegD <= hitLineR) {
+          const { p0, p1 } = bestSeg;
+          const a = String(p0.v ?? "—");
+          const b = String(p1.v ?? "—");
+          const ratLine = a === b ? `${vlab}: ${a}` : `${vlab}: ${a} → ${b}`;
+          showRfCategoryHoverTooltip(
+            ev.clientX,
+            ev.clientY,
+            chartTitle,
+            [ratLine, `Time: ${fmtTime(p0.t)} – ${fmtTime(p1.t)}`],
+            p1.c || p0.c
+          );
+          return;
+        }
+        hideRfChartTooltip();
+        return;
+      }
+
       if (!hover || !Array.isArray(hover.samples) || hover.samples.length === 0) {
         hideRfChartTooltip();
         return;
@@ -5144,6 +5758,25 @@ async def home() -> HTMLResponse:
       drawMetricChart("dominancechart", dominance, "dB", "#50fa7b", 6);
       drawMetricChart("congestionproxychart", primaryCellDataAvailable ? congestionProxyHistory : [], "dB", "#ffb86c", 0);
       updatePrimaryRfStdDevKpis();
+    }
+
+    function drawNrRfCharts() {
+      const rsrp = rfSmoothingEnabled ? smoothSeries(nrRfHistory.rsrp, RF_SMOOTH_WINDOW) : nrRfHistory.rsrp;
+      const rsrq = rfSmoothingEnabled ? smoothSeries(nrRfHistory.rsrq, RF_SMOOTH_WINDOW) : nrRfHistory.rsrq;
+      const sinr = rfSmoothingEnabled ? smoothSeries(nrRfHistory.sinr, RF_SMOOTH_WINDOW) : nrRfHistory.sinr;
+      const dominanceSource = rfSmoothingEnabled ? smoothSeries(nrRfHistory.dominance, RF_SMOOTH_WINDOW) : nrRfHistory.dominance;
+      const dominance = nrCellDataAvailable ? dominanceSource : [];
+      const primKey = nrServingKey();
+      const pciColor = colorForCellKey(primKey, "#39ff14");
+      const ovRsrp = rfSmoothingEnabled ? smoothSeries(nrRfNeighborOverlap.rsrp, RF_SMOOTH_WINDOW) : nrRfNeighborOverlap.rsrp;
+      const ovRsrq = rfSmoothingEnabled ? smoothSeries(nrRfNeighborOverlap.rsrq, RF_SMOOTH_WINDOW) : nrRfNeighborOverlap.rsrq;
+      const ovSinr = rfSmoothingEnabled ? smoothSeries(nrRfNeighborOverlap.sinr, RF_SMOOTH_WINDOW) : nrRfNeighborOverlap.sinr;
+      drawMetricChartWithIntraNeighbour("nr-rsrpchart", rsrp, ovRsrp, "dBm", pciColor, -126);
+      drawMetricChartWithIntraNeighbour("nr-rsrqchart", rsrq, ovRsrq, "dB", pciColor, -15);
+      drawMetricChartWithIntraNeighbour("nr-sinrchart", sinr, ovSinr, "dB", pciColor, 0);
+      drawMetricChart("nr-dominancechart", dominance, "dB", "#adff2f", 6);
+      drawMetricChart("nr-arfcnchart", nrCellDataAvailable ? nrArfcnHistory : [], "ARFCN", "#dda0dd", null, false);
+      drawMetricChart("nr-pcichart", nrCellDataAvailable ? nrPciHistory : [], "PCI", "#f0e68c", null, true);
     }
 
     function drawInterNbrRfCharts() {
@@ -5288,6 +5921,38 @@ async def home() -> HTMLResponse:
       const cutoff = nowMs - chartWindowMs;
       const bands = categoryHistory.band.filter((p) => Number(p?.t) >= cutoff);
       const bws = bwHistory.filter((p) => Number(p?.t) >= cutoff);
+      const map = new Map();
+      for (const p of bands) {
+        const k = Number(p.t);
+        if (!Number.isFinite(k)) continue;
+        const row = map.get(k) || { t: k, band: null, bw: null, c: null };
+        row.band = p.v;
+        row.c = p.c;
+        map.set(k, row);
+      }
+      for (const p of bws) {
+        const k = Number(p.t);
+        if (!Number.isFinite(k)) continue;
+        const row = map.get(k) || { t: k, band: null, bw: null, c: null };
+        const bv = Number(p.v);
+        if (Number.isFinite(bv)) row.bw = bv;
+        row.c = row.c || p.c;
+        map.set(k, row);
+      }
+      const sorted = [...map.values()].sort((a, b) => a.t - b.t);
+      let lastBand = "-";
+      return sorted.map((m) => {
+        const b = m.band !== null && m.band !== undefined && String(m.band).trim() ? String(m.band).trim() : null;
+        if (b) lastBand = b;
+        return { t: m.t, bandEff: lastBand, bw: Number.isFinite(Number(m.bw)) ? Number(m.bw) : null, c: m.c };
+      });
+    }
+
+    function mergeNrBandBwTimelineRows() {
+      const nowMs = Date.now();
+      const cutoff = nowMs - chartWindowMs;
+      const bands = categoryHistory.nrBand.filter((p) => Number(p?.t) >= cutoff);
+      const bws = nrBwHistory.filter((p) => Number(p?.t) >= cutoff);
       const map = new Map();
       for (const p of bands) {
         const k = Number(p.t);
@@ -5467,7 +6132,468 @@ async def home() -> HTMLResponse:
       };
     }
 
-    function drawCategoryChart(canvasId, samples, color) {
+    /** True when QCAINFO snapshot lists at least one SCC carrier (LTE CA active). */
+    function caSampleHasScc(sample) {
+      const arr = sample?.carriers;
+      if (!Array.isArray(arr)) return false;
+      return arr.some((c) => String(c?.role || "").toUpperCase() === "SCC");
+    }
+
+    /** PCC / first SCC: primary RF (`#4da3ff`) vs neighbour-style (`#61dafb` fallback; same keys → same map as KPI overlays). */
+    function caStripeColorsFromCarriers(carriers) {
+      const fbPcc = "#4da3ff";
+      const fbScc = "#61dafb";
+      if (!Array.isArray(carriers)) return [fbPcc, fbScc];
+      const pcc = carriers.find((c) => String(c?.role || "").toUpperCase() === "PCC");
+      const scc = carriers.find((c) => String(c?.role || "").toUpperCase() === "SCC");
+      const pk =
+        pcc != null && Number.isFinite(Number(pcc.earfcn)) && Number.isFinite(Number(pcc.pci))
+          ? `${Number(pcc.earfcn)}/${Number(pcc.pci)}`
+          : null;
+      const sk =
+        scc != null && Number.isFinite(Number(scc.earfcn)) && Number.isFinite(Number(scc.pci))
+          ? `${Number(scc.earfcn)}/${Number(scc.pci)}`
+          : null;
+      const a = pk ? colorForCellKey(pk, fbPcc) : fbPcc;
+      const b = sk ? colorForCellKey(sk, fbScc) : fbScc;
+      return [a, b];
+    }
+
+    function caPccOnlyStrokeColor(sample) {
+      const carriers = sample?.carriers;
+      if (Array.isArray(carriers)) {
+        const pcc = carriers.find((c) => String(c?.role || "").toUpperCase() === "PCC");
+        const pk =
+          pcc != null && Number.isFinite(Number(pcc.earfcn)) && Number.isFinite(Number(pcc.pci))
+            ? `${Number(pcc.earfcn)}/${Number(pcc.pci)}`
+            : null;
+        if (pk) return colorForCellKey(pk, "#4da3ff");
+      }
+      return colorForCellKey(sample?.c, "#4da3ff");
+    }
+
+    function strokeStripedSegment(ctx, xA, yA, xB, yB, colA, colB, stripePx) {
+      const dx = xB - xA;
+      const dy = yB - yA;
+      const len = Math.hypot(dx, dy);
+      if (len < 1e-6) return;
+      const ux = dx / len;
+      const uy = dy / len;
+      let acc = 0;
+      let flip = 0;
+      const stripe = Math.max(2, stripePx);
+      ctx.lineWidth = 2;
+      ctx.lineCap = "butt";
+      while (acc < len) {
+        const seg = Math.min(stripe, len - acc);
+        const xs0 = xA + ux * acc;
+        const ys0 = yA + uy * acc;
+        const xs1 = xA + ux * (acc + seg);
+        const ys1 = yA + uy * (acc + seg);
+        ctx.strokeStyle = flip % 2 === 0 ? colA : colB;
+        ctx.beginPath();
+        ctx.moveTo(xs0, ys0);
+        ctx.lineTo(xs1, ys1);
+        ctx.stroke();
+        acc += seg;
+        flip++;
+      }
+    }
+
+    function fillSplitCaMarker(ctx, x, y, r, colA, colB) {
+      ctx.beginPath();
+      ctx.arc(x, y, r, -Math.PI / 2, Math.PI / 2);
+      ctx.lineTo(x, y);
+      ctx.closePath();
+      ctx.fillStyle = colA;
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(x, y, r, Math.PI / 2, -Math.PI / 2);
+      ctx.lineTo(x, y);
+      ctx.closePath();
+      ctx.fillStyle = colB;
+      ctx.fill();
+    }
+
+    function drawCaCombinedChart() {
+      const canvas = el("ca-combo-chart");
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#101010";
+      ctx.fillRect(0, 0, w, h);
+
+      const splitY = Math.round(h * 0.5);
+      const bandGap = 8;
+      const topY1 = 10;
+      const topY0 = splitY - bandGap;
+      const botY1 = splitY + bandGap;
+      const botY0 = h - 12;
+
+      const leftPad = 100;
+      const rightPad = 12;
+      const x0 = leftPad;
+      const x1 = w - rightPad;
+
+      const earfcnSamples = categoryHistory.caEarfcn || [];
+      const mhzSource = primaryCellDataAvailable ? caAggBwHistory : [];
+      const mhzSeries = rfSmoothingEnabled ? smoothSeries(mhzSource, RF_SMOOTH_WINDOW) : mhzSource;
+
+      if (!earfcnSamples.length && !mhzSeries.length) {
+        canvas._metricHover = null;
+        ctx.fillStyle = "#777";
+        ctx.font = "12px Arial";
+        ctx.fillText("No CA / QCAINFO samples yet", 12, h / 2);
+        return;
+      }
+
+      ctx.strokeStyle = "#3a3a3a";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x0 - 8, splitY);
+      ctx.lineTo(x1, splitY);
+      ctx.stroke();
+
+      ctx.fillStyle = "#666";
+      ctx.font = "9px Arial";
+      ctx.fillText("EARFCN", 6, topY1 + 10);
+      ctx.fillText("Σ DL BW", 6, botY1 + 11);
+
+      const nowMs = Date.now();
+      const windowStartMs = nowMs - chartWindowMs;
+      const expectedStepMs = Math.max(50, 1000 / Math.max(1, Number(currentPollHz) || 2));
+      const gapBreakMs = expectedStepMs * 1.8;
+
+      let catLabels = [];
+      let catLevels = 1;
+      if (earfcnSamples.length) {
+        for (const s of earfcnSamples) {
+          if (!caSampleHasScc(s)) continue;
+          if (!catLabels.includes(s.v)) catLabels.push(s.v);
+        }
+        catLevels = Math.max(1, catLabels.length - 1);
+
+        if (catLabels.length) {
+          ctx.strokeStyle = "#2a2a2a";
+          ctx.lineWidth = 1;
+          const labelMax = 22;
+          catLabels.forEach((lbl, idx) => {
+            const y = topY0 - (idx / Math.max(1, catLevels)) * (topY0 - topY1);
+            ctx.beginPath();
+            ctx.moveTo(x0, y);
+            ctx.lineTo(x1, y);
+            ctx.stroke();
+            ctx.fillStyle = "#888";
+            ctx.font = "10px Arial";
+            const shown = lbl.length > labelMax ? `${lbl.slice(0, labelMax)}...` : lbl;
+            ctx.fillText(shown, 4, y + 3);
+          });
+
+          const nCat = earfcnSamples.length;
+          const xStepCat = nCat > 1 ? (x1 - x0) / (nCat - 1) : 0;
+          const xForCat = (p, i) => {
+            if (!chartGapModeEnabled) return x0 + i * xStepCat;
+            const t = Number(p?.t);
+            if (!Number.isFinite(t)) return x0 + i * xStepCat;
+            const ratio = Math.max(0, Math.min(1, (t - windowStartMs) / chartWindowMs));
+            return x0 + ratio * (x1 - x0);
+          };
+          for (let i = 1; i < earfcnSamples.length; i++) {
+            const p0 = earfcnSamples[i - 1];
+            const p1 = earfcnSamples[i];
+            if (!caSampleHasScc(p0) || !caSampleHasScc(p1)) continue;
+            const t0 = Number(p0?.t);
+            const t1 = Number(p1?.t);
+            if (chartGapModeEnabled && Number.isFinite(t0) && Number.isFinite(t1) && (t1 - t0) > gapBreakMs) continue;
+            const idx0 = catLabels.indexOf(p0.v);
+            const idx1 = catLabels.indexOf(p1.v);
+            if (idx0 < 0 || idx1 < 0) continue;
+            const y0p = topY0 - (idx0 / Math.max(1, catLevels)) * (topY0 - topY1);
+            const y1p = topY0 - (idx1 / Math.max(1, catLevels)) * (topY0 - topY1);
+            const xA = xForCat(p0, i - 1);
+            const xB = xForCat(p1, i);
+            const [c0, c1] = caStripeColorsFromCarriers(p1.carriers);
+            strokeStripedSegment(ctx, xA, y0p, xB, y1p, c0, c1, 4);
+          }
+          earfcnSamples.forEach((p, i) => {
+            if (!caSampleHasScc(p)) return;
+            const idx = catLabels.indexOf(p.v);
+            if (idx < 0) return;
+            const y = topY0 - (idx / Math.max(1, catLevels)) * (topY0 - topY1);
+            const x = xForCat(p, i);
+            const [c0, c1] = caStripeColorsFromCarriers(p.carriers);
+            fillSplitCaMarker(ctx, x, y, 2.3, c0, c1);
+          });
+        } else {
+          ctx.fillStyle = "#555";
+          ctx.font = "11px Arial";
+          ctx.fillText("No SCC — no CA component plotted", x0, topY0 - 12);
+        }
+      } else {
+        ctx.fillStyle = "#555";
+        ctx.font = "11px Arial";
+        ctx.fillText("No EARFCN samples", x0, topY0 - 12);
+      }
+
+      let mhzYMin = 0;
+      let mhzYMax = 1;
+      let mhzSpan = 1;
+      if (mhzSeries.length) {
+        const values = mhzSeries.map((p) => p.v);
+        const minV = Math.min(...values);
+        const maxV = Math.max(...values);
+        const pad = Math.max(0.5, (maxV - minV) * 0.15);
+        mhzYMin = 0;
+        mhzYMax = Math.max(maxV + pad, 1);
+        mhzSpan = Math.max(1e-6, mhzYMax - mhzYMin);
+
+        ctx.strokeStyle = "#2a2a2a";
+        ctx.lineWidth = 1;
+        for (let i = 0; i <= 4; i++) {
+          const y = botY1 + (i * (botY0 - botY1)) / 4;
+          ctx.beginPath();
+          ctx.moveTo(x0, y);
+          ctx.lineTo(x1, y);
+          ctx.stroke();
+        }
+        ctx.fillStyle = "#888";
+        ctx.font = "10px Arial";
+        ctx.fillText(`${mhzYMax.toFixed(1)} MHz`, 4, botY1 + 12);
+        ctx.fillText(`${mhzYMin.toFixed(1)} MHz`, 4, botY0 - 2);
+
+        const nMhz = mhzSeries.length;
+        const xForMhz = (p, i) => {
+          if (!chartGapModeEnabled) {
+            const xs = nMhz > 1 ? (x1 - x0) / (nMhz - 1) : 0;
+            return x0 + i * xs;
+          }
+          const t = Number(p?.t);
+          if (!Number.isFinite(t)) return x0;
+          const ratio = Math.max(0, Math.min(1, (t - windowStartMs) / chartWindowMs));
+          return x0 + ratio * (x1 - x0);
+        };
+        for (let i = 1; i < mhzSeries.length; i++) {
+          const p0 = mhzSeries[i - 1];
+          const p1 = mhzSeries[i];
+          const t0 = Number(p0?.t);
+          const t1 = Number(p1?.t);
+          if (chartGapModeEnabled && Number.isFinite(t0) && Number.isFinite(t1) && (t1 - t0) > gapBreakMs) continue;
+          const xA = xForMhz(p0, i - 1);
+          const xB = xForMhz(p1, i);
+          const yA = botY0 - ((p0.v - mhzYMin) / mhzSpan) * (botY0 - botY1);
+          const yB = botY0 - ((p1.v - mhzYMin) / mhzSpan) * (botY0 - botY1);
+          const s0 = caSampleHasScc(p0);
+          const s1 = caSampleHasScc(p1);
+          if (s0 && s1) {
+            const [c0, c1] = caStripeColorsFromCarriers(p1.carriers);
+            strokeStripedSegment(ctx, xA, yA, xB, yB, c0, c1, 4);
+          } else {
+            ctx.strokeStyle = caPccOnlyStrokeColor(p1);
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(xA, yA);
+            ctx.lineTo(xB, yB);
+            ctx.stroke();
+          }
+        }
+        mhzSeries.forEach((p, i) => {
+          const x = xForMhz(p, i);
+          const y = botY0 - ((p.v - mhzYMin) / mhzSpan) * (botY0 - botY1);
+          if (caSampleHasScc(p)) {
+            const [c0, c1] = caStripeColorsFromCarriers(p.carriers);
+            fillSplitCaMarker(ctx, x, y, 2.3, c0, c1);
+          } else {
+            ctx.fillStyle = caPccOnlyStrokeColor(p);
+            ctx.beginPath();
+            ctx.arc(x, y, 2.3, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        });
+      } else {
+        ctx.fillStyle = "#555";
+        ctx.font = "11px Arial";
+        ctx.fillText("No aggregated DL BW samples", x0, botY0 - 8);
+      }
+
+      canvas._metricHover = {
+        caCombo: true,
+        earfcnSamples,
+        catLabels,
+        catLevels,
+        topY0,
+        topY1,
+        mhzSamples: mhzSeries,
+        mhzYMin,
+        mhzYMax,
+        mhzSpan,
+        botY0,
+        botY1,
+        x0,
+        x1,
+        gapBreakMs,
+        chartNowMs: nowMs,
+        cwMs: chartWindowMs,
+        gapMode: chartGapModeEnabled
+      };
+    }
+
+    function drawNrBandBwCombinedChart() {
+      const canvas = el("nr-bandbwcombinedchart");
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#101010";
+      ctx.fillRect(0, 0, w, h);
+
+      const rows = mergeNrBandBwTimelineRows();
+      if (!rows.length) {
+        canvas._metricHover = null;
+        ctx.fillStyle = "#777";
+        ctx.font = "12px Arial";
+        ctx.fillText("No NR band / DL BW samples yet", 12, 24);
+        return;
+      }
+
+      const labels = [];
+      for (const r of rows) {
+        const lb = r.bandEff || "-";
+        if (!labels.includes(lb)) labels.push(lb);
+      }
+      const levels = Math.max(1, labels.length - 1);
+
+      const bwVals = rows.map((r) => r.bw).filter((v) => v !== null && Number.isFinite(v));
+      const padBw = bwVals.length ? Math.max(0.5, (Math.max(...bwVals) - Math.min(...bwVals)) * 0.12) : 1;
+      const yMinBw = 0;
+      const yMaxBw = bwVals.length ? Math.max(Math.max(...bwVals) + padBw, 1) : 1;
+      const spanBw = Math.max(1e-6, yMaxBw - yMinBw);
+
+      const leftPad = 92;
+      const rightPad = 52;
+      const x0 = leftPad;
+      const x1 = w - rightPad;
+      const y0 = h - 12;
+      const y1 = 10;
+      const n = rows.length;
+      const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
+      const nowMs = Date.now();
+      const windowStartMs = nowMs - chartWindowMs;
+      const expectedStepMs = Math.max(50, 1000 / Math.max(1, Number(currentPollHz) || 2));
+      const gapBreakMs = expectedStepMs * 1.8;
+      const xFor = (row, i) => {
+        if (!chartGapModeEnabled) return x0 + i * xStep;
+        const t = Number(row?.t);
+        if (!Number.isFinite(t)) return x0 + i * xStep;
+        const ratio = Math.max(0, Math.min(1, (t - windowStartMs) / chartWindowMs));
+        return x0 + ratio * (x1 - x0);
+      };
+      const yForBand = (idx) => y0 - (idx / Math.max(1, levels)) * (y0 - y1);
+      const yForBw = (mhz) => y0 - ((mhz - yMinBw) / spanBw) * (y0 - y1);
+
+      ctx.strokeStyle = "#2a2a2a";
+      ctx.lineWidth = 1;
+      labels.forEach((lbl, idx) => {
+        const y = yForBand(idx);
+        ctx.beginPath();
+        ctx.moveTo(x0, y);
+        ctx.lineTo(x1, y);
+        ctx.stroke();
+        ctx.fillStyle = "#888";
+        ctx.font = "10px Arial";
+        const shown = lbl.length > 14 ? `${lbl.slice(0, 14)}…` : lbl;
+        ctx.fillText(shown, 4, y + 3);
+      });
+
+      ctx.fillStyle = "#aaa";
+      ctx.font = "11px Arial";
+      ctx.fillText(`${yMaxBw.toFixed(1)} MHz`, w - rightPad + 6, 14);
+      ctx.fillText(`${yMinBw.toFixed(1)} MHz`, w - rightPad + 6, h - 8);
+
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = CHART_COLOR_NR_BAND_TREND;
+      for (let i = 1; i < rows.length; i++) {
+        const p0 = rows[i - 1];
+        const p1 = rows[i];
+        const t0 = Number(p0?.t);
+        const t1 = Number(p1?.t);
+        if (chartGapModeEnabled && Number.isFinite(t0) && Number.isFinite(t1) && t1 - t0 > gapBreakMs) continue;
+        const i0 = labels.indexOf(p0.bandEff);
+        const i1 = labels.indexOf(p1.bandEff);
+        const idx0 = i0 < 0 ? 0 : i0;
+        const idx1 = i1 < 0 ? 0 : i1;
+        ctx.beginPath();
+        ctx.moveTo(xFor(p0, i - 1), yForBand(idx0));
+        ctx.lineTo(xFor(p1, i), yForBand(idx1));
+        ctx.stroke();
+      }
+      rows.forEach((p, i) => {
+        const ix = labels.indexOf(p.bandEff);
+        const idx = ix < 0 ? 0 : ix;
+        ctx.fillStyle = CHART_COLOR_NR_BAND_TREND;
+        ctx.beginPath();
+        ctx.arc(xFor(p, i), yForBand(idx), 2.1, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      ctx.strokeStyle = CHART_COLOR_NR_DL_BW_TREND;
+      for (let i = 1; i < rows.length; i++) {
+        const p0 = rows[i - 1];
+        const p1 = rows[i];
+        if (p0.bw === null || p1.bw === null) continue;
+        const t0 = Number(p0?.t);
+        const t1 = Number(p1?.t);
+        if (chartGapModeEnabled && Number.isFinite(t0) && Number.isFinite(t1) && t1 - t0 > gapBreakMs) continue;
+        ctx.beginPath();
+        ctx.moveTo(xFor(p0, i - 1), yForBw(p0.bw));
+        ctx.lineTo(xFor(p1, i), yForBw(p1.bw));
+        ctx.stroke();
+      }
+      rows.forEach((p, i) => {
+        if (p.bw === null) return;
+        ctx.fillStyle = CHART_COLOR_NR_DL_BW_TREND;
+        ctx.beginPath();
+        ctx.arc(xFor(p, i), yForBw(p.bw), 2.1, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      ctx.font = "11px Arial";
+      ctx.fillStyle = CHART_COLOR_NR_BAND_TREND;
+      ctx.fillRect(w - 148, 8, 10, 3);
+      ctx.fillStyle = "#d5f4e6";
+      ctx.fillText("NR band", w - 134, 12);
+      ctx.fillStyle = CHART_COLOR_NR_DL_BW_TREND;
+      ctx.fillRect(w - 148, 20, 10, 3);
+      ctx.fillStyle = "#d4efdf";
+      ctx.fillText("NR DL BW", w - 134, 24);
+
+      canvas._metricHover = {
+        bandBw: true,
+        bandBwRows: rows,
+        labels,
+        levels,
+        x0,
+        x1,
+        y0,
+        y1,
+        yMinBw,
+        yMaxBw,
+        spanBw,
+        xFor,
+        yForBand,
+        yForBw,
+        gapBreakMs,
+        chartNowMs: nowMs,
+        cwMs: chartWindowMs,
+        gapMode: chartGapModeEnabled
+      };
+    }
+
+    function drawCategoryChart(canvasId, samples, color, opts) {
+      const labelMax = opts && opts.labelMax != null ? opts.labelMax : 12;
+      const leftPad = opts && opts.leftPad != null ? opts.leftPad : 92;
       const canvas = el(canvasId);
       if (!canvas) return;
       const ctx = canvas.getContext("2d");
@@ -5478,6 +6604,7 @@ async def home() -> HTMLResponse:
       ctx.fillRect(0, 0, w, h);
 
       if (!samples.length) {
+        canvas._metricHover = null;
         ctx.fillStyle = "#777";
         ctx.font = "12px Arial";
         ctx.fillText("No samples yet", 12, 24);
@@ -5489,7 +6616,6 @@ async def home() -> HTMLResponse:
         if (!labels.includes(s.v)) labels.push(s.v);
       }
       const levels = Math.max(1, labels.length - 1);
-      const leftPad = 92;
       const rightPad = 12;
       const topPad = 10;
       const bottomPad = 12;
@@ -5508,7 +6634,7 @@ async def home() -> HTMLResponse:
         ctx.stroke();
         ctx.fillStyle = "#aaa";
         ctx.font = "11px Arial";
-        const shown = lbl.length > 12 ? `${lbl.slice(0, 12)}...` : lbl;
+        const shown = lbl.length > labelMax ? `${lbl.slice(0, labelMax)}...` : lbl;
         ctx.fillText(shown, 4, y + 4);
       });
 
@@ -5555,6 +6681,25 @@ async def home() -> HTMLResponse:
         ctx.arc(x, y, 2.1, 0, Math.PI * 2);
         ctx.fill();
       });
+      if (opts && opts.categoryHover) {
+        canvas._metricHover = {
+          categoryStep: true,
+          categoryValueLabel: opts.categoryValueLabel && String(opts.categoryValueLabel).trim() ? String(opts.categoryValueLabel).trim() : "RAT",
+          samples,
+          labels,
+          levels,
+          x0,
+          x1,
+          y0,
+          y1,
+          gapBreakMs,
+          chartNowMs: nowMs,
+          cwMs: chartWindowMs,
+          gapMode: chartGapModeEnabled
+        };
+      } else {
+        canvas._metricHover = null;
+      }
     }
 
     function drawCategoryCharts() {
@@ -5564,6 +6709,13 @@ async def home() -> HTMLResponse:
           : null;
       const cellColor = colorForCellKey(currentCellKey, "#8be9fd");
       drawCategoryChart("statechart", categoryHistory.state, cellColor);
+      drawCategoryChart("ratchart", categoryHistory.rat, "#ffb86c", {
+        labelMax: 16,
+        leftPad: 100,
+        categoryHover: true,
+        categoryValueLabel: "RAT"
+      });
+      drawCaCombinedChart();
     }
 
     function clearDataServiceKpi() {
@@ -5611,10 +6763,23 @@ async def home() -> HTMLResponse:
       nbrIntraCountHistory.length = 0;
       nbrInterCountHistory.length = 0;
       bwHistory.length = 0;
+      caAggBwHistory.length = 0;
       carrierReselPciHistory.length = 0;
       carrierReselEarfcnHistory.length = 0;
       categoryHistory.state.length = 0;
+      categoryHistory.rat.length = 0;
       categoryHistory.band.length = 0;
+      categoryHistory.caEarfcn.length = 0;
+      categoryHistory.nrBand.length = 0;
+      Object.keys(nrRfHistory).forEach((k) => {
+        nrRfHistory[k].length = 0;
+      });
+      Object.keys(nrRfNeighborOverlap).forEach((k) => {
+        nrRfNeighborOverlap[k].length = 0;
+      });
+      nrBwHistory.length = 0;
+      nrArfcnHistory.length = 0;
+      nrPciHistory.length = 0;
       drawIperfChart();
       drawIperfGauges();
       drawPhSweepChart();
@@ -5623,14 +6788,21 @@ async def home() -> HTMLResponse:
       drawInterNbrRfCharts();
       drawNeighbourCountCharts();
       drawBandBwCombinedChart();
+      drawCaCombinedChart();
       drawCarrierReselChart();
       drawCategoryCharts();
+      drawNrRfCharts();
+      drawNrBandBwCombinedChart();
       clearDataServiceKpi();
       const _z = ["rsrp-std", "rsrq-std", "sinr-std", "rssi-std"];
       for (const id of _z) {
         const n = el(id);
         if (n) n.textContent = "-";
       }
+      const eca = el("earfcn-active-ca");
+      if (eca) eca.textContent = "-";
+      const cab = el("ca-agg-dl-bw");
+      if (cab) cab.textContent = "-";
     }
 
     async function pollFallback() {
@@ -6702,6 +7874,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
     if protocol != "tcp":
         raise HTTPException(status_code=400, detail="Only protocol='tcp' is currently supported.")
     reverse = direction == "download"
+    parallel_streams = int(body.parallel_streams)
     limit_mbps = body.bitrate_limit_mbps
     bind_ip = str(body.bind_ip or "").strip() or None
     if bind_ip:
@@ -6724,6 +7897,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
                 "mobile_only": bool(body.mobile_only),
                 "bind_ip": None,
                 "bitrate_limit_mbps": limit_mbps,
+                "parallel_streams": parallel_streams,
             }
     binary = _discover_iperf_binary()
     if not binary:
@@ -6738,6 +7912,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
             "mobile_only": bool(body.mobile_only),
             "bind_ip": bind_ip,
             "bitrate_limit_mbps": limit_mbps,
+            "parallel_streams": parallel_streams,
         }
     cmd = [
         binary,
@@ -6757,12 +7932,14 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
         cmd.extend(["-B", bind_ip])
     if limit_mbps is not None:
         cmd.extend(["-b", f"{float(limit_mbps):g}M"])
+    cmd.extend(["-P", str(parallel_streams)])
     dur = int(body.duration_sec)
     # Wall-clock often exceeds iperf -t: TCP slow-start, JSON flush, cellular UL teardown.
     # Upload (no -R) is slower and needs more headroom than download (-R).
     slack_dl = 40
     slack_ul = max(75, dur // 2 + 60)
-    timeout_sec = dur + (slack_dl if reverse else slack_ul)
+    stream_slack = min(120, max(0, parallel_streams - 1) * 10)
+    timeout_sec = dur + (slack_dl if reverse else slack_ul) + stream_slack
     try:
         proc = await asyncio.to_thread(
             subprocess.run,
@@ -6785,6 +7962,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
             "mobile_only": bool(body.mobile_only),
             "bind_ip": bind_ip,
             "bitrate_limit_mbps": limit_mbps,
+            "parallel_streams": parallel_streams,
         }
     stdout = str(proc.stdout or "")
     stderr = str(proc.stderr or "")
@@ -6811,6 +7989,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
         "bind_ip": bind_ip,
         "detected_mobile_adapter": detected_adapter,
         "bitrate_limit_mbps": limit_mbps,
+        "parallel_streams": parallel_streams,
         "throughput_mbps": round(float(mbps), 3) if mbps is not None else None,
         "throughput_source": source,
         "command": cmd,

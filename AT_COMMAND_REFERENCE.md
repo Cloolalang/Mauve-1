@@ -11,6 +11,7 @@ Most useful commands for VoLTE call test flows:
 
 - `ATS0`, `ATS0?` — S0 ring count before modem auto-answers circuit-switched style paths (`ATS0=0` disables); VoLTE may not honor this
 - `AT+CLCC` read call state list (`active`, `held`, `dialing`, `alerting`, etc.)
+- `AT+QCAINFO` LTE carrier aggregation PCC/SCC (EARFCN, bandwidth, PCI, RF per component — polled in KPI loop when in service)
 - `ATH` / `AT+CHUP` hang up
 - `AT+CEER` get release/error reason
 - `AT+QNWINFO` RAT/operator context during call

@@ -133,6 +133,121 @@ def _decode_lte_bw_mhz(value: str) -> int | None:
     return bw_map.get(raw, raw)
 
 
+def _qcainfo_bandwidth_field_to_mhz(raw: Any) -> int | None:
+    """Map ``+QCAINFO`` per-carrier bandwidth field to DL MHz (integer).
+
+    Quectel often reports **resource block count** (e.g. 50 → 10 MHz); some firmware uses
+    the same **0–5 index** as ``AT+QENG`` LTE ``dl_bw``.
+    """
+    if raw is None:
+        return None
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return None
+    rb_to_mhz = {6: 1, 15: 3, 25: 5, 50: 10, 75: 15, 100: 20}
+    if v in rb_to_mhz:
+        return rb_to_mhz[v]
+    if 0 <= v <= 5:
+        idx = {0: 1, 1: 3, 2: 5, 3: 10, 4: 15, 5: 20}
+        return idx.get(v)
+    return None
+
+
+def _split_qcainfo_comma_fields(rest: str) -> list[str]:
+    """Split QCAINFO payload after role field; respect double-quoted segments (band strings)."""
+    rest = (rest or "").strip()
+    if not rest:
+        return []
+    parts: list[str] = []
+    cur: list[str] = []
+    in_quote = False
+    for ch in rest:
+        if ch == '"':
+            in_quote = not in_quote
+            cur.append(ch)
+        elif ch == "," and not in_quote:
+            parts.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        parts.append("".join(cur).strip())
+    return [p.strip().strip('"') for p in parts]
+
+
+def _parse_qcainfo_for_snapshot(lines: list[str]) -> dict[str, Any]:
+    """
+    Parse ``AT+QCAINFO`` lines (Quectel). Typical LTE CA form per manual:
+
+      ``+QCAINFO: "PCC",<EARFCN>,<bandwidth>,<band>,<state>,<PCI>,<RSRP>,<RSRQ>,<RSSI>,<SINR>``
+      ``+QCAINFO: "SCC",...`` (same tail layout; zero or more SCC lines).
+
+    ``bandwidth`` is often RB count (e.g. 50 for 10 MHz), not megahertz.
+    """
+    carriers: list[dict[str, Any]] = []
+    for raw in lines:
+        line = str(raw or "").strip()
+        if not line.upper().startswith("+QCAINFO:"):
+            continue
+        payload = line.split(":", 1)[1].strip()
+        if not payload:
+            continue
+        m = re.match(r'^"([^"]+)"\s*,\s*(.*)$', payload, re.DOTALL)
+        if not m:
+            continue
+        role = m.group(1).strip().upper()
+        if role not in ("PCC", "SCC"):
+            continue
+        fields = _split_qcainfo_comma_fields(m.group(2))
+        if len(fields) < 5:
+            continue
+        ear = _safe_int(fields[0])
+        bw_rb = _safe_int(fields[1])
+        band_txt = fields[2] if fields[2] else None
+        state = _safe_int(fields[3])
+        pci = _safe_int(fields[4])
+        c_row: dict[str, Any] = {
+            "role": role,
+            "earfcn": ear,
+            "dl_bw_rb": bw_rb,
+            "band": band_txt,
+            "state": state,
+            "pci": pci,
+
+        }
+        if len(fields) > 5:
+            c_row["rsrp"] = _safe_int(fields[5])
+        if len(fields) > 6:
+            c_row["rsrq"] = _safe_int(fields[6])
+        if len(fields) > 7:
+            c_row["rssi"] = _safe_int(fields[7])
+        if len(fields) > 8:
+            c_row["sinr_raw"] = _safe_int(fields[8])
+        carriers.append(c_row)
+
+    earfcns = [c.get("earfcn") for c in carriers if isinstance(c.get("earfcn"), int)]
+    parts_txt: list[str] = []
+    component_mhz: list[int] = []
+    for c in carriers:
+        e = c.get("earfcn")
+        r = c.get("role")
+        if isinstance(e, int) and r:
+            parts_txt.append(f"{e} ({r})")
+        mw = _qcainfo_bandwidth_field_to_mhz(c.get("dl_bw_rb"))
+        if isinstance(mw, int) and mw > 0:
+            component_mhz.append(mw)
+    text = "; ".join(parts_txt) if parts_txt else None
+    agg: int | None = sum(component_mhz) if component_mhz else None
+    return {
+        "carriers": carriers,
+        "earfcn_active": earfcns,
+        "earfcn_active_text": text,
+        "dl_bw_aggregate_mhz": agg,
+        "dl_bw_components_mhz": component_mhz if component_mhz else None,
+    }
+
+
 def _parse_qnwinfo(lines: list[str]) -> dict[str, Any] | None:
     """Parse all ``+QNWINFO`` lines (LTE + NR5G may both appear). Primary ``act``/``band``/``channel`` stay LTE-first for backward compatibility."""
     entries: list[dict[str, Any]] = []
@@ -315,7 +430,7 @@ def _parse_qeng_servingcell(lines: list[str]) -> dict[str, Any] | None:
         p = _parse_csv_payload(payload)
         # "NR5G-NSA",MCC,MNC,PCID,RSRP,SINR,RSRQ,ARFCN,band,...
         if len(p) >= 9:
-            parsed["nr_nsa"] = {
+            nsa: dict[str, Any] = {
                 "rat": p[0],
                 "mcc": _safe_int(p[1]),
                 "mnc": _safe_int(p[2]),
@@ -326,6 +441,9 @@ def _parse_qeng_servingcell(lines: list[str]) -> dict[str, Any] | None:
                 "arfcn": _safe_int(p[7]),
                 "band": _safe_int(p[8]),
             }
+            if len(p) >= 10:
+                nsa["dl_bw"] = _decode_lte_bw_mhz(p[9])
+            parsed["nr_nsa"] = nsa
 
     if sa_line:
         payload = sa_line.split(":", 1)[1].strip()
@@ -342,6 +460,7 @@ def _parse_qeng_servingcell(lines: list[str]) -> dict[str, Any] | None:
                 "tac_hex": p[8],
                 "arfcn": _safe_int(p[9]),
                 "band": _safe_int(p[10]),
+                "dl_bw": _decode_lte_bw_mhz(p[11]),
                 "rsrp": _safe_int(p[12]),
                 "rsrq": _safe_int(p[13]),
                 "sinr": _safe_int(p[14]),
@@ -551,7 +670,7 @@ def _compose_nr_rf_kpi(
         "band": net.get("nr_band") if isinstance(net, dict) else None,
         "arfcn": None,
         "pci": None,
-        "rssi": None,
+        "dl_bw": None,
         "rsrp": None,
         "rsrq": None,
         "sinr": None,
@@ -559,10 +678,10 @@ def _compose_nr_rf_kpi(
     if isinstance(nr_serv, dict):
         primary["arfcn"] = nr_serv.get("arfcn")
         primary["pci"] = nr_serv.get("pcid")
+        primary["dl_bw"] = nr_serv.get("dl_bw")
         primary["rsrp"] = nr_serv.get("rsrp")
         primary["rsrq"] = nr_serv.get("rsrq")
         primary["sinr"] = nr_serv.get("sinr")
-        primary["rssi"] = nr_serv.get("rssi")
 
     if primary["arfcn"] is None and isinstance(net, dict):
         primary["arfcn"] = net.get("nr_channel")
@@ -579,9 +698,9 @@ def _compose_nr_rf_kpi(
         nbr_out = {
             "pci": nr_neighbour.get("pci"),
             "arfcn": nr_neighbour.get("arfcn"),
+            "dl_bw": nr_neighbour.get("dl_bw"),
             "rsrp": nr_neighbour.get("rsrp"),
             "rsrq": nr_neighbour.get("rsrq"),
-            "rssi": nr_neighbour.get("rssi"),
             "sinr": nr_neighbour.get("sinr"),
         }
 
@@ -931,12 +1050,14 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                     qrsrq = await engine.send_command("AT+QRSRQ", timeout_sec=1.5)
                     qsinr = await engine.send_command("AT+QSINR", timeout_sec=1.5)
                     qeng_nb = await engine.send_command('AT+QENG="neighbourcell"', timeout_sec=2.0)
+                    qcainfo_res = await engine.send_command("AT+QCAINFO", timeout_sec=2.0)
                 else:
                     # Avoid command spam/errors when modem is deregistered/no-service.
                     qrsrp = {"ok": False, "command": "AT+QRSRP", "final": "SKIPPED_NO_SERVICE", "lines": []}
                     qrsrq = {"ok": False, "command": "AT+QRSRQ", "final": "SKIPPED_NO_SERVICE", "lines": []}
                     qsinr = {"ok": False, "command": "AT+QSINR", "final": "SKIPPED_NO_SERVICE", "lines": []}
                     qeng_nb = {"ok": False, "command": 'AT+QENG="neighbourcell"', "final": "SKIPPED_NO_SERVICE", "lines": []}
+                    qcainfo_res = {"ok": False, "command": "AT+QCAINFO", "final": "SKIPPED_NO_SERVICE", "lines": []}
 
                 refresh_ds = (now - runtime.data_service_at) > 5.0 or not runtime.data_service
 
@@ -1067,6 +1188,9 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                     nr_intra_n,
                 )
 
+                qcainfo_parsed = _parse_qcainfo_for_snapshot(list(qcainfo_res.get("lines") or []))
+                qcainfo_parsed["query_ok"] = bool(qcainfo_res.get("ok"))
+
                 parsed = {
                     "sample_ts": sample_ts,
                     "servingcell": serving,
@@ -1081,12 +1205,14 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                     "qsinr": _parse_four_path_metric(qsinr.get("lines", []), "+QSINR:"),
                     "neighbour": neighbour,
                     "nr_rf": nr_rf,
+                    "qcainfo": qcainfo_parsed,
                     "carrier_reselection": carrier_resel,
                     "raw": {
                         "cgmr": cgmr if need_fw else None,
                         "qeng": qeng,
                         "qeng_neighbourcell": qeng_nb,
                         "qnwinfo": qnwinfo,
+                        "qcainfo": qcainfo_res,
                         "qrsrp": qrsrp,
                         "qrsrq": qrsrq,
                         "qsinr": qsinr,

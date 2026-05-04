@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 1.17**
+**Version 1.18**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.17** is shown in the page header).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.18** is shown in the page header with a **Lord Kelvin** quotation on measurement).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -78,6 +78,22 @@ In **PowerShell**, click the window where **`.\start.ps1`** is running and press
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v1.18**
+
+- **Page header**: Lord Kelvin quotation beside the release version (*“When you can measure what you are speaking about, and express it in numbers, you know something about it”* — **Lord Kelvin**).
+- **Default unlock password** for Allow Data, **Set APN**, VoLTE test, answer/hang-up, and host auto-answer: **`kelvin`** (set `DATA_GATE_UNLOCK_PASSWORD` in `backend/app/main.py` to change it; update docs/examples if you do).
+- **`AT+QCAINFO` in the KPI poll**: parsed snapshot under **`sample.qcainfo`** on **`GET /api/kpi/latest`** and **`WS /ws/kpi`**, including:
+  - **`carriers`**: per-row PCC/SCC objects (`role`, `earfcn`, `pci`, `dl_bw_rb`, `band`, RF fields when present).
+  - **`earfcn_active`**: numeric EARFCN list; **`earfcn_active_text`**: human-readable PCC/SCC summary for the **EARFCN active (CA)** KPI row.
+  - **`dl_bw_aggregate_mhz`**: sum of decoded DL bandwidth (MHz) across carriers whose RB/index maps to MHz; **`dl_bw_components_mhz`**: per-carrier MHz list when present.
+  - **`query_ok`**: whether the AT query completed successfully (no service / failures still yield a structured object; row gating follows **`QNWINFO`** / service like other primary-cell fields).
+- **Primary Cell KPI rows**: **EARFCN active (CA)** (QCAINFO text/list) and **CA aggregated DL BW** (aggregate MHz, with tooltip on partial decode).
+- **CA EARFCN config & aggregated bandwidth** (single combined chart):
+  - **Top**: EARFCN **step trend** only when QCAINFO reports at least one **SCC**; line segments are **two-tone striped** using the same **`colorForCellKey`** palette as primary (**PCC** EARFCN/PCI) vs neighbour-style (**SCC**) fallbacks; **split** markers at each SCC sample.
+  - **Bottom**: **aggregated DL BW (MHz)** over time: **striped** while CA (SCC) is active; **solid** primary colour when the modem returns to **PCC-only** after CA release so the trace **drops** to single-carrier bandwidth instead of freezing on the last CA value.
+  - Hover tooltips on both panes (same RF-style tooltips as other metric charts).
+- **iperf3**: dashboard default **parallel streams** (**`-P`**) is **10** (range 1–64).
 
 **Changes in v1.17**
 
@@ -187,6 +203,7 @@ AT command catalog from current modem firmware:
   - `AT+QRSRP`
   - `AT+QRSRQ`
   - `AT+QSINR`
+  - `AT+QCAINFO` (LTE carrier aggregation — PCC/SCC rows, active EARFCNs, decoded DL bandwidth aggregate)
 - Reads modem firmware with `AT+CGMR`
 - Serves the live KPI page at `/` (**5G ModemTestDriver**) with:
   - Serial Port tools (refresh ports, auto-select likely Quectel AT port, reconnect, remembers last successful port)
@@ -199,6 +216,8 @@ AT command catalog from current modem firmware:
   - CA policy switch for LTE (single-band vs multi/all)
   - NRDC on/off switch
   - Neighbour Cells RF KPI (strongest intra-frequency neighbour RSRP + PCI + EARFCN, plus intra/inter neighbour counts) under **Primary Cell**
+  - **LTE CA (QCAINFO)** under **Primary Cell**: live **EARFCN active (CA)** and **CA aggregated DL BW** (MHz); combined **CA EARFCN config & aggregated bandwidth** trend chart (see **Changes in v1.18**)
+  - **Static-UE congestion proxy** (primary cell only): KPI compares current RSRQ to a session **RSRQ baseline** built when RSRP is stable vs a rolling median; trend chart **RSRQ vs RSRP-stable session baseline** (dB); resets on serving-cell change
   - **NR5G RF KPI** card (primary + strongest intra NR neighbour when data is available; see **`sample.nr_rf`**)
   - **LTE neighbour channels** card: distinct **EARFCN** lists (intra / inter) via **`GET /api/kpi/neighbour-channels`** (~3 s refresh); not merged into live WebSocket KPI JSON
   - **Band lock and inter-cell neighbours:** With **RAT/band lock** applied (`AT+QNWPREFCFG`), firmware commonly omits or clears **inter-frequency** (**inter-cell**) neighbour rows on **`AT+QENG="neighbourcell"`**. Expect **inter-cell** KPIs (strongest inter neighbour, inter neighbour count, **`nbr-*-inter*`** trend charts, **Inter-frequency neighbour EARFCN**) to show **no data** or **—**; **intra-frequency** neighbours may still be reported.
@@ -222,10 +241,10 @@ AT command catalog from current modem firmware:
     - Read-only SIM EF inspector via `AT+CRSM` for PLMN-related files
   - Live AT TX/RX console
   - Host ICMP ping sweep (`ping` from the OS; default 10 probes to `8.8.8.8`), optional bind/source IPv4 on Windows, gauges + trend, optional repeat every 15 s
-  - iperf3 throughput test (TCP, DL/UL, bind interface, optional bitrate limit) with gauges and trend charts
+  - iperf3 throughput test (TCP, DL/UL, **parallel streams** default **10**, bind interface, optional bitrate limit) with gauges and trend charts
   - VoLTE call test and **auto-answer:** outbound test (`ATD...;` + hangup); **auto-answer** — set **Rings**, tick **On** (unlock password required; tab out of password field or change **Rings** to push settings if you typed password after **On**); **Off** stops without password; **Answer** / **Hang up** on the same card
   - `Clear All Charts` control (also clears Data Service KPI display)
-  - Trend charts for iperf throughput, ICMP ping sweep, RSRP, RSRQ, SNIR, RSSI, State, Band, DL bandwidth, intra-cell dominance + neighbour overlays on RSRP/RSRQ/RSSI, inter-frequency neighbour RSRP/RSRQ/RSSI + dominance (`nbr-*-inter*`), LTE carrier re-selection (dual trace)
+  - Trend charts for iperf throughput, ICMP ping sweep, primary and NR5G RF (RSRP/RSRQ/SNIR/RSSI/dominance where applicable), **RSRQ congestion proxy**, RSRP/RSRQ/RSSI + **intra** neighbour overlays, **inter**-frequency neighbour RSRP/RSRQ/RSSI + dominance, **neighbour cell counts**, **State**, **RAT**, **CA EARFCN + QCAINFO aggregated DL BW** (combined card), **primary cell band & DL bandwidth** (dual Y-axis), **NR band & DL bandwidth**, LTE **carrier re-selection** (dual trace)
   - Selectable chart window (60s to 60m)
   - Dynamic chart axis label shows time span (for example, `Time axis: last 10m`)
   - Optional `Time-roll gaps` mode to scroll by wall-clock time and show blank gaps when samples pause
@@ -240,19 +259,19 @@ AT command catalog from current modem firmware:
     - Intra-cell dominance min `6 dB`
   - **Near-cell RF (field observation):** when very close to the site and **RSSI is above ~−25 dBm**, reported RF levels may look **compressed or capped**, as if **receiver gain reduction** (AGC / RF front-end behaviour) is limiting how strong the modem reports the signal—not an artefact of the dashboard.
   - Optional RF smoothing toggle (rolling average of last 10 samples) for RSRP/RSRQ/SINR/RSSI/dominance
-  - **RF trend hover tooltips**: on the RSRP / RSRQ / SNIR / RSSI / dominance / intra and inter-frequency neighbour canvases, moving the pointer near a plotted sample shows a tooltip with the metric value and **EARFCN/PCI** where applicable (same cell key used for segment colouring).
+  - **RF trend hover tooltips**: on the RSRP / RSRQ / SNIR / RSSI / dominance / congestion proxy / intra & inter neighbour / neighbour count / combined band+BW / RAT / CA combo / NR RF canvases, moving the pointer near a plotted sample shows a tooltip with the metric value and **EARFCN/PCI** where applicable (same cell key used for segment colouring).
   - Primary Cell bandwidth KPI (`DL/UL BW`)
   - Primary cell intra-cell dominance KPI (`Primary RSRP - strongest intra-frequency neighbour RSRP` on serving EARFCN)
+  - **Congestion proxy** KPI (dB): session RSRQ baseline vs current RSRQ when RSRP is stable (see chart card title); not network scheduler load
   - Primary cell **σ** KPIs (sample stdev of RSRP, RSRQ, SNIR, RSSI; **last N** primary-cell samples in the chart window with configurable **N**, current cell only)
 - Exposes REST and WebSocket endpoints for control and integration
 
 ## Planned RF features
 
-- **Tiered KPI polling**: refresh primary LTE serving metrics (`AT+QENG="servingcell"`, `AT+QRSRP` / `AT+QRSRQ` / `AT+QSINR`, `AT+QNWINFO`) more often than heavy `AT+QENG="neighbourcell"` and periodic data-service queries; reuse or timestamp stale neighbour-derived fields between neighbour polls.
+- **Tiered KPI polling**: refresh primary LTE serving metrics (`AT+QENG="servingcell"`, `AT+QRSRP` / `AT+QRSRQ` / `AT+QSINR`, `AT+QNWINFO`, `AT+QCAINFO`) more often than heavy `AT+QENG="neighbourcell"` and periodic data-service queries; reuse or timestamp stale neighbour-derived fields between neighbour polls.
 - Full neighbour-cell RF table from `AT+QENG="neighbourcell"` (PCI, EARFCN/ARFCN, RSRP, RSRQ, SINR where available); v1.11 adds distinct **EARFCN** lists only
 - Per-chain RF charts from `AT+QRSRP`, `AT+QRSRQ`, `AT+QSINR` (`PRX/DRX/RX2/RX3`)
 - Extend NR KPIs (e.g. NR **inter** neighbour rows, band on neighbour, fuller RSSI coverage) beyond the current **`sample.nr_rf`** card
-- Carrier aggregation details from `AT+QCAINFO` (PCC/SCC, band, bandwidth, channel)
 - Mobility/context timeline for serving cell changes (PCI, Cell ID, TAC, band, EARFCN/ARFCN)
 
 ## Install
@@ -334,7 +353,8 @@ $env:MD_BAUDRATE="115200"
    - Validate **CA policy** behavior: CA ON uses multi/all LTE bands, CA OFF uses a single LTE band.
    - Toggle **NRDC** and confirm the readback state changes.
    - Check **Neighbour Cells RF KPI** values (strongest intra-frequency neighbour RSRP + PCI + EARFCN; intra/inter neighbour counts).
-   - Check **Primary cell intra-cell dominance** value and trend behavior.
+   - After a throughput run, confirm **CA aggregated DL BW** and the **CA EARFCN config & aggregated bandwidth** chart return to **PCC-only** behaviour when the modem drops SCC.
+   - Hover the **congestion proxy** and **CA combo** charts to confirm tooltips.
    - Run **ICMP Ping Sweep** (and optional **repeat every 15 s**) and confirm gauges/trend update.
    - Watch RF, neighbour, dominance, State/Band/PCI, and Bandwidth charts update with live polling.
    - Use the **Chart window** selector to switch retention from `60s` up to `60m`.
@@ -362,7 +382,7 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8011/api/at/send" `
 Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:8011/api/kpi/latest"
 ```
 
-The JSON includes `sample.carrier_reselection` with `window_sec` (60), `primary_earfcn_reselections_per_min`, and `intra_freq_pci_reselections_per_min` when the KPI poll has parsed LTE PCell identity from QENG. When NR data is available, **`sample.nr_rf`** carries **NR5G RF KPI** fields for the dashboard card (`available`, `primary`, `neighbour`).
+The JSON includes `sample.carrier_reselection` with `window_sec` (60), `primary_earfcn_reselections_per_min`, and `intra_freq_pci_reselections_per_min` when the KPI poll has parsed LTE PCell identity from QENG. When NR data is available, **`sample.nr_rf`** carries **NR5G RF KPI** fields for the dashboard card (`available`, `primary`, `neighbour`). **`sample.qcainfo`** carries **AT+QCAINFO** parsing (`carriers`, `earfcn_active`, `earfcn_active_text`, `dl_bw_aggregate_mhz`, `dl_bw_components_mhz`, `query_ok`); see **Changes in v1.18**.
 
 ## API quick reference
 
@@ -389,7 +409,7 @@ The JSON includes `sample.carrier_reselection` with `window_sec` (60), `primary_
 - `POST /api/network/locks`
 - `POST /api/tools/modem-reset`
 - `GET /api/tools/bind-interfaces` (Windows IPv4 adapters for bind dropdowns)
-- `POST /api/tools/iperf-test` (TCP iperf3 client; optional bind IP and bitrate limit)
+- `POST /api/tools/iperf-test` (TCP iperf3 client; optional `parallel_streams`, bind IP, bitrate limit; UI default **10** streams)
 - `POST /api/tools/icmp-ping` (host OS ICMP ping sweep; optional Windows `-S` bind)
 - `GET /api/tools/auto-answer` / `POST /api/tools/auto-answer` — optional **modem `ATS0`** (legacy); not used by the dashboard VoLTE card
 - `GET /api/tools/host-auto-answer` / `POST /api/tools/host-auto-answer` — **auto-answer** used by the dashboard (**`ATA`** from PC; body **`enabled`**, **`rings`**, **`password`**)
@@ -402,7 +422,7 @@ The JSON includes `sample.carrier_reselection` with `window_sec` (60), `primary_
 
 The Data Service KPI panel is populated from periodic AT reads inside the KPI poll loop:
 
-- **`POST /api/network/apn`** (password `"nacelle"` or your configured unlock; same gate as Allow Data) updates **`AT+CGDCONT`**, mirrors the same APN into Quectel **`AT+QICSGP`** for the internal PDP path when the firmware supports it, and optionally reattaches with **`AT+QIACT`**. If the context is active, **`AT+QIDEACT=<cid>`** may run first so the APN can be changed (this can briefly disturb the USB WAN path). Set **`reactivate": false`** to skip **`CGATT`/`QIACT`** and reconnect later via **Allow Data**. APN must be letters/digits/`.`/`-`/`_` only. On **Robustel** gateways, use the router’s **modem mode** before changing APN, then select MNO—see the device web UI.
+- **`POST /api/network/apn`** (password `"kelvin"` or your configured unlock; same gate as Allow Data) updates **`AT+CGDCONT`**, mirrors the same APN into Quectel **`AT+QICSGP`** for the internal PDP path when the firmware supports it, and optionally reattaches with **`AT+QIACT`**. If the context is active, **`AT+QIDEACT=<cid>`** may run first so the APN can be changed (this can briefly disturb the USB WAN path). Set **`reactivate": false`** to skip **`CGATT`/`QIACT`** and reconnect later via **Allow Data**. APN must be letters/digits/`.`/`-`/`_` only. On **Robustel** gateways, use the router’s **modem mode** before changing APN, then select MNO—see the device web UI.
 
 - `AT+CGDCONT?` -> APN, PDP type, total PDP contexts
 - `AT+QIACT?` -> active PDP contexts, CID1 state/IP
@@ -433,9 +453,9 @@ Values are exposed in `GET /api/kpi/latest` under `sample.data_service`.
 
 - `POST /api/network/data-gate`
   - body: `{ "inhibit": true }` -> deactivates active PDP contexts (`AT+QIDEACT=<cid>`)
-  - body: `{ "inhibit": false, "password": "nacelle" }` -> allows packet data (`AT+CGATT=1`, `AT+QIACT=1`)
+  - body: `{ "inhibit": false, "password": "kelvin" }` -> allows packet data (`AT+CGATT=1`, `AT+QIACT=1`)
   - `password` is mandatory for `inhibit=false`; invalid password returns HTTP `403`.
-- `POST /api/tools/volte-test` and **`POST /api/tools/host-auto-answer`** use the same unlock password (`nacelle`). **`POST /api/tools/auto-answer`** (modem **S0**) uses it too if you call that API.
+- `POST /api/tools/volte-test` and **`POST /api/tools/host-auto-answer`** use the same unlock password (`kelvin`). **`POST /api/tools/auto-answer`** (modem **S0**) uses it too if you call that API.
 
 ## COPS scan behavior
 
@@ -490,12 +510,12 @@ The dashboard **VoLTE** card controls **auto-answer** via **`GET`/`POST /api/too
 - `GET /api/tools/auto-answer` / `POST /api/tools/auto-answer` — optional **modem `ATS0`** for scripts/integration; VoLTE usually ignores **S0**.
 
 - `GET /api/tools/host-auto-answer` — watcher **enabled** / **rings** / live hints (`ring_urcs`, `elapsed_s`, `note`).
-- `POST /api/tools/host-auto-answer` — body: `{ "enabled": true|false, "rings": 2, "password": "nacelle" }`.
+- `POST /api/tools/host-auto-answer` — body: `{ "enabled": true|false, "rings": 2, "password": "kelvin" }`.
 
 - **`GET /api/tools/voice-call-status`** includes **`host_auto_answer`**.
 
 - `POST /api/tools/volte-test`
-  - body: `{ "number": "+447700900123", "hold_sec": 10, "connect_timeout_sec": 120, "password": "nacelle" }` — **`connect_timeout_sec`** optional (default **120**, max **300**): time to wait for voice **CLCC** active/held after dial.
+  - body: `{ "number": "+447700900123", "hold_sec": 10, "connect_timeout_sec": 120, "password": "kelvin" }` — **`connect_timeout_sec`** optional (default **120**, max **300**): time to wait for voice **CLCC** active/held after dial.
   - Flow:
     - pre-hangup guard (`ATH`)
     - dial (`ATD<number>;`)
