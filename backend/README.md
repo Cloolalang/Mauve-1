@@ -1,6 +1,11 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 1.20** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.20.0**).
+**Version 1.21** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.21.0**).
+
+Notes for **v1.21**:
+
+- **`POST /api/network/apn`**: **`AT+CGDCONT`** + **`AT+CGAUTH`** + **`AT+QICSGP`**; body **`pdp_auth_type`**, **`pdp_username`**, **`pdp_password`**; response **`auth_profile_read`**. KPI adds **`AT+CGAUTH?`** / **`AT+QICSGP?`** for **`sample.data_service`** (root **Changes in v1.21**).
+- OpenAPI / page header: **v1.21**.
 
 Notes for **v1.20**:
 
@@ -8,6 +13,8 @@ Notes for **v1.20**:
 - **Voice**: shared **`AT+CLCC`** path for **`GET /api/tools/voice-call-status`** and host auto-answer; tuned UI/autopoll intervals (root changelog).
 - **`serial_engine`**: records completed-command timings for status metrics; **`GET /`**: Serial card shows baud/AT metrics; NR5G methodology blurb removed from NR card.
 - OpenAPI / page header: **v1.20**.
+
+Notes for **v1.19**:
 
 - **`GET /`**: **Primary Cell** adds **Duplex (FDD/TDD)** from **`AT+QENG`** LTE serving. **NR5G RF KPI** adds **NR serving**, **Duplex**, and **NR band** display (QENG SA band preferred; see root **Changes in v1.19**).
 - **`POST /api/network/locks`**: Longer **`AT+QNWPREFCFG`** timeouts, settle + re-verify after **`mode_pref`**; serial **`send_command`** uses extra **wait_for** slack (`serial_engine`).

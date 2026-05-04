@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 1.20**
+**Version 1.21**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.20** is shown in the page header with a **Lord Kelvin** quotation on measurement).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.21** is shown in the page header with a **Lord Kelvin** quotation on measurement).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -39,11 +39,11 @@ Details: **`backend/run_desktop.py`**, **`backend/modemtestdriver.spec`**, **`ba
 ### Maintainers: publish a Release with binaries
 
 1. Commit and push source changes on **`main`** (no **`dist/`** in git).
-2. Create and push an annotated **version tag** matching **`v*`** (example **`v1.20.0`**):
+2. Create and push an annotated **version tag** matching **`v*`** (example **`v1.21.0`**):
 
    ```powershell
-   git tag -a v1.20.0 -m "v1.20.0"
-   git push origin v1.20.0
+   git tag -a v1.21.0 -m "v1.21.0"
+   git push origin v1.21.0
    ```
 
 3. GitHub Actions runs **[.github/workflows/release-windows.yml](.github/workflows/release-windows.yml)**, builds the zip, and attaches **`5GModemTestDriver-windows-amd64.zip`** to that Release.
@@ -129,6 +129,11 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v1.21**
+
+- **APN / PDP authentication**: **`POST /api/network/apn`** now configures **`AT+CGDCONT`**, **`AT+CGAUTH`** (username/password, auth types 0–3: none / PAP / CHAP / PAP-or-CHAP), and **`AT+QICSGP`** (Quectel mirror) together. Response includes readback from **`AT+CGAUTH?`** / **`AT+QICSGP?`** under **`auth_profile_read`**. KPI **`data_service`** (dashboard **Data Service** card) refreshes **PDP type**, **PDP username**, **PDP auth** label, and whether a **non-empty password** appeared in AT read (**`pdp_password_reported`** — many firmwares hide password on read).
+- **Dashboard**: expanded **Set APN** form with PDP auth type, username, and password fields (network credentials; unlock password unchanged).
 
 **Changes in v1.20**
 

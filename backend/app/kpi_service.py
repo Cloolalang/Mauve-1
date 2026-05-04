@@ -1034,6 +1034,86 @@ def _parse_cgdcont(lines: list[str]) -> list[dict[str, Any]]:
     return out
 
 
+_CGAUTH_LINE_RE = re.compile(
+    r'^\+CGAUTH:\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*"([^"]*)"(?:\s*,\s*"([^"]*)")?)?',
+)
+
+
+def _parse_cgauth(lines: list[str]) -> list[dict[str, Any]]:
+    """Parse ``+CGAUTH:`` (3GPP 27.007): cid, auth_prot[, userid[, password]]."""
+    out: list[dict[str, Any]] = []
+    for raw in lines:
+        s = str(raw or "").strip()
+        if not s.startswith("+CGAUTH:"):
+            continue
+        m = _CGAUTH_LINE_RE.match(s)
+        if not m:
+            continue
+        cid = int(m.group(1))
+        auth_type = int(m.group(2))
+        uid = m.group(3)
+        pwd = m.group(4)
+        out.append(
+            {
+                "cid": cid,
+                "auth_type": auth_type,
+                "username": uid or "",
+                "password_present_in_response": bool(pwd),
+            }
+        )
+    return out
+
+
+_QICSGP_FULL_RE = re.compile(
+    r'^\+QICSGP:\s*(\d+)\s*,\s*(\d+)\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*(\d+)\s*$'
+)
+_QICSGP_SHORT_RE = re.compile(
+    r'^\+QICSGP:\s*(\d+)\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*(\d+)\s*$'
+)
+
+
+def _parse_qicsgp(lines: list[str]) -> list[dict[str, Any]]:
+    """Parse ``+QICSGP:`` query lines (Quectel). Prefer context_type + apn + user + pass + auth."""
+    out: list[dict[str, Any]] = []
+    for raw in lines:
+        s = str(raw or "").strip()
+        if not s.startswith("+QICSGP:"):
+            continue
+        m = _QICSGP_FULL_RE.match(s)
+        if m:
+            out.append(
+                {
+                    "cid": int(m.group(1)),
+                    "context_type": int(m.group(2)),
+                    "apn": m.group(3) or None,
+                    "username": m.group(4) or "",
+                    "password_present_in_response": bool(m.group(5)),
+                    "auth_type": int(m.group(6)),
+                }
+            )
+            continue
+        m2 = _QICSGP_SHORT_RE.match(s)
+        if m2:
+            out.append(
+                {
+                    "cid": int(m2.group(1)),
+                    "context_type": None,
+                    "apn": m2.group(2) or None,
+                    "username": m2.group(3) or "",
+                    "password_present_in_response": bool(m2.group(4)),
+                    "auth_type": int(m2.group(5)),
+                }
+            )
+    return out
+
+
+def _pdp_auth_type_label(auth_type: int | None) -> str:
+    if auth_type is None:
+        return "-"
+    labels = {0: "none", 1: "PAP", 2: "CHAP", 3: "PAP or CHAP"}
+    return labels.get(int(auth_type), f"type {auth_type}")
+
+
 def _parse_qcfg_usbnet(lines: list[str]) -> int | None:
     for raw in lines:
         if not raw.startswith("+QCFG:"):
@@ -1131,6 +1211,8 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                     cgatt = await engine.send_command("AT+CGATT?", timeout_sec=1.5)
                     cereg = await engine.send_command("AT+CEREG?", timeout_sec=1.5)
                     cgdcont = await engine.send_command("AT+CGDCONT?", timeout_sec=2.0)
+                    cgauth = await engine.send_command("AT+CGAUTH?", timeout_sec=2.0)
+                    qicsgp = await engine.send_command("AT+QICSGP?", timeout_sec=2.0)
                     qiact = await engine.send_command("AT+QIACT?", timeout_sec=2.0)
                     qcfg_usbnet = await engine.send_command('AT+QCFG="usbnet"', timeout_sec=2.0)
                     qnetdev = await engine.send_command("AT+QNETDEVSTATUS?", timeout_sec=2.0)
@@ -1138,12 +1220,35 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                     cgatt_v = _parse_cgatt(cgatt.get("lines", []))
                     cereg_v = _parse_cereg(cereg.get("lines", [])) or {}
                     contexts = _parse_cgdcont(cgdcont.get("lines", []))
+                    auth_rows = _parse_cgauth(cgauth.get("lines", []))
+                    qicsgp_rows = _parse_qicsgp(qicsgp.get("lines", []))
                     active = _parse_qiact(qiact.get("lines", []))
                     usbnet_mode = _parse_qcfg_usbnet(qcfg_usbnet.get("lines", []))
                     qnetdev_status = _parse_qnetdevstatus(qnetdev.get("lines", []))
                     active_by_cid = {x.get("cid"): x for x in active if isinstance(x.get("cid"), int)}
                     primary_ctx = next((c for c in contexts if c.get("cid") == 1), contexts[0] if contexts else {})
                     cid1 = active_by_cid.get(1) or {}
+                    primary_cid = int(primary_ctx.get("cid") or 1)
+                    ca_one = next((r for r in auth_rows if r.get("cid") == primary_cid), None)
+                    qi_one = next((r for r in qicsgp_rows if r.get("cid") == primary_cid), None)
+                    pdp_user = None
+                    pdp_auth = None
+                    pwd_hint = False
+                    if ca_one:
+                        u = str(ca_one.get("username") or "").strip()
+                        if u:
+                            pdp_user = u
+                        pdp_auth = ca_one.get("auth_type")
+                        pwd_hint = pwd_hint or bool(ca_one.get("password_present_in_response"))
+                    if qi_one:
+                        if not pdp_user:
+                            u2 = str(qi_one.get("username") or "").strip()
+                            if u2:
+                                pdp_user = u2
+                        if pdp_auth is None:
+                            pdp_auth = qi_one.get("auth_type")
+                        pwd_hint = pwd_hint or bool(qi_one.get("password_present_in_response"))
+                    pdp_auth_label = _pdp_auth_type_label(int(pdp_auth) if pdp_auth is not None else None)
 
                     _creg_stat = cereg_v.get("stat")
                     # 3GPP TS 27.007 +CEREG stat: 1=home, 5=roaming (when registered on EPS).
@@ -1157,6 +1262,10 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                     runtime.data_service = {
                         "apn": primary_ctx.get("apn"),
                         "pdp_type": primary_ctx.get("pdp_type"),
+                        "pdp_auth_type": pdp_auth,
+                        "pdp_auth_label": pdp_auth_label,
+                        "pdp_username": pdp_user,
+                        "pdp_password_reported": pwd_hint,
                         "pdp_contexts": len(contexts),
                         "active_pdp_contexts": sum(1 for x in active if x.get("active")),
                         "packet_attached": cgatt_v == 1 if cgatt_v is not None else None,

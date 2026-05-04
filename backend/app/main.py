@@ -20,7 +20,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from serial.tools import list_ports
 
-from app.kpi_service import KpiRuntime, _parse_cgdcont, _parse_qiact, kpi_poll_loop
+from app.kpi_service import KpiRuntime, _parse_cgdcont, _parse_cgauth, _parse_qiact, _parse_qicsgp, kpi_poll_loop
 from app.serial_engine import SerialEngine
 from app.at_modem_errors import combine_errors, describe_modem_send_result
 from app.sim_usim_services import (
@@ -31,7 +31,7 @@ from app.sim_usim_services import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.20"
+APP_VERSION = "1.21"
 
 
 def _serial_state_file_path() -> str:
@@ -271,6 +271,18 @@ class ApnSetBody(BaseModel):
         description='PDP type passed to AT+CGDCONT, e.g. "IP", "IPV6", "IPV4V6"',
     )
     password: str | None = Field(default=None, description="Unlock password (same as data allow)")
+    pdp_auth_type: int = Field(
+        default=0,
+        ge=0,
+        le=3,
+        description="3GPP +CGAUTH / Quectel +QICSGP: 0=none, 1=PAP, 2=CHAP, 3=PAP or CHAP",
+    )
+    pdp_username: str | None = Field(default=None, max_length=64, description="PDP username (optional)")
+    pdp_password: str | None = Field(
+        default=None,
+        max_length=64,
+        description="PDP password for PAP/CHAP; omit or null for empty. Not the dashboard unlock password.",
+    )
     reactivate: bool = Field(
         default=True,
         description="After CGDCONT, reattach data (CGATT/QIACT when needed). Disable to only write CGDCONT (+QICSGP) if the context is inactive.",
@@ -1159,6 +1171,19 @@ def _normalize_cgdcont_pdp_type(raw: str | None) -> str:
     return u
 
 
+def _sanitize_pdp_user_or_password(raw: str | None, field: str, *, max_len: int = 64) -> str:
+    s = "" if raw is None else str(raw)
+    if len(s) > max_len:
+        raise HTTPException(status_code=400, detail=f"{field} exceeds maximum length ({max_len}).")
+    for ch in s:
+        if ch in '"\\\r\n':
+            raise HTTPException(
+                status_code=400,
+                detail=f'{field} must not contain double quotes, backslash, or newlines.',
+            )
+    return s
+
+
 UK_LTE_SCAN_BANDS = "1:3:7:8:20:28:32:38"
 UK_NR_SCAN_BANDS = "1:3:8:28:78"
 MNO_OPERATOR_ALIASES: dict[str, set[str]] = {
@@ -1427,7 +1452,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="1.20.0",
+    version="1.21.0",
     lifespan=lifespan,
 )
 
@@ -1648,6 +1673,10 @@ async def home() -> HTMLResponse:
     <div class="card">
       <div class="label">Data Service KPI</div>
       <div class="row"><span class="label">APN</span><span id="ds-apn">-</span></div>
+      <div class="row"><span class="label">PDP type</span><span id="ds-pdp-type-kpi">-</span></div>
+      <div class="row"><span class="label">PDP username</span><span id="ds-pdp-user-kpi">-</span></div>
+      <div class="row"><span class="label">PDP auth</span><span id="ds-pdp-auth-kpi">-</span></div>
+      <div class="row" title="Whether +CGAUTH? / +QICSGP? included a non-empty password field (many firmwares hide password on read)."><span class="label">PDP pwd in AT read</span><span id="ds-pdp-pw-hint">-</span></div>
       <div class="row"><span class="label">PDP Contexts (active/total)</span><span id="ds-pdp">-</span></div>
       <div class="row"><span class="label">CID1</span><span id="ds-cid1">-</span></div>
       <div class="row"><span class="label">CID1 IP</span><span id="ds-ip">-</span></div>
@@ -1656,7 +1685,7 @@ async def home() -> HTMLResponse:
       <div class="row"><span class="label">USB data stack</span><span id="ds-usbnet">-</span></div>
       <div class="row"><span class="label">Netdev status</span><span id="ds-netdev">-</span></div>
       <div style="margin-top:12px;">
-        <div class="label">Set APN (AT+CGDCONT)</div>
+        <div class="label">Set APN / PDP auth (AT+CGDCONT, +CGAUTH, +QICSGP)</div>
         <div style="margin-top:6px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
           <input id="ds-apn-set" placeholder="e.g. internet" style="flex:1; min-width:160px; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px;" />
           <select id="ds-pdp-type" style="background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px;">
@@ -1664,7 +1693,17 @@ async def home() -> HTMLResponse:
             <option value="IPV4V6">IPV4V6</option>
             <option value="IPV6">IPV6</option>
           </select>
-          <button id="btn-ds-apn-apply" type="button">Apply APN</button>
+          <select id="ds-pdp-auth-type" title="3GPP auth protocol for this CID" style="background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px;">
+            <option value="0" selected>Auth: none</option>
+            <option value="1">Auth: PAP</option>
+            <option value="2">Auth: CHAP</option>
+            <option value="3">Auth: PAP or CHAP</option>
+          </select>
+          <button id="btn-ds-apn-apply" type="button">Apply</button>
+        </div>
+        <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <input id="ds-pdp-net-user" placeholder="PDP username (optional)" style="flex:1; min-width:160px; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px;" />
+          <input id="ds-pdp-net-pass" type="password" placeholder="PDP password (optional)" style="flex:1; min-width:160px; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px;" />
         </div>
         <div style="margin-top:8px;">
           <div class="label">Unlock password (same as Allow Data)</div>
@@ -2754,6 +2793,18 @@ async def home() -> HTMLResponse:
       }
       el("modemfw").textContent = modem.firmware || "-";
       el("ds-apn").textContent = ds.apn || "-";
+      const pdpTk = el("ds-pdp-type-kpi");
+      if (pdpTk) pdpTk.textContent = ds.pdp_type || "—";
+      const pdpUk = el("ds-pdp-user-kpi");
+      if (pdpUk) pdpUk.textContent = ds.pdp_username != null && String(ds.pdp_username).length ? String(ds.pdp_username) : "—";
+      const pdpAk = el("ds-pdp-auth-kpi");
+      if (pdpAk) pdpAk.textContent = ds.pdp_auth_label != null && String(ds.pdp_auth_label).length ? String(ds.pdp_auth_label) : "—";
+      const pdpPh = el("ds-pdp-pw-hint");
+      if (pdpPh) {
+        if (ds.pdp_password_reported === true) pdpPh.textContent = "yes";
+        else if (ds.pdp_password_reported === false) pdpPh.textContent = "no";
+        else pdpPh.textContent = "—";
+      }
       if (ds.active_pdp_contexts === null || ds.active_pdp_contexts === undefined || ds.pdp_contexts === null || ds.pdp_contexts === undefined) {
         el("ds-pdp").textContent = "-";
       } else {
@@ -3218,10 +3269,23 @@ async def home() -> HTMLResponse:
         msgEl.textContent = "Applying APN...";
         msgEl.className = "label";
         const reactivate = !!el("ds-apn-reactivate")?.checked;
+        const pdpAuthRaw = Number(el("ds-pdp-auth-type")?.value ?? 0);
+        const pdpAuthType = Number.isFinite(pdpAuthRaw) ? Math.max(0, Math.min(3, Math.trunc(pdpAuthRaw))) : 0;
+        const netUserRaw = String(el("ds-pdp-net-user")?.value || "").trim();
+        const netPassRaw = String(el("ds-pdp-net-pass")?.value || "");
         const r = await fetch("/api/network/apn", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ apn, cid: 1, pdp_type, password, reactivate })
+          body: JSON.stringify({
+            apn,
+            cid: 1,
+            pdp_type,
+            password,
+            reactivate,
+            pdp_auth_type: pdpAuthType,
+            pdp_username: netUserRaw ? netUserRaw : null,
+            pdp_password: netPassRaw.length ? netPassRaw : null
+          })
         });
         const j = await r.json().catch(() => ({}));
         if (!r.ok) {
@@ -3236,10 +3300,11 @@ async def home() -> HTMLResponse:
             userFacingBackendError(j, errTxt || r.statusText || "APN update failed")
           );
         }
-        if (!j.ok) throw new Error(userFacingBackendError(j, "CGDCONT was rejected."));
+        if (!j.ok) throw new Error(userFacingBackendError(j, "APN/auth profile was rejected."));
         msgEl.textContent = j.message || "APN updated.";
         msgEl.className = "label ok";
         el("ds-apn-password").value = "";
+        el("ds-pdp-net-pass").value = "";
         await pollFallback();
       } catch (e) {
         msgEl.textContent = `APN error: ${e.message || e}`;
@@ -6883,6 +6948,14 @@ async def home() -> HTMLResponse:
     function clearDataServiceKpi() {
       lastDataService = {};
       el("ds-apn").textContent = "-";
+      const pdpTk = el("ds-pdp-type-kpi");
+      if (pdpTk) pdpTk.textContent = "—";
+      const pdpUk = el("ds-pdp-user-kpi");
+      if (pdpUk) pdpUk.textContent = "—";
+      const pdpAk = el("ds-pdp-auth-kpi");
+      if (pdpAk) pdpAk.textContent = "—";
+      const pdpPh = el("ds-pdp-pw-hint");
+      if (pdpPh) pdpPh.textContent = "—";
       el("ds-pdp").textContent = "-";
       el("ds-cid1").textContent = "-";
       el("ds-cid1").className = "";
@@ -7704,13 +7777,18 @@ async def _require_packet_data_for_host_traffic_tests() -> None:
 
 @app.post("/api/network/apn")
 async def network_apn_set(body: ApnSetBody) -> dict:
-    """Set PDP APN via AT+CGDCONT (password-gated). Optionally QIDEACT, CGATT, QIACT."""
+    """Set PDP APN via AT+CGDCONT, AT+CGAUTH, AT+QICSGP (password-gated). Optionally QIDEACT, CGATT, QIACT."""
     if (body.password or "") != DATA_GATE_UNLOCK_PASSWORD:
         raise HTTPException(status_code=403, detail="Invalid password for APN change.")
 
     apn = _sanitize_apn_for_at(body.apn)
     pdp = _normalize_cgdcont_pdp_type(body.pdp_type)
     cid = int(body.cid)
+    auth_t = int(body.pdp_auth_type)
+    if auth_t not in (0, 1, 2, 3):
+        raise HTTPException(status_code=400, detail="pdp_auth_type must be 0..3.")
+    pdp_user = _sanitize_pdp_user_or_password(body.pdp_username, "pdp_username")
+    pdp_pass = _sanitize_pdp_user_or_password(body.pdp_password, "pdp_password")
 
     resume_kpi = _exclusive_section_resume_kpi_snapshot()
     actions: list[dict] = []
@@ -7735,9 +7813,17 @@ async def network_apn_set(body: ApnSetBody) -> dict:
             cmd = f'AT+CGDCONT={cid},"{pdp}","{apn}"'
             cgd_set = await engine.send_command(cmd, timeout_sec=15.0)
             actions.append({"cmd": cmd, "res": cgd_set})
-            set_ok = bool(cgd_set.get("ok", False))
 
-            qic_cmd = f'AT+QICSGP={cid},1,"{apn}","","",0'
+            if auth_t == 0:
+                cgauth_cmd = f"AT+CGAUTH={cid},0"
+            else:
+                cgauth_cmd = f'AT+CGAUTH={cid},{auth_t},"{pdp_user}","{pdp_pass}"'
+            cgauth_res = await engine.send_command(cgauth_cmd, timeout_sec=15.0)
+            actions.append({"cmd": cgauth_cmd, "res": cgauth_res})
+
+            q_user = "" if auth_t == 0 else pdp_user
+            q_pass = "" if auth_t == 0 else pdp_pass
+            qic_cmd = f'AT+QICSGP={cid},1,"{apn}","{q_user}","{q_pass}",{auth_t}'
             qic_res = await engine.send_command(qic_cmd, timeout_sec=15.0)
             actions.append(
                 {
@@ -7745,6 +7831,11 @@ async def network_apn_set(body: ApnSetBody) -> dict:
                     "res": qic_res,
                 }
             )
+
+            cgd_ok = bool(cgd_set.get("ok", False))
+            cgauth_ok = bool(cgauth_res.get("ok", False))
+            qic_ok = bool(qic_res.get("ok", False))
+            set_ok = cgd_ok and cgauth_ok and qic_ok
 
             if body.reactivate and set_ok:
                 need_attach = bool(did_ideact or attached_before is not True)
@@ -7762,26 +7853,46 @@ async def network_apn_set(body: ApnSetBody) -> dict:
             contexts_parsed = _parse_cgdcont(read_res.get("lines", []))
             primary = next((c for c in contexts_parsed if c.get("cid") == cid), None)
 
+            cgauth_read_res = await engine.send_command("AT+CGAUTH?", timeout_sec=4.0)
+            actions.append({"cmd": "AT+CGAUTH? (readback)", "res": cgauth_read_res})
+            qicsgp_read_res = await engine.send_command("AT+QICSGP?", timeout_sec=4.0)
+            actions.append({"cmd": "AT+QICSGP? (readback)", "res": qicsgp_read_res})
+            auth_rows = _parse_cgauth(cgauth_read_res.get("lines", []))
+            qicsgp_rows = _parse_qicsgp(qicsgp_read_res.get("lines", []))
+            ca_one = next((r for r in auth_rows if r.get("cid") == cid), None)
+            qi_one = next((r for r in qicsgp_rows if r.get("cid") == cid), None)
+
             if not set_ok:
-                msg = "AT+CGDCONT did not complete successfully."
+                parts = []
+                if not cgd_ok:
+                    parts.append("AT+CGDCONT failed.")
+                if not cgauth_ok:
+                    parts.append("AT+CGAUTH failed.")
+                if not qic_ok:
+                    parts.append("AT+QICSGP failed.")
+                msg = " ".join(parts) if parts else "APN profile update failed."
             elif reattach_errs:
                 msg = (
-                    "APN saved (CGDCONT + mirror) but CGATT/QIACT reattachment did not complete successfully. "
+                    "APN + auth saved (CGDCONT + CGAUTH + QICSGP) but CGATT/QIACT reattachment did not complete successfully. "
                     "Use Allow Data or retry reconnect."
                 )
             elif body.reactivate:
-                msg = "APN updated (CGDCONT + Quectel QICSGP); packet data reattached (QIACT)."
+                msg = "APN updated (CGDCONT + CGAUTH + Quectel QICSGP); packet data reattached (QIACT)."
             elif did_ideact:
                 msg = (
-                    "APN stored; PDP context was deactivated to apply CGDCONT + QICSGP. "
-                    "Press Allow Data to reconnect with the new APN."
+                    "APN + auth stored; PDP context was deactivated to apply profile. "
+                    "Press Allow Data to reconnect with the new settings."
                 )
             else:
-                msg = "APN stored (CGDCONT + QICSGP). Use Allow Data if you need an immediate reconnect."
+                msg = "APN + auth stored (CGDCONT + CGAUTH + QICSGP). Use Allow Data if you need an immediate reconnect."
 
             md_parts = []
-            if not set_ok:
+            if not cgd_ok:
                 md_parts.append(describe_modem_send_result(cgd_set))
+            if not cgauth_ok:
+                md_parts.append(describe_modem_send_result(cgauth_res))
+            if not qic_ok:
+                md_parts.append(describe_modem_send_result(qic_res))
             for rr in reattach_errs:
                 md_parts.append(describe_modem_send_result(rr))
             modem_detail = combine_errors(*md_parts, sep=" | ")
@@ -7799,8 +7910,11 @@ async def network_apn_set(body: ApnSetBody) -> dict:
                 "apn": apn,
                 "cid": cid,
                 "pdp_type": pdp,
+                "pdp_auth_type": auth_t,
+                "pdp_username": pdp_user,
                 "primary_context": primary,
                 "cgdcont_contexts": contexts_parsed,
+                "auth_profile_read": {"cgauth": ca_one, "qicsgp": qi_one, "rows_cgauth": auth_rows, "rows_qicsgp": qicsgp_rows},
                 "reactivate_requested": bool(body.reactivate),
                 "did_pdp_detach": bool(did_ideact),
                 "message": msg,
@@ -7809,6 +7923,8 @@ async def network_apn_set(body: ApnSetBody) -> dict:
                     "cgatt_before": cgatt_before_res,
                     "qiact_before": qiact_res,
                     "cgdcont_read": read_res,
+                    "cgauth_read": cgauth_read_res,
+                    "qicsgp_read": qicsgp_read_res,
                 },
             }
         finally:
