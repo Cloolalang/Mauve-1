@@ -44,7 +44,7 @@ from app.sim_usim_services import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2.2.5"
+APP_VERSION = "2.2.6"
 
 
 def _serial_state_file_path() -> str:
@@ -1708,7 +1708,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="2.2.5",
+    version="2.2.6",
     lifespan=lifespan,
 )
 
@@ -1901,7 +1901,7 @@ async def home() -> HTMLResponse:
 
     <div class="card">
       <div class="label">Access / Operator</div>
-      <div class="row"><span class="label">Operator</span><span id="operator">-</span></div>
+      <div class="row"><span class="label">Registered network (PLMN)</span><span id="operator">-</span></div>
       <div class="row"><span class="label">Registration</span><span id="access-eps-scope">-</span></div>
       <div class="row"><span class="label">Modem FW</span><span id="modemfw" class="modemfw-value">-</span></div>
       <div class="row"><span class="label">Updated</span><span id="updated">-</span></div>
@@ -2126,6 +2126,15 @@ async def home() -> HTMLResponse:
         Same value as the RAT field above: LTE row from <code>AT+QENG</code> when present, else serving mode string (NR5G-NSA / NR5G-SA / …).
       </div>
       <canvas id="ratchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Registration trend</div>
+      <div class="label" style="font-size:11px; margin-top:4px; line-height:1.35;">
+        PLMN from <code>AT+QENG</code> LTE serving (<code>MCC/MNC</code>), EPS registration from KPI Data Service (+CEREG). Appends &quot;<code>MOCN</code>&quot; when the UK VF/H3G reciprocal heuristic flags reciprocal layer camping.
+      </div>
+      <canvas id="registrationchart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
     </div>
 
@@ -2695,7 +2704,7 @@ async def home() -> HTMLResponse:
     const caAggBwHistory = [];
     const carrierReselPciHistory = [];
     const carrierReselEarfcnHistory = [];
-    const categoryHistory = { state: [], rat: [], band: [], caEarfcn: [], nrBand: [] };
+    const categoryHistory = { state: [], rat: [], regTrend: [], band: [], caEarfcn: [], nrBand: [] };
     let chartWindowMs = 600 * 1000;
     const RF_SMOOTH_WINDOW = 10;
     const RF_STD_SAMPLE_MIN = 2;
@@ -2728,6 +2737,7 @@ async def home() -> HTMLResponse:
       "nr-pcichart",
       "nr-bandbwcombinedchart",
       "ratchart",
+      "registrationchart",
       "ca-combo-chart"
     ];
     const RF_CHART_TITLE_BY_ID = {
@@ -2744,6 +2754,8 @@ async def home() -> HTMLResponse:
       nbrcountcombinedchart: "Neighbour cell count trend — intra & inter (LTE)",
       bandbwcombinedchart: "Primary cell band & DL bandwidth trend",
       ratchart: "RAT Trend",
+      registrationchart:
+        "Registration trend — LTE PLMN (QENG serving), EPS scope (+CEREG), optional UK MOCN hint",
       "ca-combo-chart": "CA EARFCN config & aggregated bandwidth",
       "nr-rsrpchart": "NR5G — Primary & 1st strongest intra NR neighbour RSRP (dBm)",
       "nr-rsrqchart": "NR5G — Primary & 1st strongest intra NR neighbour RSRQ (dB)",
@@ -2774,6 +2786,23 @@ async def home() -> HTMLResponse:
       const mno = UK_MNO_BY_PLMN[s];
       if (mno) return `${mno} (${s})`;
       return s;
+    }
+
+    /** Snapshot line for Registration trend categorical chart */
+    function composeRegistrationTrendSample(sample) {
+      const reg = sample?.registration || {};
+      const ds = sample?.data_service || {};
+      const mcn = sample?.mocn || {};
+      const plmn = String(reg.plmn || "").trim();
+      let epsLbl = "?";
+      if (ds.eps_reg_scope === "home") epsLbl = "home";
+      else if (ds.eps_reg_scope === "roaming") epsLbl = "roam";
+      const cf = String(mcn.confidence || "").trim();
+      let suffix = "";
+      if (cf === "reciprocal_mocn") suffix = " MOCN";
+      else if (cf && cf !== "home_on_registered_layer") suffix = " n/a";
+      const core = plmn.length ? plmn : "?";
+      return `${core} EPS:${epsLbl}${suffix}`;
     }
 
     /** Prefer server *error*, append *modem_detail* only when distinct (CME/CMS hints). */
@@ -3060,6 +3089,7 @@ async def home() -> HTMLResponse:
 
     function applySnap(payload) {
       const sample = payload?.sample || {};
+      const reg = sample.registration || {};
       const net = sample.network || {};
       const modem = sample.modem || {};
       const ds = sample.data_service || {};
@@ -3076,28 +3106,72 @@ async def home() -> HTMLResponse:
         !!net.act &&
         String(net.act).toUpperCase() !== "NONE";
 
-      el("operator").textContent = formatOperatorName(net.operator);
+      {
+        const plmn = String(reg.plmn || "").trim();
+        const opLab = String(reg.operator_label || "").trim();
+        if (plmn && opLab) {
+          el("operator").textContent = `${opLab} (${plmn})`;
+        } else if (plmn) {
+          el("operator").textContent = `PLMN ${plmn}`;
+        } else {
+          el("operator").textContent = formatOperatorName(net.operator);
+        }
+      }
 
+      const mcn = sample.mocn || {};
       const epsScope = ds.eps_reg_scope;
       const epsStat = ds.eps_reg_stat;
       const epsTip =
         "EPS registration from AT+CEREG (3GPP: stat 1 = home PLMN, 5 = roaming). Refreshes with Data Service KPI (~5s).";
-      const scopeEl = el("access-eps-scope");
-      scopeEl.title = epsTip;
-      if (epsScope === "home") {
-        scopeEl.textContent = "Home network";
-        scopeEl.className = "ok";
-      } else if (epsScope === "roaming") {
-        scopeEl.textContent = "Roaming";
-        scopeEl.className = "warn";
-      } else if (epsStat !== null && epsStat !== undefined && `${epsStat}`.length) {
-        scopeEl.textContent = `Not home/roaming (${epsStat})`;
-        scopeEl.className = "";
-      } else {
-        scopeEl.textContent = "-";
-        scopeEl.className = "";
+
+      let mcnTail = "";
+      if (mcn.confidence === "reciprocal_mocn" || mcn.partner_layer_possible) {
+        const po = String(mcn.partner_operator || "").trim();
+        mcnTail = po ? ` \\u00b7 MOCN: on ${po} anchors` : " \\u00b7 MOCN: reciprocal layer";
+      } else if (mcn.confidence === "home_on_registered_layer") {
+        mcnTail = " \\u00b7 MOCN: no (home anchors)";
+      } else if (
+        mcn.confidence === "earfcn_outside_home_lists" ||
+        mcn.confidence === "unknown_registration_plmn" ||
+        mcn.confidence === "missing_registration_plmn"
+      ) {
+        mcnTail = " \\u00b7 MOCN heuristic: N/A";
       }
 
+      const scopeEl = el("access-eps-scope");
+      if (scopeEl) {
+        const tipLines = [epsTip];
+        if (Array.isArray(mcn.explain) && mcn.explain.length) {
+          tipLines.push("", "UK Vodafone / Three reciprocal layer (registration PLMN from QENG LTE + PCC EARFCN):");
+          for (const ln of mcn.explain) {
+            const s = String(ln || "").trim();
+            if (s) tipLines.push(s);
+          }
+        }
+        scopeEl.title = tipLines.join("\\n");
+
+        let regMain = "-";
+        if (epsScope === "home") {
+          regMain = "Home network";
+        } else if (epsScope === "roaming") {
+          regMain = "Roaming";
+        } else if (epsStat !== null && epsStat !== undefined && `${epsStat}`.length) {
+          regMain = `Not home/roaming (${epsStat})`;
+        } else {
+          regMain = "-";
+        }
+
+        scopeEl.textContent = `${regMain}${mcnTail}`;
+        if (epsScope === "home") {
+          scopeEl.className = "ok";
+        } else if (epsScope === "roaming") {
+          scopeEl.className = "warn";
+        } else if (epsStat !== null && epsStat !== undefined && `${epsStat}`.length) {
+          scopeEl.className = "";
+        } else {
+          scopeEl.className = "";
+        }
+      }
       el("band").textContent = net.band || "-";
       {
         const dpx = lte.duplex;
@@ -3370,6 +3444,7 @@ async def home() -> HTMLResponse:
         lastTrendSampleTs = trendTs;
         addCategorySample("state", srv.state || "-", trendTs);
         addCategorySample("rat", ratVal, trendTs);
+        addCategorySample("regTrend", composeRegistrationTrendSample(sample), trendTs);
         addCarrierReselSamples(idleMob, trendTs);
         if (primaryCellDataAvailable) {
           addRfSample("rsrp", lte.rsrp, trendTs, true);
@@ -3465,11 +3540,11 @@ async def home() -> HTMLResponse:
       el("lock-ratmode").textContent = v.mode_pref || "-";
       el("lock-lteband").textContent = v.lte_band || "-";
       const lteVal = String(v.lte_band || "");
-      const lteNorm = lteVal.replace(/\s/g, "");
+      const lteNorm = lteVal.replace(/\\s/g, "");
       const bandTokens = lteVal
         .split(/[:,]/)
         .map((s) => s.trim())
-        .filter((s) => /^\d+$/.test(s));
+        .filter((s) => /^\\d+$/.test(s));
       const caPolicy =
         !lteVal
           ? "-"
@@ -4481,7 +4556,7 @@ async def home() -> HTMLResponse:
             const ip = String(row.ipv4 || "").trim();
             const ad = String(row.adapter || "").trim();
             const okIp =
-              /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(ip) &&
+              /^(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})$/.test(ip) &&
               ip.split(".").every((x) => {
                 const n = Number(x);
                 return Number.isFinite(n) && n >= 0 && n <= 255;
@@ -4533,7 +4608,7 @@ async def home() -> HTMLResponse:
     function parseIperfPortField(raw) {
       const s = String(raw ?? "").trim();
       const spec = s.length ? s : "5300-5400";
-      const m = /^(\d+)\s*-\s*(\d+)$/.exec(spec.replace(/\s+/g, ""));
+      const m = /^(\\d+)\\s*-\\s*(\\d+)$/.exec(spec.replace(/\\s+/g, ""));
       if (m) {
         const a = Number(m[1]);
         const b = Number(m[2]);
@@ -7342,6 +7417,12 @@ async def home() -> HTMLResponse:
         categoryHover: true,
         categoryValueLabel: "RAT"
       });
+      drawCategoryChart(
+        "registrationchart",
+        categoryHistory.regTrend,
+        "#cbb3ff",
+        { labelMax: 28, leftPad: 126, categoryHover: true, categoryValueLabel: "Registration" }
+      );
       drawCaCombinedChart();
     }
 
@@ -7405,6 +7486,7 @@ async def home() -> HTMLResponse:
       carrierReselEarfcnHistory.length = 0;
       categoryHistory.state.length = 0;
       categoryHistory.rat.length = 0;
+      categoryHistory.regTrend.length = 0;
       categoryHistory.band.length = 0;
       categoryHistory.caEarfcn.length = 0;
       categoryHistory.nrBand.length = 0;

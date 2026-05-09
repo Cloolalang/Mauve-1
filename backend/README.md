@@ -1,6 +1,12 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 2.2.5** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **2.2.5**).
+**Version 2.2.6** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **2.2.6**).
+
+Notes for **v2.2.6**:
+
+- **UK MOCN-style heuristic**, **`sample.registration`** / **`sample.mocn`**, dashboard **Registered network (PLMN)** / **Registration** tooltip / **Registration trend** chart (`app/kpi_service.py`, `app/mocn_detect.py`, `app/mocn/*.json`; PyInstaller **`modemtestdriver.spec`** data bundle).
+- **Test runner summary CSV**: **`registration_state`** aggregate column (after **`rat_most_common`** — root **Changes in v2.2.6**).
+- OpenAPI / page header: **v2.2.6**.
 
 Notes for **v2.2.5**:
 

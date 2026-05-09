@@ -441,6 +441,37 @@ def _most_common_nonempty_str(values: list[str]) -> str:
     return pair[0]
 
 
+def _registration_state_csv_line(sample: dict[str, Any]) -> str:
+    """One-line registration summary for CSV: QENG LTE PLMN, optional catalog label, EPS scope (+CEREG), UK MOCN hint."""
+    reg = sample.get("registration") if isinstance(sample.get("registration"), dict) else {}
+    ds = sample.get("data_service") if isinstance(sample.get("data_service"), dict) else {}
+    mcn = sample.get("mocn") if isinstance(sample.get("mocn"), dict) else {}
+    plmn = str(reg.get("plmn") or "").strip()
+    lab = str(reg.get("operator_label") or "").strip()
+    eps_scope = ds.get("eps_reg_scope")
+    if eps_scope == "home":
+        eps_lbl = "home"
+    elif eps_scope == "roaming":
+        eps_lbl = "roam"
+    else:
+        eps_lbl = "?"
+    cf = str(mcn.get("confidence") or "").strip()
+    parts: list[str] = []
+    if plmn:
+        parts.append(plmn)
+    if lab:
+        parts.append(lab)
+    parts.append(f"EPS:{eps_lbl}")
+    if cf == "reciprocal_mocn":
+        po = str(mcn.get("partner_operator") or "").strip()
+        parts.append(f"MOCN->{po}" if po else "MOCN")
+    elif cf == "home_on_registered_layer":
+        parts.append("layer:own")
+    elif cf:
+        parts.append(f"h:{cf}")
+    return " ".join(parts)
+
+
 # Match dashboard ``formatOperatorName`` PLMN hints (show friendly MNO name in CSV).
 _UK_MNO_BY_PLMN: dict[str, str] = {
     "23415": "Vodafone",
@@ -540,6 +571,7 @@ def aggregate_snapshots(samples: list[dict[str, Any]]) -> dict[str, Any]:
     nr_arfcn_keys: list[str] = []
     nr_pci_keys: list[str] = []
     nr_dl_bw_vals: list[float] = []
+    registration_state_lines: list[str] = []
 
     for s in samples:
         lte = _dig(s, "servingcell", "lte") or {}
@@ -633,6 +665,8 @@ def aggregate_snapshots(samples: list[dict[str, Any]]) -> dict[str, Any]:
         elif isinstance(lte, dict) and lte.get("earfcn") is not None:
             endc_false_ct += 1
 
+        registration_state_lines.append(_registration_state_csv_line(s))
+
     def avg(xs: list[float]) -> str:
         if not xs:
             return ""
@@ -655,6 +689,7 @@ def aggregate_snapshots(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "apn_most_common": _most_common_nonempty_str(apn_keys),
         "operator_most_common": _operator_most_common_display(operator_keys),
         "rat_most_common": _most_common_nonempty_str(rat_keys),
+        "registration_state_most_common": _most_common_nonempty_str(registration_state_lines),
         "endc_state": endc_state,
         "ca_status_most_common": _most_common_nonempty_str(ca_status_keys),
         "ca_carriers_pcc_scc": _most_common_nonempty_str(ca_carrier_txt_keys),
@@ -893,6 +928,7 @@ def build_csv_row(
         agg.get("apn_most_common", ""),
         agg.get("operator_most_common", ""),
         agg.get("rat_most_common", ""),
+        agg.get("registration_state_most_common", ""),
         agg.get("endc_state", ""),
         agg.get("ca_status_most_common", ""),
         agg.get("ca_carriers_pcc_scc", ""),
@@ -965,6 +1001,7 @@ CSV_HEADER = [
     "apn_most_common",
     "operator_most_common",
     "rat_most_common",
+    "registration_state",
     "endc_state",
     "ca_status_most_common",
     "ca_carriers_pcc_scc",

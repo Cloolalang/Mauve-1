@@ -1,0 +1,21 @@
+{
+  "schema_version": 2,
+  "catalog_id": "uk_vodafone_h3g",
+  "country": "GB",
+  "label": "UK reciprocal LTE PCC home anchors (Vodafone UK \u2194 Three UK / H3G)",
+  "operators": [
+    {
+      "id": "vodafone_uk",
+      "label": "Vodafone UK",
+      "registration_plmn_ids": ["23415"],
+      "home_lte_earfcns": [6300, 3501, 247, 223, 2850]
+    },
+    {
+      "id": "three_uk",
+      "label": "Three UK (H3G)",
+      "registration_plmn_ids": ["23420"],
+      "home_lte_earfcns": [9360, 6175, 76, 1363]
+    }
+  ],
+  "note": "Registration PLMN from AT+QENG servingcell LTE MCC+MNC versus PCC EARFCN anchor lists."
+}

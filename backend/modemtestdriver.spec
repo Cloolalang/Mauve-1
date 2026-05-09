@@ -37,11 +37,14 @@ for m in hiddenimports:
         _hi.append(m)
 hiddenimports = _hi
 
+mocn_dir = BACKEND / "app" / "mocn"
+mocn_datas = [(str(p), str(pathlib.Path("app") / "mocn")) for p in sorted(mocn_dir.glob("*.json"))]
+
 a = Analysis(
     [str(BACKEND / "run_desktop.py")],
     pathex=[str(BACKEND)],
     binaries=[],
-    datas=[],
+    datas=mocn_datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

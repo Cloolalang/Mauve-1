@@ -7,6 +7,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.mocn_detect import evaluate_mocn_uk_vf_h3g, mocn_eval_context
 from app.serial_engine import SerialEngine
 
 # Rolling window for LTE serving-cell identity change counts (EARFCN/PCI deltas between polls).
@@ -1523,10 +1524,33 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                 qcainfo_parsed = _parse_qcainfo_for_snapshot(list(qcainfo_res.get("lines") or []))
                 qcainfo_parsed["query_ok"] = bool(qcainfo_res.get("ok"))
 
+                try:
+                    mocn_cat_id, mocn_ops, mocn_cat_file = mocn_eval_context()
+                    mocn_snapshot = evaluate_mocn_uk_vf_h3g(
+                        servingcell=serving if isinstance(serving, dict) else None,
+                        catalog_operators=mocn_ops,
+                        catalog_id=mocn_cat_id,
+                        catalog_file=mocn_cat_file,
+                    )
+                except Exception as mocn_exc:  # noqa: BLE001 — never stall KPI polling
+                    mocn_snapshot = {
+                        "heuristic_catalog": None,
+                        "confidence": "error",
+                        "partner_layer_possible": False,
+                        "explain": ["MOCN heuristic failed internally (skipped).", str(mocn_exc)],
+                    }
+
+                registration_block = {
+                    "plmn": mocn_snapshot.get("registration_plmn"),
+                    "operator_label": mocn_snapshot.get("registration_operator_label"),
+                    "source": mocn_snapshot.get("registration_source"),
+                }
+
                 parsed = {
                     "sample_ts": sample_ts,
                     "servingcell": serving,
                     "network": net,
+                    "registration": registration_block,
                     "modem": {
                         "firmware": runtime.modem_fw,
                         "firmware_updated_at": runtime.modem_fw_at or None,
@@ -1539,6 +1563,7 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                     "nr_rf": nr_rf,
                     "qcainfo": qcainfo_parsed,
                     "carrier_reselection": carrier_resel,
+                    "mocn": mocn_snapshot,
                     "raw": {
                         "cgmr": cgmr if need_fw else None,
                         "qeng": qeng,

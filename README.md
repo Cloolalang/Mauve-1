@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 2.2.5**
+**Version 2.2.6**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v2.2.5** is shown in the page header with a **Lord Kelvin** quotation on measurement).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v2.2.6** is shown in the page header with a **Lord Kelvin** quotation on measurement).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -41,11 +41,11 @@ Details: **`backend/run_desktop.py`**, **`backend/modemtestdriver.spec`**, **`ba
 ### Maintainers: publish a Release with binaries
 
 1. Commit and push source changes on **`main`** (no **`dist/`** in git).
-2. Create and push an annotated **version tag** matching **`v*`** (example **`v2.2.5`**):
+2. Create and push an annotated **version tag** matching **`v*`** (example **`v2.2.6`**):
 
    ```powershell
-   git tag -a v2.2.5 -m "v2.2.5"
-   git push origin v2.2.5
+   git tag -a v2.2.6 -m "v2.2.6"
+   git push origin v2.2.6
    ```
 
 3. GitHub Actions runs **[.github/workflows/release-windows.yml](.github/workflows/release-windows.yml)**, builds the zip, and attaches **`5GModemTestDriver-windows-amd64.zip`** to that Release.
@@ -131,6 +131,13 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v2.2.6**
+
+- **UK reciprocal MOCN-style heuristic (Vodafone UK ↔ Three / H3G)**: KPI adds **`sample.registration`** (PLMN label from **`AT+QENG`** LTE serving **`MCC`/`MNC`**) and **`sample.mocn`** versus a bundled **`app/mocn/catalog_uk_vodafone_h3g.json`** (PCC **`EARFCN`** vs catalogue home-anchor lists — no SIM/IMSI). Dashboard **Registered network (PLMN)** row; **Registration** tooltip includes heuristic text; PyInstaller **`modemtestdriver.spec`** bundles **`app/mocn/*.json`**.
+- **Registration trend** categorical chart / live history (toolbar window + clear charts).
+- **Test runner** **`run_<id>_summary.csv`**: **`registration_state`** column (most-common line per iteration: PLMN, optional catalogue label, **`EPS:`** home/roam/+CEREG-derived scope, **`MOCN->…`** / **`layer:own`** / heuristic tail); placed after **`rat_most_common`**.
+- **Embedded dashboard JS**: regex literals in **`main.py`** use escapes that avoid Python **`SyntaxWarning: invalid escape sequence`** when importing.
 
 **Changes in v2.2.5**
 
@@ -666,7 +673,7 @@ Bundled examples ship under **`backend/automated_tests/test_cases/`** (one `*.js
 
 ### CSV summary row
 
-**`run_<id>_summary.csv`** has a header row plus **one data row per tool iteration** in that run (same header; extra iterations are appended). Column order: lab fields (**`project_name`**, **`test_location`**, **`engineer`**, **`modem_antenna_config`**, **`note`**), **`run_started_utc`** / **`run_ended_utc`** (per iteration), profile **`test_type`**, **`run_success`** / **`run_error`** / **`run_duration_ms`** (that iteration), **`test_config_json`**, **`test_iteration_index`**, **`test_iterations_total`**, **`test_iteration_delay_sec`**, then **active tool columns** (ping, iperf, and VoLTE families are all present; unused families are blank), then **RF KPI aggregates** for the whole run (**`kpi_sample_count`** through **`primary_cell_id_most_common`**), then **modem lock readback** (**`lock_rat_mode`**, **`lock_lte_bands`**, **`lock_ca_policy`**, **`lock_nr_bands`**, **`lock_nrdc`** — from **`AT+QNWPREFCFG`** after the run (retried if the modem was busy; see **Changes in v2.2.3** / **Changes in v2.2.1**), then the remaining KPI aggregate columns through NR5G. Type-specific tool headers include **`iperf_connect_timeout_sec`** (when set), **`iperf_direction`** (**`download_upload`** for **`iperf_download_upload`** profiles), **`iperf_throughput_dl_mbps`**, and **`iperf_throughput_ul_mbps`** (**`iperf_download`** fills DL only, **`iperf_upload`** UL only, **`iperf_download_upload`** both; numeric Mbps strings, blank when absent). For **`volte_call_outbound`**, **`volte_ceer`** (**`AT+CEER`**) and **`volte_modem_call_messages`** (captures during the VoLTE API call — see **Changes in v2.2.5**).
+**`run_<id>_summary.csv`** has a header row plus **one data row per tool iteration** in that run (same header; extra iterations are appended). Column order: lab fields (**`project_name`**, **`test_location`**, **`engineer`**, **`modem_antenna_config`**, **`note`**), **`run_started_utc`** / **`run_ended_utc`** (per iteration), profile **`test_type`**, **`run_success`** / **`run_error`** / **`run_duration_ms`** (that iteration), **`test_config_json`**, **`test_iteration_index`**, **`test_iterations_total`**, **`test_iteration_delay_sec`**, then **active tool columns** (ping, iperf, and VoLTE families are all present; unused families are blank), then **RF KPI aggregates** for the whole run (**`kpi_sample_count`** through **`primary_cell_id_most_common`**), then **modem lock readback** (**`lock_rat_mode`**, **`lock_lte_bands`**, **`lock_ca_policy`**, **`lock_nr_bands`**, **`lock_nrdc`** — from **`AT+QNWPREFCFG`** after the run (retried if the modem was busy; see **Changes in v2.2.3** / **Changes in v2.2.1**), then KPI aggregate **`apn_most_common`**, **`operator_most_common`**, **`rat_most_common`**, **`registration_state`** (see **Changes in v2.2.6**), **`endc_state`**, **`ca_status_most_common`**, **`ca_carriers_pcc_scc`**, **`ca_aggregated_dl_bw_mhz_avg`**, **`lte_pcell_earfcn_reselections_per_min_avg`**, **`lte_pcell_pci_reselections_per_min_avg`**, **`nr5g_primary_rsrp_avg_dbm`**, **`nr5g_primary_rsrq_avg_db`**, **`nr5g_primary_sinr_avg_db`**, **`nr5g_primary_arfcn_most_common`**, **`nr5g_primary_pci_most_common`**, **`nr5g_primary_dl_bw_mhz_avg`**. Type-specific tool headers include **`iperf_connect_timeout_sec`** (when set), **`iperf_direction`** (**`download_upload`** for **`iperf_download_upload`** profiles), **`iperf_throughput_dl_mbps`**, and **`iperf_throughput_ul_mbps`** (**`iperf_download`** fills DL only, **`iperf_upload`** UL only, **`iperf_download_upload`** both; numeric Mbps strings, blank when absent). For **`volte_call_outbound`**, **`volte_ceer`** (**`AT+CEER`**) and **`volte_modem_call_messages`** (captures during the VoLTE API call — see **Changes in v2.2.5**).
 
 ### KPI vs dashboard charts
 
