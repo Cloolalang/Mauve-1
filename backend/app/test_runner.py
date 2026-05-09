@@ -18,7 +18,9 @@ from fastapi import HTTPException
 
 from app.kpi_service import format_qcainfo_carriers_pcc_scc
 
-TEST_TYPES = frozenset({"ping", "iperf_download", "iperf_upload", "volte_call_outbound"})
+TEST_TYPES = frozenset(
+    {"ping", "iperf_download", "iperf_upload", "iperf_download_upload", "volte_call_outbound"}
+)
 MODEM_ANTENNA_CONFIGS = frozenset({"SISO", "MIMO"})
 DEFAULT_MODEM_ANTENNA_CONFIG = "SISO"
 
@@ -285,7 +287,7 @@ def validate_profile(p: dict[str, Any]) -> list[str]:
                 errs.append(f"ping.test_config.{k} is required")
         if "bind_ipv4" not in cfg:
             errs.append("ping.test_config.bind_ipv4 is required (use empty string for no interface bind)")
-    elif tt in ("iperf_download", "iperf_upload"):
+    elif tt in ("iperf_download", "iperf_upload", "iperf_download_upload"):
         for k in ("host", "port", "duration_sec", "protocol", "parallel_streams", "bitrate_limit_mbps", "mobile_only"):
             if k not in cfg:
                 errs.append(f"iperf.test_config.{k} is required")
@@ -297,6 +299,22 @@ def validate_profile(p: dict[str, Any]) -> list[str]:
                     errs.append("iperf.test_config.connect_timeout_sec must be between 1 and 120 when set")
             except (TypeError, ValueError):
                 errs.append("iperf.test_config.connect_timeout_sec must be a number when set")
+        prm = cfg.get("port_range_max")
+        if prm is not None and prm != "":
+            try:
+                pm = int(prm)
+            except (TypeError, ValueError):
+                errs.append("iperf.test_config.port_range_max must be an integer when set")
+            else:
+                if pm < 1 or pm > 65535:
+                    errs.append("iperf.test_config.port_range_max must be 1..65535 when set")
+                else:
+                    try:
+                        p0 = int(cfg.get("port"))
+                    except (TypeError, ValueError):
+                        p0 = -1
+                    if p0 >= 1 and pm < p0:
+                        errs.append("iperf.test_config.port_range_max must be >= port")
     elif tt == "volte_call_outbound":
         for k in ("phone_number", "call_duration_sec", "answer_wait_sec", "auto_hangup"):
             if k not in cfg:
@@ -681,11 +699,27 @@ def ping_tool_csv_columns(cfg: dict[str, Any], tool_result: dict[str, Any]) -> d
     }
 
 
-def iperf_tool_csv_columns(cfg: dict[str, Any], tool_result: dict[str, Any], test_type: str) -> dict[str, str]:
-    mbps = tool_result.get("throughput_mbps")
-    mbps_str = ""
+def _fmt_mbps_str(mbps: Any) -> str:
     if isinstance(mbps, (int, float)) and float(mbps) == float(mbps):
-        mbps_str = str(round(float(mbps), 3)).rstrip("0").rstrip(".")
+        return str(round(float(mbps), 3)).rstrip("0").rstrip(".")
+    return ""
+
+
+def iperf_tool_csv_columns(cfg: dict[str, Any], tool_result: dict[str, Any], test_type: str) -> dict[str, str]:
+    if test_type == "iperf_download_upload":
+        dl_s = _fmt_mbps_str(tool_result.get("throughput_mbps_dl"))
+        ul_s = _fmt_mbps_str(tool_result.get("throughput_mbps_ul"))
+        parts = []
+        if dl_s:
+            parts.append(f"DL {dl_s}")
+        if ul_s:
+            parts.append(f"UL {ul_s}")
+        mbps_str = " ".join(parts)
+        direction = "download_upload"
+    else:
+        mbps = tool_result.get("throughput_mbps")
+        mbps_str = _fmt_mbps_str(mbps)
+        direction = str(tool_result.get("direction") or test_type.replace("iperf_", ""))
     ct = tool_result.get("connect_timeout_sec")
     ct_s = ""
     if ct is not None and str(ct).strip() != "":
@@ -703,7 +737,7 @@ def iperf_tool_csv_columns(cfg: dict[str, Any], tool_result: dict[str, Any], tes
         "iperf_protocol": str(tool_result.get("protocol") or ""),
         "iperf_bitrate_limit_mbps": "" if cfg.get("bitrate_limit_mbps") is None else str(cfg.get("bitrate_limit_mbps")),
         "iperf_mobile_only": str(bool(tool_result.get("mobile_only"))).lower(),
-        "iperf_direction": str(tool_result.get("direction") or test_type.replace("iperf_", "")),
+        "iperf_direction": direction,
         "iperf_throughput_mbps": mbps_str,
     }
 
@@ -728,7 +762,7 @@ def tool_csv_columns_for_test_type(
     ep, ei, ev = _empty_ping_tool_cols(), _empty_iperf_tool_cols(), _empty_volte_tool_cols()
     if test_type == "ping":
         ep = ping_tool_csv_columns(cfg, tool_result)
-    elif test_type in ("iperf_download", "iperf_upload"):
+    elif test_type in ("iperf_download", "iperf_upload", "iperf_download_upload"):
         ei = iperf_tool_csv_columns(cfg, tool_result, test_type)
     elif test_type == "volte_call_outbound":
         ev = volte_tool_csv_columns(cfg, tool_result)

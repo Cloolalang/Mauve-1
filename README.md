@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 2.0**
+**Version 2.1**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v2.0** is shown in the page header with a **Lord Kelvin** quotation on measurement).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v2.1** is shown in the page header with a **Lord Kelvin** quotation on measurement).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -39,11 +39,11 @@ Details: **`backend/run_desktop.py`**, **`backend/modemtestdriver.spec`**, **`ba
 ### Maintainers: publish a Release with binaries
 
 1. Commit and push source changes on **`main`** (no **`dist/`** in git).
-2. Create and push an annotated **version tag** matching **`v*`** (example **`v2.0.0`**):
+2. Create and push an annotated **version tag** matching **`v*`** (example **`v2.1.0`**):
 
    ```powershell
-   git tag -a v2.0.0 -m "v2.0.0"
-   git push origin v2.0.0
+   git tag -a v2.1.0 -m "v2.1.0"
+   git push origin v2.1.0
    ```
 
 3. GitHub Actions runs **[.github/workflows/release-windows.yml](.github/workflows/release-windows.yml)**, builds the zip, and attaches **`5GModemTestDriver-windows-amd64.zip`** to that Release.
@@ -130,9 +130,15 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
 
+**Changes in v2.1**
+
+- **iperf port range**: **`POST /api/tools/iperf-test`** accepts optional **`port_range_max`**; each request picks one random TCP port in **`[port, port_range_max]`** (inclusive). Dashboard **Port** default **`5300-5400`**; response includes **`port_range_requested`** when a range was used. Bundled **`smoke_iperf_dl`** / **`smoke_iperf_ul`** / **`smoke_iperf_dlul`** use **`5300`–`5400`** with **`connect_timeout_sec`** in **`test_config`**.
+- **iperf connect budget (bundled iperf 3.1.1)**: when **`--connect-timeout`** is not supported, a **TCP pre-connect** (same bind as **`-B`**) enforces **`connect_timeout_sec`** so manual tests do not wait on long OS SYN retries.
+- **`iperf_download_upload` profile**: one iteration runs **download** then **upload** on the **same** chosen server port (~**0.8 s** gap). CSV **`iperf_direction`** **`download_upload`**; **`iperf_throughput_mbps`** combines DL/UL (e.g. **`DL 6.1 UL 2.3`**).
+
 **Changes in v2.0**
 
-- **Test runner in tree**: **`backend/app/test_runner.py`** plus bundled profiles under **`backend/automated_tests/test_cases/`** (**`smoke_ping`**, **`smoke_iperf_dl`**, **`smoke_iperf_ul`**, **`smoke_volte`**). The app merges these with saved profiles in **`backend/.state/test_profiles.json`** (saved names override bundled files). Generated run output under **`backend/automated_tests/test_results/`** is not committed (see **`.gitignore`**); keep only **`.gitkeep`** there in git.
+- **Test runner in tree**: **`backend/app/test_runner.py`** plus bundled profiles under **`backend/automated_tests/test_cases/`** (**`smoke_ping`**, **`smoke_iperf_dl`**, **`smoke_iperf_ul`**, **`smoke_iperf_dlul`**, **`smoke_volte`**). Profile **`test_type`** **`iperf_download_upload`** runs TCP **download** then **upload** (same chosen server port). The app merges these with saved profiles in **`backend/.state/test_profiles.json`** (saved names override bundled files). Generated run output under **`backend/automated_tests/test_results/`** is not committed (see **`.gitignore`**); keep only **`.gitkeep`** there in git.
 - **iperf smoke profiles**: **`connect_timeout_sec`** set on download/upload smoke configs (1–120 s; same semantics as **`POST /api/tools/iperf-test`** / profile **`test_config`**). **`iperf3 --connect-timeout`** is appended only when the discovered binary’s **`--help`** lists it (bundled Windows **3.1.1** skips it); set **`MD_IPERF_BIN`** to a newer **iperf3.exe** if you want that flag. Subprocess wall-clock still includes connect headroom from **`connect_timeout_sec`**.
 - **QCAINFO text**: **`earfcn_active_text`** / carrier summaries use **`EARFCN/PCI(PCC)`** and **`EARFCN/PCI(SCC)`** style (comma-separated), aligned with the dashboard **EARFCN active (CA)** row.
 
@@ -485,7 +491,7 @@ The JSON includes `sample.carrier_reselection` with `window_sec` (60), `primary_
 - `POST /api/network/locks`
 - `POST /api/tools/modem-reset`
 - `GET /api/tools/bind-interfaces` (Windows IPv4 adapters for bind dropdowns)
-- `POST /api/tools/iperf-test` (TCP iperf3 client; optional `parallel_streams`; **`connect_timeout_sec`** default **10** (1–120, iperf3 `--connect-timeout` in ms when supported), bind IP, bitrate limit; UI default **10** streams)
+- `POST /api/tools/iperf-test` (TCP iperf3 client; optional **`port_range_max`** with **`port`** ≤ max picks one random server port per request; optional `parallel_streams`; **`connect_timeout_sec`** default **10** (1–120; iperf3 `--connect-timeout` in ms when supported, else TCP pre-connect); bind IP, bitrate limit; UI default **10** streams; dashboard **Port** default **`5300-5400`** or a single port such as **`5361`**)
 - `POST /api/tools/icmp-ping` (host OS ICMP ping sweep; optional Windows `-S` bind)
 - `GET /api/tools/auto-answer` / `POST /api/tools/auto-answer` — optional **modem `ATS0`** (legacy); not used by the dashboard VoLTE card
 - `GET /api/tools/host-auto-answer` / `POST /api/tools/host-auto-answer` — **auto-answer** used by the dashboard (**`ATA`** from PC; body **`enabled`**, **`rings`**, **`password`**)
@@ -610,11 +616,11 @@ Saved profile **overrides** live in **`backend/.state/test_profiles.json`** in d
 
 ### Profiles
 
-Bundled examples ship under **`backend/automated_tests/test_cases/`** (one `*.json` file per profile: **`smoke_ping`**, **`smoke_iperf_dl`**, **`smoke_iperf_ul`**, **`smoke_volte`**). The loader merges them with **`test_profiles.json`**: **saved names win** over bundled files with the same `name`. **`DELETE`** only removes entries from **`test_profiles.json`** (files under `test_cases/` are not deleted).
+Bundled examples ship under **`backend/automated_tests/test_cases/`** (one `*.json` file per profile: **`smoke_ping`**, **`smoke_iperf_dl`**, **`smoke_iperf_ul`**, **`smoke_iperf_dlul`**, **`smoke_volte`**). The loader merges them with **`test_profiles.json`**: **saved names win** over bundled files with the same `name`. **`DELETE`** only removes entries from **`test_profiles.json`** (files under `test_cases/` are not deleted).
 
 - **`GET /api/test/profiles`** — merged list: `profiles`, `names`, plus `example_profile_names` (bundled-only names), `bundled_examples_dir` / **`test_cases_dir`** (same path), **`test_results_root_dir`**, and **`automated_tests_root`**.
 - **`GET /api/test/profiles/{name}`** — fetch one profile by name (registry or bundled).
-- **`POST /api/test/profiles`** — create or replace a profile in **`test_profiles.json`** (JSON body must match the schema: `schema_version` **1**, `name`, `test_type` one of `ping` | `iperf_download` | `iperf_upload` | `volte_call_outbound`, `test_config`, optional `modem_requirements`, optional defaults `project_name`, `test_location`, `engineer`, optional **`modem_antenna_config`** **`SISO`** (default) or **`MIMO`**). For **ping**, `test_config.bind_ipv4` must be present; use **`""`** for no default bind (Test Runner / API can override per run). For **iperf** profiles, **`test_config.connect_timeout_sec`** is optional (1–120 seconds; defaults to **10** when omitted; same semantics as **`POST /api/tools/iperf-test`**).
+- **`POST /api/test/profiles`** — create or replace a profile in **`test_profiles.json`** (JSON body must match the schema: `schema_version` **1**, `name`, `test_type` one of `ping` | `iperf_download` | `iperf_upload` | **`iperf_download_upload`** | `volte_call_outbound`, `test_config`, optional `modem_requirements`, optional defaults `project_name`, `test_location`, `engineer`, optional **`modem_antenna_config`** **`SISO`** (default) or **`MIMO`**). For **ping**, `test_config.bind_ipv4` must be present; use **`""`** for no default bind (Test Runner / API can override per run). For **iperf** profiles (including **`iperf_download_upload`**, which runs **download** then **upload** on the same chosen port), optional **`test_config.port_range_max`** (integer, ≥ **`port`**) randomizes the port for the **download** leg; **upload** reuses that port. Omit **`port_range_max`** for a fixed **`port`**. **`test_config.connect_timeout_sec`** is optional (1–120 seconds; defaults to **10** when omitted; same semantics as **`POST /api/tools/iperf-test`**).
 - **`DELETE /api/test/profiles/{name}`** — remove a profile from **`test_profiles.json`** only.
 
 ### Run
@@ -628,7 +634,7 @@ Bundled examples ship under **`backend/automated_tests/test_cases/`** (one `*.js
 
 ### CSV summary row
 
-**`run_<id>_summary.csv`** has a header row plus **one data row per tool iteration** in that run (same header; extra iterations are appended). Column order: lab fields (**`project_name`**, **`test_location`**, **`engineer`**, **`modem_antenna_config`**, **`note`**), **`run_started_utc`** / **`run_ended_utc`** (per iteration), profile **`test_type`**, **`run_success`** / **`run_error`** / **`run_duration_ms`** (that iteration), **`test_config_json`**, **`test_iteration_index`**, **`test_iterations_total`**, **`test_iteration_delay_sec`**, then **active tool columns** (ping, iperf, and VoLTE families are all present; unused families are blank), then **RF KPI aggregates** for the whole run (**`kpi_sample_count`** through NR5G columns—the same aggregate block is repeated on each row because sampling spans the full run). Type-specific tool headers include **`iperf_connect_timeout_sec`** (when set) and **`iperf_throughput_mbps`** for iperf.
+**`run_<id>_summary.csv`** has a header row plus **one data row per tool iteration** in that run (same header; extra iterations are appended). Column order: lab fields (**`project_name`**, **`test_location`**, **`engineer`**, **`modem_antenna_config`**, **`note`**), **`run_started_utc`** / **`run_ended_utc`** (per iteration), profile **`test_type`**, **`run_success`** / **`run_error`** / **`run_duration_ms`** (that iteration), **`test_config_json`**, **`test_iteration_index`**, **`test_iterations_total`**, **`test_iteration_delay_sec`**, then **active tool columns** (ping, iperf, and VoLTE families are all present; unused families are blank), then **RF KPI aggregates** for the whole run (**`kpi_sample_count`** through NR5G columns—the same aggregate block is repeated on each row because sampling spans the full run). Type-specific tool headers include **`iperf_connect_timeout_sec`** (when set), **`iperf_direction`** (**`download_upload`** for **`iperf_download_upload`** profiles), and **`iperf_throughput_mbps`** (for **`iperf_download_upload`**, a combined string such as **`DL 6.1 UL 2.3`** when both legs succeed).
 
 ### KPI vs dashboard charts
 

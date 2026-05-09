@@ -7,9 +7,11 @@ import json
 import logging
 import math
 import os
+import random
 import sys
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import time
@@ -34,7 +36,7 @@ from app.sim_usim_services import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2.0"
+APP_VERSION = "2.1"
 
 
 def _serial_state_file_path() -> str:
@@ -345,6 +347,15 @@ class HostAutoAnswerBody(BaseModel):
 class IperfTestBody(BaseModel):
     host: str = Field(default="iperf.as42831.net", min_length=1)
     port: int = Field(default=5361, ge=1, le=65535)
+    port_range_max: int | None = Field(
+        default=None,
+        ge=1,
+        le=65535,
+        description=(
+            "When set, the client picks one TCP port uniformly at random in [port, port_range_max] "
+            "(inclusive) for this run. Omit for a fixed port."
+        ),
+    )
     duration_sec: int = Field(default=1, ge=1, le=300)
     direction: str = Field(default="download", description="download=server->client, upload=client->server")
     protocol: str = Field(default="tcp", description="Traffic mode. Currently only tcp is supported.")
@@ -473,6 +484,53 @@ def _iperf_supports_connect_timeout(binary: str) -> bool:
         return "connect-timeout" in blob
     except Exception:
         return False
+
+
+def _iperf_preflight_tcp_ipv4(
+    host: str, port: int, *, timeout_sec: float, bind_ip: str | None
+) -> str | None:
+    """
+    When iperf3 has no ``--connect-timeout``, the OS can keep TCP SYN attempts alive far
+    longer than *timeout_sec*. Try one IPv4 control connection (same bind as iperf ``-B``)
+    with *timeout_sec* as the socket deadline so manual tests return near the UI budget.
+    Returns an error string, or ``None`` if the TCP handshake completes.
+    """
+    p = int(port)
+    if p < 1 or p > 65535:
+        return f"Invalid port: {port}"
+    deadline = time.perf_counter() + max(0.25, float(timeout_sec))
+    try:
+        infos = socket.getaddrinfo(
+            host,
+            p,
+            family=socket.AF_INET,
+            type=socket.SOCK_STREAM,
+            proto=socket.IPPROTO_TCP,
+        )
+    except socket.gaierror as exc:
+        return f"Host resolution failed: {exc}"
+    if not infos:
+        return f"No IPv4 address for host {host!r}."
+    last_err = "Could not connect."
+    for _fa, _ty, _proto, _canon, sockaddr in infos:
+        remain = deadline - time.perf_counter()
+        if remain <= 0:
+            return f"TCP connect to {host}:{p} timed out after {float(timeout_sec):g}s."
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(remain)
+            if bind_ip:
+                sock.bind((str(bind_ip), 0))
+            sock.connect(sockaddr)
+            return None
+        except OSError as exc:
+            last_err = f"TCP connect failed: {exc}"
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+    return last_err
 
 
 def _iperf_connect_timeout_sec_clamped(raw: Any) -> float | None:
@@ -1545,7 +1603,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="2.0.0",
+    version="2.1.0",
     lifespan=lifespan,
 )
 
@@ -2206,8 +2264,8 @@ async def home() -> HTMLResponse:
       </div>
       <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; margin-top:8px;">
         <div>
-          <div class="label">Port:</div>
-          <input id="iperf-port" type="number" min="1" max="65535" value="5361" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+          <div class="label" title="Default 5300–5400: one random port per run. Or a single port (e.g. 5361). Inclusive min-max when two numbers are given.">Port (or range):</div>
+          <input id="iperf-port" type="text" inputmode="text" autocomplete="off" placeholder="5300-5400" value="5300-5400" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
         </div>
         <div>
           <div class="label">Duration (s):</div>
@@ -2219,7 +2277,7 @@ async def home() -> HTMLResponse:
         </div>
       </div>
       <div style="margin-top:8px;">
-        <div class="label" title="iperf3 control-connection startup timeout (--connect-timeout in ms). Default 10 s. Applied only if your iperf3 build supports the flag (bundled 3.1.1 skips it; subprocess still allows this headroom).">Connect timeout (s)</div>
+        <div class="label" title="Control-path TCP budget before iperf runs. Newer iperf3: --connect-timeout in ms. Bundled 3.1.1: same seconds used for a Python IPv4 TCP pre-connect (fail-fast) so the UI does not wait on OS SYN retries. Subprocess wall-clock still adds duration/stream slack after connect.">Connect timeout (s)</div>
         <input id="iperf-connect-timeout" type="number" min="1" max="120" step="1" value="10" style="width:100%; max-width:220px; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
       </div>
       <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:8px;">
@@ -2343,7 +2401,7 @@ async def home() -> HTMLResponse:
         Runs a saved profile; each run creates a folder under <code>backend/automated_tests/test_results/</code> (name: project + location + UTC time + run id) containing <code>run_*_summary.csv</code>, <code>run_*_kpi.jsonl</code>, and <code>run_*_ui.json</code>. Bundled profiles live in <code>automated_tests/test_cases/</code>.
         To exercise <strong>specific modem radio settings</strong> (for example LTE/NR band lock, RAT mode, CA on/off, single-band or neighbour locks), configure them <strong>manually in this dashboard first</strong>—the Test Runner applies each profile’s optional modem requirements (if any) but does not replace full lock/MNO setup you want for the test.
         For <strong>ping</strong> profiles, use <strong>Ping bind</strong> (same IPv4 list as ICMP sweep) so traffic uses the modem interface; <strong>Auto</strong> skips <code>-S</code>. <strong>Profile bind_ipv4</strong> uses the JSON value only when that option is selected.
-        For <strong>iperf</strong> profiles, optional <code>test_config.connect_timeout_sec</code> (1–120; default <strong>10</strong> when omitted) maps to iperf3 <code>--connect-timeout</code> when the binary supports it (bundled 3.1.1 skips the flag; subprocess still allows the timeout headroom).
+        Profile <code>test_type</code> <strong>iperf_download_upload</strong> runs TCP <strong>download</strong> then <strong>upload</strong> (same chosen server port for both legs, ~0.8 s gap). Other iperf types are single-direction. Optional <code>test_config.port_range_max</code> (with <code>port</code> ≤ max) picks a random server port for the download leg; upload reuses that port. Optional <code>test_config.connect_timeout_sec</code> (1–120; default <strong>10</strong> when omitted) maps to iperf3 <code>--connect-timeout</code> when supported (else TCP pre-connect).
         VoLTE runs require unlock password below. Password fields in UI snapshot are redacted server-side.
         <strong>Delay between iterations</strong> is at least 10 seconds when a profile runs more than once. Use <strong>Cancel run</strong> (or <code>POST /api/test/cancel</code>) to stop after the current tool step or during the delay; the modem cannot abort a ping/iperf/VoLTE call mid-flight.
       </div>
@@ -4358,11 +4416,31 @@ async def home() -> HTMLResponse:
       } catch (_) {}
     }
 
+    function parseIperfPortField(raw) {
+      const s = String(raw ?? "").trim();
+      const spec = s.length ? s : "5300-5400";
+      const m = /^(\d+)\s*-\s*(\d+)$/.exec(spec.replace(/\s+/g, ""));
+      if (m) {
+        const a = Number(m[1]);
+        const b = Number(m[2]);
+        const lo = Math.min(a, b);
+        const hi = Math.max(a, b);
+        if (!Number.isInteger(lo) || !Number.isInteger(hi)) return { error: "Port range must use integers." };
+        if (lo < 1 || hi > 65535) return { error: "Port range must be within 1..65535." };
+        if (lo === hi) return { port: lo, port_range_max: null };
+        return { port: lo, port_range_max: hi };
+      }
+      const n = Number(spec);
+      if (!Number.isFinite(n) || n < 1 || n > 65535 || n !== Math.trunc(n))
+        return { error: "Port must be 1..65535 or min-max (e.g. 5300-5400)." };
+      return { port: Math.trunc(n), port_range_max: null };
+    }
+
     async function runIperfTest() {
       if (iperfBusy) return;
       iperfBusy = true;
       const host = String(el("iperf-host")?.value || "").trim();
-      const port = Number(el("iperf-port")?.value || 5361);
+      const portParsed = parseIperfPortField(el("iperf-port")?.value);
       const durationSec = Number(el("iperf-duration")?.value || 1);
       const parallelStreams = Number(el("iperf-parallel")?.value || 10);
       const direction = String(el("iperf-direction")?.value || "both").trim().toLowerCase();
@@ -4375,8 +4453,8 @@ async def home() -> HTMLResponse:
         iperfBusy = false;
         return;
       }
-      if (!Number.isFinite(port) || port < 1 || port > 65535) {
-        el("iperf-msg").textContent = "Port must be 1..65535.";
+      if (portParsed.error) {
+        el("iperf-msg").textContent = portParsed.error;
         iperfBusy = false;
         return;
       }
@@ -4414,13 +4492,14 @@ async def home() -> HTMLResponse:
         const runOne = async (dir) => {
           const body = {
             host,
-            port: Math.trunc(port),
+            port: portParsed.port,
             duration_sec: Math.trunc(durationSec),
             direction: dir,
             protocol,
             mobile_only: true,
             parallel_streams: Math.trunc(parallelStreams)
           };
+          if (portParsed.port_range_max != null) body.port_range_max = portParsed.port_range_max;
           if (bindIp) body.bind_ip = bindIp;
           if (speedLimit !== null) body.bitrate_limit_mbps = speedLimit;
           body.connect_timeout_sec = connectTimeoutSec;
@@ -4475,8 +4554,14 @@ async def home() -> HTMLResponse:
           const cmd = Array.isArray(j.command) ? j.command.join(" ") : "-";
           const src = j.throughput_source || "-";
           const stderrTail = (j.stderr_tail || "").trim() || "-";
+          const prq = j.port_range_requested;
+          const portLine =
+            prq && prq.min != null && prq.max != null
+              ? `Port: ${j.port} (random ${prq.min}–${prq.max})`
+              : `Port: ${j.port != null ? j.port : "-"}`;
           lines.push(
             `Command: ${cmd}`,
+            portLine,
             `Direction: ${j.direction || "-"}`,
             `Protocol: ${j.protocol || protocol}`,
             `Parallel streams: ${j.parallel_streams != null ? j.parallel_streams : parallelStreams}`,
@@ -8558,6 +8643,18 @@ async def tools_modem_reset() -> dict:
     }
 
 
+def _iperf_resolve_port(body: IperfTestBody) -> tuple[int, dict[str, int] | None]:
+    """Pick the TCP server port for this run; optional inclusive high bound."""
+    lo = int(body.port)
+    hi = body.port_range_max
+    if hi is None:
+        return lo, None
+    hi_i = int(hi)
+    if hi_i < lo:
+        raise HTTPException(status_code=400, detail="port_range_max must be greater than or equal to port.")
+    return random.randint(lo, hi_i), {"min": lo, "max": hi_i}
+
+
 @app.post("/api/tools/iperf-test")
 async def tools_iperf_test(body: IperfTestBody) -> dict:
     await _require_packet_data_for_host_traffic_tests()
@@ -8573,6 +8670,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
     reverse = direction == "download"
     parallel_streams = int(body.parallel_streams)
     ct_sec = max(1.0, min(120.0, float(body.connect_timeout_sec)))
+    effective_port, port_range_requested = _iperf_resolve_port(body)
     limit_mbps = body.bitrate_limit_mbps
     bind_ip = str(body.bind_ip or "").strip() or None
     if bind_ip:
@@ -8588,7 +8686,8 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
                 "ok": False,
                 "error": "Mobile-only mode could not detect mobile interface IPv4. Set bind_ip manually.",
                 "host": host,
-                "port": int(body.port),
+                "port": effective_port,
+                "port_range_requested": port_range_requested,
                 "duration_sec": int(body.duration_sec),
                 "direction": direction,
                 "protocol": protocol,
@@ -8604,7 +8703,8 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
             "ok": False,
             "error": "iperf3 binary not found. Place iperf3.exe in project/backend root or set MD_IPERF_BIN.",
             "host": host,
-            "port": int(body.port),
+            "port": effective_port,
+            "port_range_requested": port_range_requested,
             "duration_sec": int(body.duration_sec),
             "direction": direction,
             "protocol": protocol,
@@ -8621,7 +8721,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
         # Force IPv4: hostname may resolve to IPv6 while -B binds an IPv4, which yields exit=1.
         "-4",
         "-p",
-        str(int(body.port)),
+        str(int(effective_port)),
         "-t",
         str(int(body.duration_sec)),
         "-J",
@@ -8633,9 +8733,44 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
     if limit_mbps is not None and float(limit_mbps) > 0:
         cmd.extend(["-b", f"{float(limit_mbps):g}M"])
     cmd.extend(["-P", str(parallel_streams)])
-    if _iperf_supports_connect_timeout(binary):
+    supports_ct = _iperf_supports_connect_timeout(binary)
+    if supports_ct:
         ms = max(1, int(round(float(ct_sec) * 1000.0)))
         cmd.extend(["--connect-timeout", str(ms)])
+    else:
+        # Bundled iperf 3.1.x: no --connect-timeout; OS TCP can stall far longer than ct_sec.
+        probe_err = await asyncio.to_thread(
+            _iperf_preflight_tcp_ipv4,
+            host,
+            int(effective_port),
+            timeout_sec=float(ct_sec),
+            bind_ip=bind_ip,
+        )
+        if probe_err:
+            return {
+                "ok": False,
+                "error": probe_err,
+                "host": host,
+                "port": effective_port,
+                "port_range_requested": port_range_requested,
+                "duration_sec": int(body.duration_sec),
+                "direction": direction,
+                "protocol": protocol,
+                "mobile_only": bool(body.mobile_only),
+                "bind_ip": bind_ip,
+                "detected_mobile_adapter": detected_adapter,
+                "bitrate_limit_mbps": limit_mbps,
+                "parallel_streams": parallel_streams,
+                "connect_timeout_sec": ct_sec,
+                "throughput_mbps": None,
+                "throughput_source": None,
+                "command": cmd,
+                "exit_code": None,
+                "json_parse_error": None,
+                "stderr_tail": "",
+                "stdout_head": "",
+                "raw": None,
+            }
     dur = int(body.duration_sec)
     # Wall-clock often exceeds iperf -t: TCP slow-start, JSON flush, cellular UL teardown.
     # Upload (no -R) is slower and needs more headroom than download (-R).
@@ -8659,7 +8794,8 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
             "error": f"iperf timed out after {timeout_sec}s",
             "command": cmd,
             "host": host,
-            "port": int(body.port),
+            "port": effective_port,
+            "port_range_requested": port_range_requested,
             "duration_sec": int(body.duration_sec),
             "direction": direction,
             "protocol": protocol,
@@ -8686,7 +8822,8 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
         "ok": ok,
         "error": err_detail,
         "host": host,
-        "port": int(body.port),
+        "port": effective_port,
+        "port_range_requested": port_range_requested,
         "duration_sec": int(body.duration_sec),
         "direction": direction,
         "protocol": protocol,
@@ -9120,7 +9257,12 @@ async def _server_ui_state_for_test_export() -> dict[str, Any]:
 async def _apply_modem_requirements(mr: Any, test_type: str) -> None:
     if not isinstance(mr, dict) or not mr:
         return
-    if mr.get("require_packet_data") and test_type in ("ping", "iperf_download", "iperf_upload"):
+    if mr.get("require_packet_data") and test_type in (
+        "ping",
+        "iperf_download",
+        "iperf_upload",
+        "iperf_download_upload",
+    ):
         await _require_packet_data_for_host_traffic_tests()
     if mr.get("require_serving_cell"):
         deadline = time.time() + float(mr.get("max_start_wait_sec") or 60)
@@ -9372,10 +9514,17 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                 lim_f = float(lim) if lim is not None else None
                 if lim_f is not None and lim_f <= 0:
                     lim_f = None
+                prm_raw = cfg.get("port_range_max")
+                prm_i: int | None
+                if prm_raw is None or prm_raw == "":
+                    prm_i = None
+                else:
+                    prm_i = int(prm_raw)
                 last_tr = await tools_iperf_test(
                     IperfTestBody(
                         host=str(cfg["host"]),
                         port=int(cfg["port"]),
+                        port_range_max=prm_i,
                         duration_sec=int(cfg["duration_sec"]),
                         direction="download",
                         protocol=str(cfg.get("protocol") or "tcp").lower(),
@@ -9391,10 +9540,13 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                 lim_f = float(lim) if lim is not None else None
                 if lim_f is not None and lim_f <= 0:
                     lim_f = None
+                prm_raw = cfg.get("port_range_max")
+                prm_i = None if prm_raw is None or prm_raw == "" else int(prm_raw)
                 last_tr = await tools_iperf_test(
                     IperfTestBody(
                         host=str(cfg["host"]),
                         port=int(cfg["port"]),
+                        port_range_max=prm_i,
                         duration_sec=int(cfg["duration_sec"]),
                         direction="upload",
                         protocol=str(cfg.get("protocol") or "tcp").lower(),
@@ -9405,6 +9557,85 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                         connect_timeout_sec=_iperf_connect_timeout_for_profile(cfg),
                     )
                 )
+            elif test_type == "iperf_download_upload":
+                lim = cfg.get("bitrate_limit_mbps")
+                lim_f = float(lim) if lim is not None else None
+                if lim_f is not None and lim_f <= 0:
+                    lim_f = None
+                prm_raw = cfg.get("port_range_max")
+                prm_i = None if prm_raw is None or prm_raw == "" else int(prm_raw)
+                conn_to = _iperf_connect_timeout_for_profile(cfg)
+                j_dl = await tools_iperf_test(
+                    IperfTestBody(
+                        host=str(cfg["host"]),
+                        port=int(cfg["port"]),
+                        port_range_max=prm_i,
+                        duration_sec=int(cfg["duration_sec"]),
+                        direction="download",
+                        protocol=str(cfg.get("protocol") or "tcp").lower(),
+                        mobile_only=bool(cfg["mobile_only"]),
+                        bind_ip=None,
+                        bitrate_limit_mbps=lim_f,
+                        parallel_streams=int(cfg["parallel_streams"]),
+                        connect_timeout_sec=conn_to,
+                    )
+                )
+                if not j_dl.get("ok"):
+                    last_tr = {
+                        "ok": False,
+                        "error": str(j_dl.get("error") or "").strip() or "iperf download failed",
+                        "phase": "download",
+                        "download": j_dl,
+                        "upload": None,
+                        "host": str(j_dl.get("host") or cfg.get("host") or ""),
+                        "port": int(j_dl.get("port") or cfg.get("port") or 0),
+                        "duration_sec": int(cfg["duration_sec"]),
+                        "parallel_streams": int(cfg["parallel_streams"]),
+                        "protocol": str(cfg.get("protocol") or "tcp").lower(),
+                        "mobile_only": bool(cfg["mobile_only"]),
+                        "connect_timeout_sec": conn_to,
+                        "direction": "download_upload",
+                        "throughput_mbps_dl": j_dl.get("throughput_mbps"),
+                        "throughput_mbps_ul": None,
+                    }
+                else:
+                    used_port = int(j_dl.get("port") or cfg["port"])
+                    await asyncio.sleep(0.8)
+                    j_ul = await tools_iperf_test(
+                        IperfTestBody(
+                            host=str(cfg["host"]),
+                            port=used_port,
+                            port_range_max=None,
+                            duration_sec=int(cfg["duration_sec"]),
+                            direction="upload",
+                            protocol=str(cfg.get("protocol") or "tcp").lower(),
+                            mobile_only=bool(cfg["mobile_only"]),
+                            bind_ip=None,
+                            bitrate_limit_mbps=lim_f,
+                            parallel_streams=int(cfg["parallel_streams"]),
+                            connect_timeout_sec=conn_to,
+                        )
+                    )
+                    ul_err = ""
+                    if not j_ul.get("ok"):
+                        ul_err = str(j_ul.get("error") or "").strip() or "iperf upload failed"
+                    last_tr = {
+                        "ok": bool(j_dl.get("ok") and j_ul.get("ok")),
+                        "error": ul_err or None,
+                        "host": str(j_dl.get("host") or cfg.get("host") or ""),
+                        "port": used_port,
+                        "port_range_requested": j_dl.get("port_range_requested"),
+                        "duration_sec": int(cfg["duration_sec"]),
+                        "parallel_streams": int(cfg["parallel_streams"]),
+                        "protocol": str(cfg.get("protocol") or "tcp").lower(),
+                        "mobile_only": bool(cfg["mobile_only"]),
+                        "connect_timeout_sec": conn_to,
+                        "direction": "download_upload",
+                        "throughput_mbps_dl": j_dl.get("throughput_mbps"),
+                        "throughput_mbps_ul": j_ul.get("throughput_mbps"),
+                        "download": j_dl,
+                        "upload": j_ul,
+                    }
             elif test_type == "volte_call_outbound":
                 if not body.unlock_password:
                     raise HTTPException(status_code=400, detail="unlock_password is required for VoLTE test runs.")
