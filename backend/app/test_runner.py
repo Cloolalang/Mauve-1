@@ -673,7 +673,8 @@ def _empty_iperf_tool_cols() -> dict[str, str]:
             "iperf_bitrate_limit_mbps",
             "iperf_mobile_only",
             "iperf_direction",
-            "iperf_throughput_mbps",
+            "iperf_throughput_dl_mbps",
+            "iperf_throughput_ul_mbps",
         )
     }
 
@@ -707,19 +708,21 @@ def _fmt_mbps_str(mbps: Any) -> str:
 
 def iperf_tool_csv_columns(cfg: dict[str, Any], tool_result: dict[str, Any], test_type: str) -> dict[str, str]:
     if test_type == "iperf_download_upload":
-        dl_s = _fmt_mbps_str(tool_result.get("throughput_mbps_dl"))
-        ul_s = _fmt_mbps_str(tool_result.get("throughput_mbps_ul"))
-        parts = []
-        if dl_s:
-            parts.append(f"DL {dl_s}")
-        if ul_s:
-            parts.append(f"UL {ul_s}")
-        mbps_str = " ".join(parts)
         direction = "download_upload"
+        dl_mbps = _fmt_mbps_str(tool_result.get("throughput_mbps_dl"))
+        ul_mbps = _fmt_mbps_str(tool_result.get("throughput_mbps_ul"))
+    elif test_type == "iperf_download":
+        direction = str(tool_result.get("direction") or "download")
+        dl_mbps = _fmt_mbps_str(tool_result.get("throughput_mbps"))
+        ul_mbps = ""
+    elif test_type == "iperf_upload":
+        direction = str(tool_result.get("direction") or "upload")
+        dl_mbps = ""
+        ul_mbps = _fmt_mbps_str(tool_result.get("throughput_mbps"))
     else:
-        mbps = tool_result.get("throughput_mbps")
-        mbps_str = _fmt_mbps_str(mbps)
         direction = str(tool_result.get("direction") or test_type.replace("iperf_", ""))
+        dl_mbps = ""
+        ul_mbps = _fmt_mbps_str(tool_result.get("throughput_mbps"))
     ct = tool_result.get("connect_timeout_sec")
     ct_s = ""
     if ct is not None and str(ct).strip() != "":
@@ -738,7 +741,8 @@ def iperf_tool_csv_columns(cfg: dict[str, Any], tool_result: dict[str, Any], tes
         "iperf_bitrate_limit_mbps": "" if cfg.get("bitrate_limit_mbps") is None else str(cfg.get("bitrate_limit_mbps")),
         "iperf_mobile_only": str(bool(tool_result.get("mobile_only"))).lower(),
         "iperf_direction": direction,
-        "iperf_throughput_mbps": mbps_str,
+        "iperf_throughput_dl_mbps": dl_mbps,
+        "iperf_throughput_ul_mbps": ul_mbps,
     }
 
 
@@ -826,7 +830,8 @@ def build_csv_row(
         iperf_cols.get("iperf_bitrate_limit_mbps", ""),
         iperf_cols.get("iperf_mobile_only", ""),
         iperf_cols.get("iperf_direction", ""),
-        iperf_cols.get("iperf_throughput_mbps", ""),
+        iperf_cols.get("iperf_throughput_dl_mbps", ""),
+        iperf_cols.get("iperf_throughput_ul_mbps", ""),
         volte_cols.get("volte_number", ""),
         volte_cols.get("volte_connected", ""),
         volte_cols.get("volte_answer_delay_sec", ""),
@@ -891,7 +896,8 @@ CSV_HEADER = [
     "iperf_bitrate_limit_mbps",
     "iperf_mobile_only",
     "iperf_direction",
-    "iperf_throughput_mbps",
+    "iperf_throughput_dl_mbps",
+    "iperf_throughput_ul_mbps",
     "volte_number",
     "volte_connected",
     "volte_answer_delay_sec",

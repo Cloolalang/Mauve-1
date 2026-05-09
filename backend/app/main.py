@@ -36,7 +36,7 @@ from app.sim_usim_services import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2.1"
+APP_VERSION = "2.2"
 
 
 def _serial_state_file_path() -> str:
@@ -410,7 +410,10 @@ class TestRunBody(BaseModel):
         default=None,
         description="Optional client dashboard control values; password-like keys are redacted server-side.",
     )
-    unlock_password: str | None = Field(default=None, description="Required for volte_call_outbound profiles.")
+    unlock_password: str | None = Field(
+        default=None,
+        description="Required for every test run; must match the dashboard Allow Data unlock password.",
+    )
     test_iterations: int = Field(default=1, ge=1, le=100, description="Run the profile tool this many times; CSV gets one row per iteration.")
     test_iteration_delay_sec: float = Field(
         default=10.0,
@@ -1603,7 +1606,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="2.1.0",
+    version="2.2.0",
     lifespan=lifespan,
 )
 
@@ -1763,7 +1766,7 @@ async def home() -> HTMLResponse:
       </select>
     </label>
     <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6;">
-      <input id="rf-smooth-toggle" type="checkbox" />
+      <input id="rf-smooth-toggle" type="checkbox" checked />
       RF smoothing (rolling avg, last 10 samples — primary + intra overlay)
     </label>
     <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6;" title="Last N primary-cell raw samples inside the chart window used for σ (sample stdev, n−1).">
@@ -2402,7 +2405,7 @@ async def home() -> HTMLResponse:
         To exercise <strong>specific modem radio settings</strong> (for example LTE/NR band lock, RAT mode, CA on/off, single-band or neighbour locks), configure them <strong>manually in this dashboard first</strong>—the Test Runner applies each profile’s optional modem requirements (if any) but does not replace full lock/MNO setup you want for the test.
         For <strong>ping</strong> profiles, use <strong>Ping bind</strong> (same IPv4 list as ICMP sweep) so traffic uses the modem interface; <strong>Auto</strong> skips <code>-S</code>. <strong>Profile bind_ipv4</strong> uses the JSON value only when that option is selected.
         Profile <code>test_type</code> <strong>iperf_download_upload</strong> runs TCP <strong>download</strong> then <strong>upload</strong> (same chosen server port for both legs, ~0.8 s gap). Other iperf types are single-direction. Optional <code>test_config.port_range_max</code> (with <code>port</code> ≤ max) picks a random server port for the download leg; upload reuses that port. Optional <code>test_config.connect_timeout_sec</code> (1–120; default <strong>10</strong> when omitted) maps to iperf3 <code>--connect-timeout</code> when supported (else TCP pre-connect).
-        VoLTE runs require unlock password below. Password fields in UI snapshot are redacted server-side.
+        Test runs require the unlock password below (same as Allow Data). Password fields in UI snapshot are redacted server-side.
         <strong>Delay between iterations</strong> is at least 10 seconds when a profile runs more than once. Use <strong>Cancel run</strong> (or <code>POST /api/test/cancel</code>) to stop after the current tool step or during the delay; the modem cannot abort a ping/iperf/VoLTE call mid-flight.
       </div>
       <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-top:10px;">
@@ -2439,7 +2442,7 @@ async def home() -> HTMLResponse:
           <input id="test-runner-bind-ip" placeholder="Manual IPv4 when Manual is selected" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:6px; display:none;" />
         </div>
         <div style="min-width:180px;">
-          <div class="label">Unlock (VoLTE runs)</div>
+          <div class="label">Unlock (all test runs)</div>
           <input id="test-runner-unlock" type="password" autocomplete="off" placeholder="Same as Allow Data" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px;" />
         </div>
         <button id="btn-test-runner-refresh" type="button">Refresh profiles</button>
@@ -2594,7 +2597,7 @@ async def home() -> HTMLResponse:
     const RF_SMOOTH_WINDOW = 10;
     const RF_STD_SAMPLE_MIN = 2;
     const RF_STD_SAMPLE_MAX = 600;
-    let rfSmoothingEnabled = false;
+    let rfSmoothingEnabled = true;
     let chartGapModeEnabled = false;
     let currentPollHz = 2.0;
     let primaryCellDataAvailable = false;
@@ -7539,6 +7542,11 @@ async def home() -> HTMLResponse:
         if (msg) msg.textContent = "Select a profile first (create one via POST /api/test/profiles).";
         return;
       }
+      const unlockRun = String(el("test-runner-unlock")?.value || "").trim();
+      if (!unlockRun) {
+        if (msg) msg.textContent = "Enter unlock password (same as Allow Data) before running a test.";
+        return;
+      }
       if (msg) msg.textContent = "Running…";
       if (btnRun) btnRun.disabled = true;
       if (btnCancel) btnCancel.disabled = false;
@@ -7557,7 +7565,7 @@ async def home() -> HTMLResponse:
           test_iteration_delay_sec: dIt,
           include_ui_snapshot: true,
           ui_controls: collectUiControlsForRun(),
-          unlock_password: String(el("test-runner-unlock")?.value || "") || null,
+          unlock_password: unlockRun,
         };
         const trBind = el("test-runner-bind-select");
         if (trBind) {
@@ -9438,6 +9446,10 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
     errs = tr.validate_profile(prof)
     if errs:
         raise HTTPException(status_code=400, detail="; ".join(errs))
+    if not (body.unlock_password or "").strip():
+        raise HTTPException(status_code=400, detail="unlock_password is required for test runs.")
+    if (body.unlock_password or "") != DATA_GATE_UNLOCK_PASSWORD:
+        raise HTTPException(status_code=403, detail="Invalid unlock_password for test run.")
     test_type = str(prof.get("test_type") or "").strip()
     cfg = prof.get("test_config") if isinstance(prof.get("test_config"), dict) else {}
     mr = prof.get("modem_requirements") if isinstance(prof.get("modem_requirements"), dict) else {}
@@ -9637,8 +9649,6 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                         "upload": j_ul,
                     }
             elif test_type == "volte_call_outbound":
-                if not body.unlock_password:
-                    raise HTTPException(status_code=400, detail="unlock_password is required for VoLTE test runs.")
                 hold = max(1, min(int(cfg.get("call_duration_sec") or 10), 120))
                 if not bool(cfg.get("auto_hangup", True)):
                     hold = 1

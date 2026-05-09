@@ -1,11 +1,18 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 2.1** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **2.1.0**).
+**Version 2.2** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **2.2.0**).
+
+Notes for **v2.2**:
+
+- **`POST /api/test/run`**: **`unlock_password`** required for **all** profile types; must match **Allow Data** / **`DATA_GATE_UNLOCK_PASSWORD`**.
+- **Dashboard** (**`GET /`**): **RF smoothing** defaults **on**.
+- **Summary CSV**: **`iperf_throughput_dl_mbps`** / **`iperf_throughput_ul_mbps`** replace **`iperf_throughput_mbps`** (see root **Changes in v2.2**).
+- OpenAPI / page header: **v2.2**.
 
 Notes for **v2.1**:
 
 - **iperf**: optional **`port_range_max`** on **`POST /api/tools/iperf-test`** and profiles; TCP pre-connect when **`--connect-timeout`** unsupported (root **Changes in v2.1**). **`iperf_download_upload`** test type (DL then UL, same port); bundled **`smoke_iperf_dlul`**.
-- OpenAPI / page header: **v2.1**.
+- OpenAPI / page header was **v2.1** for that release line.
 
 Notes for **v2.0**:
 

@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 2.1**
+**Version 2.2**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v2.1** is shown in the page header with a **Lord Kelvin** quotation on measurement).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v2.2** is shown in the page header with a **Lord Kelvin** quotation on measurement).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -39,11 +39,11 @@ Details: **`backend/run_desktop.py`**, **`backend/modemtestdriver.spec`**, **`ba
 ### Maintainers: publish a Release with binaries
 
 1. Commit and push source changes on **`main`** (no **`dist/`** in git).
-2. Create and push an annotated **version tag** matching **`v*`** (example **`v2.1.0`**):
+2. Create and push an annotated **version tag** matching **`v*`** (example **`v2.2.0`**):
 
    ```powershell
-   git tag -a v2.1.0 -m "v2.1.0"
-   git push origin v2.1.0
+   git tag -a v2.2.0 -m "v2.2.0"
+   git push origin v2.2.0
    ```
 
 3. GitHub Actions runs **[.github/workflows/release-windows.yml](.github/workflows/release-windows.yml)**, builds the zip, and attaches **`5GModemTestDriver-windows-amd64.zip`** to that Release.
@@ -130,11 +130,17 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
 
+**Changes in v2.2**
+
+- **`POST /api/test/run`**: **`unlock_password`** is **required for every profile** (ping, iperf, VoLTE); it must match the dashboard **Allow Data** password (**`DATA_GATE_UNLOCK_PASSWORD`** in code). **400** if missing/blank, **403** if wrong. The Test Runner **Unlock** field label reflects **all** automated runs.
+- **Dashboard**: **RF smoothing** (rolling average of the last **10** samples on primary RF and intra overlays) is **on by default**; clear the checkbox to plot **raw** traces.
+- **`run_<id>_summary.csv`**: **`iperf_throughput_mbps`** is replaced by **`iperf_throughput_dl_mbps`** and **`iperf_throughput_ul_mbps`** (after **`iperf_direction`**). **`iperf_download`** fills DL only, **`iperf_upload`** UL only, **`iperf_download_upload`** both; numeric Mbps strings, blank when absent. Older result CSVs still use the previous header.
+
 **Changes in v2.1**
 
 - **iperf port range**: **`POST /api/tools/iperf-test`** accepts optional **`port_range_max`**; each request picks one random TCP port in **`[port, port_range_max]`** (inclusive). Dashboard **Port** default **`5300-5400`**; response includes **`port_range_requested`** when a range was used. Bundled **`smoke_iperf_dl`** / **`smoke_iperf_ul`** / **`smoke_iperf_dlul`** use **`5300`–`5400`** with **`connect_timeout_sec`** in **`test_config`**.
 - **iperf connect budget (bundled iperf 3.1.1)**: when **`--connect-timeout`** is not supported, a **TCP pre-connect** (same bind as **`-B`**) enforces **`connect_timeout_sec`** so manual tests do not wait on long OS SYN retries.
-- **`iperf_download_upload` profile**: one iteration runs **download** then **upload** on the **same** chosen server port (~**0.8 s** gap). CSV **`iperf_direction`** **`download_upload`**; **`iperf_throughput_mbps`** combines DL/UL (e.g. **`DL 6.1 UL 2.3`**).
+- **`iperf_download_upload` profile**: one iteration runs **download** then **upload** on the **same** chosen server port (~**0.8 s** gap). CSV **`iperf_direction`** is **`download_upload`**.
 
 **Changes in v2.0**
 
@@ -340,7 +346,7 @@ AT command catalog from current modem firmware:
     - RSSI min `-95 dBm`
     - Intra-cell dominance min `6 dB`
   - **Near-cell RF (field observation):** when very close to the site and **RSSI is above ~−25 dBm**, reported RF levels may look **compressed or capped**, as if **receiver gain reduction** (AGC / RF front-end behaviour) is limiting how strong the modem reports the signal—not an artefact of the dashboard.
-  - Optional RF smoothing toggle (rolling average of last 10 samples) for RSRP/RSRQ/SINR/RSSI/dominance
+  - RF smoothing toggle (rolling average of last 10 samples) for RSRP/RSRQ/SINR/RSSI/dominance — **on by default**; turn off for raw traces
   - **RF trend hover tooltips**: on the RSRP / RSRQ / SNIR / RSSI / dominance / congestion proxy / intra & inter neighbour / neighbour count / combined band+BW / RAT / CA combo / NR RF canvases, moving the pointer near a plotted sample shows a tooltip with the metric value and **EARFCN/PCI** where applicable (same cell key used for segment colouring).
   - Primary Cell bandwidth KPI (`DL/UL BW`)
   - Primary cell intra-cell dominance KPI (`Primary RSRP - strongest intra-frequency neighbour RSRP` on serving EARFCN)
@@ -442,7 +448,7 @@ $env:MD_BAUDRATE="115200"
    - Use the **Chart window** selector to switch retention from `60s` up to `60m`.
    - Confirm RF charts show red threshold guide lines and auto-scroll over the selected window.
    - Hover near points on the RF trend charts (RSRP/RSRQ/SINR/RSSI/dominance) to verify the tooltip shows the value and **EARFCN/PCI** for that sample.
-   - Optional: enable **RF smoothing** and verify 10-sample rolling average behavior.
+   - **RF smoothing** is on by default; uncheck it and confirm charts switch to **raw** samples; re-enable and confirm rolling-average behaviour.
    - Use **Clear All Charts** and confirm all chart histories reset.
 4. Check serial status:
 
@@ -625,7 +631,7 @@ Bundled examples ship under **`backend/automated_tests/test_cases/`** (one `*.js
 
 ### Run
 
-- **`POST /api/test/run`** — body: `profile_name` (required), optional `project_name`, `test_location`, `engineer`, optional **`note`** (free text, up to 4000 chars; stored in CSV and UI snapshot), optional **`ping_bind_ipv4_override`** (ping only: set to an IPv4 to force Windows `ping -S`; **empty string** forces no bind / OS default route; **omit** to use the profile’s `test_config.bind_ipv4`), **`test_iterations`** (default **1**, max **100**) and **`test_iteration_delay_sec`** (default **10**, range **10–3600** seconds between iterations when `test_iterations` > 1; not applied after the last), `include_ui_snapshot` (default **true**), optional `ui_controls` (object; merged with server state in **`run_<id>_ui.json`** with **password-like fields redacted**), `unlock_password` (**required** for `volte_call_outbound` profiles; same value as **Allow Data** in the UI). Each run creates a folder **`automated_tests/test_results/<project>_<location>_<UTC-datetime>_<run_id>/`** containing **`run_<id>_summary.csv`**, **`run_<id>_kpi.jsonl`**, and **`run_<id>_ui.json`**. The JSON response includes **`artifacts_dir`**, **`run_folder`**, **`tool_results`**, **`test_iterations`**, **`test_iteration_delay_sec`**, **`run_cancelled`** (true if **`POST /api/test/cancel`** stopped the session early), and download paths unchanged.
+- **`POST /api/test/run`** — body: `profile_name` (required), optional `project_name`, `test_location`, `engineer`, optional **`note`** (free text, up to 4000 chars; stored in CSV and UI snapshot), optional **`ping_bind_ipv4_override`** (ping only: set to an IPv4 to force Windows `ping -S`; **empty string** forces no bind / OS default route; **omit** to use the profile’s `test_config.bind_ipv4`), **`test_iterations`** (default **1**, max **100**) and **`test_iteration_delay_sec`** (default **10**, range **10–3600** seconds between iterations when `test_iterations` > 1; not applied after the last), `include_ui_snapshot` (default **true**), optional `ui_controls` (object; merged with server state in **`run_<id>_ui.json`** with **password-like fields redacted**), `unlock_password` (**required** for every profile; must match **Allow Data** in the UI; **400** if missing/blank, **403** if wrong). Each run creates a folder **`automated_tests/test_results/<project>_<location>_<UTC-datetime>_<run_id>/`** containing **`run_<id>_summary.csv`**, **`run_<id>_kpi.jsonl`**, and **`run_<id>_ui.json`**. The JSON response includes **`artifacts_dir`**, **`run_folder`**, **`tool_results`**, **`test_iterations`**, **`test_iteration_delay_sec`**, **`run_cancelled`** (true if **`POST /api/test/cancel`** stopped the session early), and download paths unchanged.
 - **`GET /api/test/active`** — when a test run is in progress (single server-wide session), returns **`active`**, **`run_id`**, and progress fields for multi-iteration runs: **`phase`** (`modem_requirements` | `tool` | `delay` | `complete` | `queued`), **`iterations_total`**, **`iteration_running`** (1-based during the tool step), **`iteration_next`** (1-based target while waiting between iterations), and **`seconds_until_next`** (remaining inter-iteration delay, seconds; only meaningful when **`phase`** is **`delay`**). When idle, **`active`** is false and the extra fields are **`null`**.
 - **`POST /api/test/cancel`** — optional JSON **`{ "run_id": "<optional>" }`**. With no **`run_id`**, cancels the active run. If **`run_id`** is sent, it must match the active run (**409** otherwise). **404** if nothing is running. Cancellation takes effect after the current tool iteration finishes and during the inter-iteration delay (the active ping/iperf/VoLTE step is not aborted mid-call).
 - While the tool runs, the server appends **~1 Hz** lines to **`run_<id>_kpi.jsonl`**, each line `{"t":"<UTC ISO>","snapshot":{...}}` with the same **`kpi_runtime.snapshot`** shape as live KPI (`GET /api/kpi/latest`). The JSON response includes **`kpi_pre`** and **`kpi_post`** full snapshots for debugging.
@@ -634,7 +640,7 @@ Bundled examples ship under **`backend/automated_tests/test_cases/`** (one `*.js
 
 ### CSV summary row
 
-**`run_<id>_summary.csv`** has a header row plus **one data row per tool iteration** in that run (same header; extra iterations are appended). Column order: lab fields (**`project_name`**, **`test_location`**, **`engineer`**, **`modem_antenna_config`**, **`note`**), **`run_started_utc`** / **`run_ended_utc`** (per iteration), profile **`test_type`**, **`run_success`** / **`run_error`** / **`run_duration_ms`** (that iteration), **`test_config_json`**, **`test_iteration_index`**, **`test_iterations_total`**, **`test_iteration_delay_sec`**, then **active tool columns** (ping, iperf, and VoLTE families are all present; unused families are blank), then **RF KPI aggregates** for the whole run (**`kpi_sample_count`** through NR5G columns—the same aggregate block is repeated on each row because sampling spans the full run). Type-specific tool headers include **`iperf_connect_timeout_sec`** (when set), **`iperf_direction`** (**`download_upload`** for **`iperf_download_upload`** profiles), and **`iperf_throughput_mbps`** (for **`iperf_download_upload`**, a combined string such as **`DL 6.1 UL 2.3`** when both legs succeed).
+**`run_<id>_summary.csv`** has a header row plus **one data row per tool iteration** in that run (same header; extra iterations are appended). Column order: lab fields (**`project_name`**, **`test_location`**, **`engineer`**, **`modem_antenna_config`**, **`note`**), **`run_started_utc`** / **`run_ended_utc`** (per iteration), profile **`test_type`**, **`run_success`** / **`run_error`** / **`run_duration_ms`** (that iteration), **`test_config_json`**, **`test_iteration_index`**, **`test_iterations_total`**, **`test_iteration_delay_sec`**, then **active tool columns** (ping, iperf, and VoLTE families are all present; unused families are blank), then **RF KPI aggregates** for the whole run (**`kpi_sample_count`** through NR5G columns—the same aggregate block is repeated on each row because sampling spans the full run). Type-specific tool headers include **`iperf_connect_timeout_sec`** (when set), **`iperf_direction`** (**`download_upload`** for **`iperf_download_upload`** profiles), **`iperf_throughput_dl_mbps`**, and **`iperf_throughput_ul_mbps`** (**`iperf_download`** fills DL only, **`iperf_upload`** UL only, **`iperf_download_upload`** both; numeric Mbps strings, blank when absent).
 
 ### KPI vs dashboard charts
 
