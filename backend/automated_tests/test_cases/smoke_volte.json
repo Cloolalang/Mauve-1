@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "name": "smoke_volte",
+  "project_name": "Example",
+  "test_location": "",
+  "engineer": "",
+  "modem_antenna_config": "SISO",
+  "modem_requirements": {},
+  "test_type": "volte_call_outbound",
+  "test_config": {
+    "phone_number": "03454900000",
+    "call_duration_sec": 10,
+    "answer_wait_sec": 120,
+    "auto_hangup": true
+  }
+}

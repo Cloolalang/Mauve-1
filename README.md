@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 1.21**
+**Version 2.0**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v1.21** is shown in the page header with a **Lord Kelvin** quotation on measurement).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v2.0** is shown in the page header with a **Lord Kelvin** quotation on measurement).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -39,11 +39,11 @@ Details: **`backend/run_desktop.py`**, **`backend/modemtestdriver.spec`**, **`ba
 ### Maintainers: publish a Release with binaries
 
 1. Commit and push source changes on **`main`** (no **`dist/`** in git).
-2. Create and push an annotated **version tag** matching **`v*`** (example **`v1.21.0`**):
+2. Create and push an annotated **version tag** matching **`v*`** (example **`v2.0.0`**):
 
    ```powershell
-   git tag -a v1.21.0 -m "v1.21.0"
-   git push origin v1.21.0
+   git tag -a v2.0.0 -m "v2.0.0"
+   git push origin v2.0.0
    ```
 
 3. GitHub Actions runs **[.github/workflows/release-windows.yml](.github/workflows/release-windows.yml)**, builds the zip, and attaches **`5GModemTestDriver-windows-amd64.zip`** to that Release.
@@ -130,6 +130,12 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
 
+**Changes in v2.0**
+
+- **Test runner in tree**: **`backend/app/test_runner.py`** plus bundled profiles under **`backend/automated_tests/test_cases/`** (**`smoke_ping`**, **`smoke_iperf_dl`**, **`smoke_iperf_ul`**, **`smoke_volte`**). The app merges these with saved profiles in **`backend/.state/test_profiles.json`** (saved names override bundled files). Generated run output under **`backend/automated_tests/test_results/`** is not committed (see **`.gitignore`**); keep only **`.gitkeep`** there in git.
+- **iperf smoke profiles**: **`connect_timeout_sec`** set on download/upload smoke configs (1–120 s; same semantics as **`POST /api/tools/iperf-test`** / profile **`test_config`**). **`iperf3 --connect-timeout`** is appended only when the discovered binary’s **`--help`** lists it (bundled Windows **3.1.1** skips it); set **`MD_IPERF_BIN`** to a newer **iperf3.exe** if you want that flag. Subprocess wall-clock still includes connect headroom from **`connect_timeout_sec`**.
+- **QCAINFO text**: **`earfcn_active_text`** / carrier summaries use **`EARFCN/PCI(PCC)`** and **`EARFCN/PCI(SCC)`** style (comma-separated), aligned with the dashboard **EARFCN active (CA)** row.
+
 **Changes in v1.21**
 
 - **APN / PDP authentication**: **`POST /api/network/apn`** now configures **`AT+CGDCONT`**, **`AT+CGAUTH`** (username/password, auth types 0–3: none / PAP / CHAP / PAP-or-CHAP), and **`AT+QICSGP`** (Quectel mirror) together. Response includes readback from **`AT+CGAUTH?`** / **`AT+QICSGP?`** under **`auth_profile_read`**. KPI **`data_service`** (dashboard **Data Service** card) refreshes **PDP type**, **PDP username**, **PDP auth** label, and whether a **non-empty password** appeared in AT read (**`pdp_password_reported`** — many firmwares hide password on read).
@@ -155,7 +161,7 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
 - **Default unlock password** for Allow Data, **Set APN**, VoLTE test, answer/hang-up, and host auto-answer: **`kelvin`** (set `DATA_GATE_UNLOCK_PASSWORD` in `backend/app/main.py` to change it; update docs/examples if you do).
 - **`AT+QCAINFO` in the KPI poll**: parsed snapshot under **`sample.qcainfo`** on **`GET /api/kpi/latest`** and **`WS /ws/kpi`**, including:
   - **`carriers`**: per-row PCC/SCC objects (`role`, `earfcn`, `pci`, `dl_bw_rb`, `band`, RF fields when present).
-  - **`earfcn_active`**: numeric EARFCN list; **`earfcn_active_text`**: human-readable PCC/SCC summary for the **EARFCN active (CA)** KPI row.
+  - **`earfcn_active`**: numeric EARFCN list; **`earfcn_active_text`**: PCC/SCC summary for the **EARFCN active (CA)** row, e.g. ``6300/123(PCC), 223/456(SCC)`` (comma-separated ``EARFCN/PCI(role)`` per component).
   - **`dl_bw_aggregate_mhz`**: sum of decoded DL bandwidth (MHz) across carriers whose RB/index maps to MHz; **`dl_bw_components_mhz`**: per-carrier MHz list when present.
   - **`query_ok`**: whether the AT query completed successfully (no service / failures still yield a structured object; row gating follows **`QNWINFO`** / service like other primary-cell fields).
 - **Primary Cell KPI rows**: **EARFCN active (CA)** (QCAINFO text/list) and **CA aggregated DL BW** (aggregate MHz, with tooltip on partial decode).
@@ -479,7 +485,7 @@ The JSON includes `sample.carrier_reselection` with `window_sec` (60), `primary_
 - `POST /api/network/locks`
 - `POST /api/tools/modem-reset`
 - `GET /api/tools/bind-interfaces` (Windows IPv4 adapters for bind dropdowns)
-- `POST /api/tools/iperf-test` (TCP iperf3 client; optional `parallel_streams`, bind IP, bitrate limit; UI default **10** streams)
+- `POST /api/tools/iperf-test` (TCP iperf3 client; optional `parallel_streams`; **`connect_timeout_sec`** default **10** (1–120, iperf3 `--connect-timeout` in ms when supported), bind IP, bitrate limit; UI default **10** streams)
 - `POST /api/tools/icmp-ping` (host OS ICMP ping sweep; optional Windows `-S` bind)
 - `GET /api/tools/auto-answer` / `POST /api/tools/auto-answer` — optional **modem `ATS0`** (legacy); not used by the dashboard VoLTE card
 - `GET /api/tools/host-auto-answer` / `POST /api/tools/host-auto-answer` — **auto-answer** used by the dashboard (**`ATA`** from PC; body **`enabled`**, **`rings`**, **`password`**)
@@ -597,6 +603,40 @@ The dashboard **VoLTE** card controls **auto-answer** via **`GET`/`POST /api/too
     - `dial_ok`, `call_connected`, `setup_time_ms`, `call_duration_s`
     - `ceer`, `clcc_states`, `clcc_after_hangup`, post-hang samples
     - network context before/during/after call from `AT+QNWINFO`
+
+## Test runner (saved profiles and run artifacts)
+
+Saved profile **overrides** live in **`backend/.state/test_profiles.json`** in development, or under **`%LOCALAPPDATA%\5GModemTestDriver\`** when using the frozen Windows build. **Bundled** profile JSON files and **per-run artifact folders** live under **`backend/automated_tests/`** (same relative layout under app state when frozen).
+
+### Profiles
+
+Bundled examples ship under **`backend/automated_tests/test_cases/`** (one `*.json` file per profile: **`smoke_ping`**, **`smoke_iperf_dl`**, **`smoke_iperf_ul`**, **`smoke_volte`**). The loader merges them with **`test_profiles.json`**: **saved names win** over bundled files with the same `name`. **`DELETE`** only removes entries from **`test_profiles.json`** (files under `test_cases/` are not deleted).
+
+- **`GET /api/test/profiles`** — merged list: `profiles`, `names`, plus `example_profile_names` (bundled-only names), `bundled_examples_dir` / **`test_cases_dir`** (same path), **`test_results_root_dir`**, and **`automated_tests_root`**.
+- **`GET /api/test/profiles/{name}`** — fetch one profile by name (registry or bundled).
+- **`POST /api/test/profiles`** — create or replace a profile in **`test_profiles.json`** (JSON body must match the schema: `schema_version` **1**, `name`, `test_type` one of `ping` | `iperf_download` | `iperf_upload` | `volte_call_outbound`, `test_config`, optional `modem_requirements`, optional defaults `project_name`, `test_location`, `engineer`, optional **`modem_antenna_config`** **`SISO`** (default) or **`MIMO`**). For **ping**, `test_config.bind_ipv4` must be present; use **`""`** for no default bind (Test Runner / API can override per run). For **iperf** profiles, **`test_config.connect_timeout_sec`** is optional (1–120 seconds; defaults to **10** when omitted; same semantics as **`POST /api/tools/iperf-test`**).
+- **`DELETE /api/test/profiles/{name}`** — remove a profile from **`test_profiles.json`** only.
+
+### Run
+
+- **`POST /api/test/run`** — body: `profile_name` (required), optional `project_name`, `test_location`, `engineer`, optional **`note`** (free text, up to 4000 chars; stored in CSV and UI snapshot), optional **`ping_bind_ipv4_override`** (ping only: set to an IPv4 to force Windows `ping -S`; **empty string** forces no bind / OS default route; **omit** to use the profile’s `test_config.bind_ipv4`), **`test_iterations`** (default **1**, max **100**) and **`test_iteration_delay_sec`** (default **10**, range **10–3600** seconds between iterations when `test_iterations` > 1; not applied after the last), `include_ui_snapshot` (default **true**), optional `ui_controls` (object; merged with server state in **`run_<id>_ui.json`** with **password-like fields redacted**), `unlock_password` (**required** for `volte_call_outbound` profiles; same value as **Allow Data** in the UI). Each run creates a folder **`automated_tests/test_results/<project>_<location>_<UTC-datetime>_<run_id>/`** containing **`run_<id>_summary.csv`**, **`run_<id>_kpi.jsonl`**, and **`run_<id>_ui.json`**. The JSON response includes **`artifacts_dir`**, **`run_folder`**, **`tool_results`**, **`test_iterations`**, **`test_iteration_delay_sec`**, **`run_cancelled`** (true if **`POST /api/test/cancel`** stopped the session early), and download paths unchanged.
+- **`GET /api/test/active`** — when a test run is in progress (single server-wide session), returns **`active`**, **`run_id`**, and progress fields for multi-iteration runs: **`phase`** (`modem_requirements` | `tool` | `delay` | `complete` | `queued`), **`iterations_total`**, **`iteration_running`** (1-based during the tool step), **`iteration_next`** (1-based target while waiting between iterations), and **`seconds_until_next`** (remaining inter-iteration delay, seconds; only meaningful when **`phase`** is **`delay`**). When idle, **`active`** is false and the extra fields are **`null`**.
+- **`POST /api/test/cancel`** — optional JSON **`{ "run_id": "<optional>" }`**. With no **`run_id`**, cancels the active run. If **`run_id`** is sent, it must match the active run (**409** otherwise). **404** if nothing is running. Cancellation takes effect after the current tool iteration finishes and during the inter-iteration delay (the active ping/iperf/VoLTE step is not aborted mid-call).
+- While the tool runs, the server appends **~1 Hz** lines to **`run_<id>_kpi.jsonl`**, each line `{"t":"<UTC ISO>","snapshot":{...}}` with the same **`kpi_runtime.snapshot`** shape as live KPI (`GET /api/kpi/latest`). The JSON response includes **`kpi_pre`** and **`kpi_post`** full snapshots for debugging.
+- **`GET /api/ui/state`** — server-only fields useful when building `ui_controls` (serial + KPI poll state).
+- **`GET /api/test/download/{run_id}/{kind}`** — download an artifact; **`kind`** is **`summary`**, **`kpi`**, or **`ui`** ( **`run_id`** is eight hex characters).
+
+### CSV summary row
+
+**`run_<id>_summary.csv`** has a header row plus **one data row per tool iteration** in that run (same header; extra iterations are appended). Column order: lab fields (**`project_name`**, **`test_location`**, **`engineer`**, **`modem_antenna_config`**, **`note`**), **`run_started_utc`** / **`run_ended_utc`** (per iteration), profile **`test_type`**, **`run_success`** / **`run_error`** / **`run_duration_ms`** (that iteration), **`test_config_json`**, **`test_iteration_index`**, **`test_iterations_total`**, **`test_iteration_delay_sec`**, then **active tool columns** (ping, iperf, and VoLTE families are all present; unused families are blank), then **RF KPI aggregates** for the whole run (**`kpi_sample_count`** through NR5G columns—the same aggregate block is repeated on each row because sampling spans the full run). Type-specific tool headers include **`iperf_connect_timeout_sec`** (when set) and **`iperf_throughput_mbps`** for iperf.
+
+### KPI vs dashboard charts
+
+The JSONL file stores **raw server snapshots** only. Some dashboard chart traces (for example **rolling RF σ**, **RSRQ congestion proxy**, **smoothed overlays**) are computed **in the browser** from history; they are **not** recomputed inside each snapshot line. Reproduce those offline from the JSONL series if needed.
+
+### ICMP ping optional timeout
+
+`POST /api/tools/icmp-ping` accepts optional **`timeout_ms`** (Windows **`ping -w`**, per reply, 500–60000; default **3000** when omitted).
 
 ## Common issues
 

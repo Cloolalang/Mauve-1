@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "name": "smoke_ping",
+  "project_name": "Example",
+  "test_location": "",
+  "engineer": "",
+  "modem_antenna_config": "SISO",
+  "modem_requirements": {},
+  "test_type": "ping",
+  "test_config": {
+    "host": "8.8.8.8",
+    "count": 5,
+    "timeout_ms": 2000,
+    "bind_ipv4": ""
+  }
+}

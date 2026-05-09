@@ -176,6 +176,39 @@ def _split_qcainfo_comma_fields(rest: str) -> list[str]:
     return [p.strip().strip('"') for p in parts]
 
 
+def format_qcainfo_carriers_pcc_scc_rows(carriers: list[Any]) -> str | None:
+    """Build ``6300/123(PCC), 223/456(SCC)`` from ``qcainfo.carriers`` rows (same as EARFCN active CA UI)."""
+    if not isinstance(carriers, list) or not carriers:
+        return None
+    parts_txt: list[str] = []
+    for c in carriers:
+        if not isinstance(c, dict):
+            continue
+        e = c.get("earfcn")
+        r = c.get("role")
+        pci_v = c.get("pci")
+        if isinstance(e, int) and r:
+            role_s = str(r).strip().upper()
+            if isinstance(pci_v, int):
+                parts_txt.append(f"{e}/{pci_v}({role_s})")
+            else:
+                parts_txt.append(f"{e}({role_s})")
+    return ", ".join(parts_txt) if parts_txt else None
+
+
+def format_qcainfo_carriers_pcc_scc(qcainfo: dict[str, Any]) -> str:
+    """PCC/SCC line for dashboard and CSV: prefer structured ``carriers``, else legacy ``earfcn_active_text``."""
+    carriers = qcainfo.get("carriers")
+    rows = carriers if isinstance(carriers, list) else []
+    row_fmt = format_qcainfo_carriers_pcc_scc_rows(rows)
+    if row_fmt:
+        return row_fmt
+    txt = qcainfo.get("earfcn_active_text")
+    if txt is not None and str(txt).strip():
+        return str(txt).strip()
+    return ""
+
+
 def _parse_qcainfo_for_snapshot(lines: list[str]) -> dict[str, Any]:
     """
     Parse ``AT+QCAINFO`` lines (Quectel). Typical LTE CA form per manual:
@@ -184,6 +217,9 @@ def _parse_qcainfo_for_snapshot(lines: list[str]) -> dict[str, Any]:
       ``+QCAINFO: "SCC",...`` (same tail layout; zero or more SCC lines).
 
     ``bandwidth`` is often RB count (e.g. 50 for 10 MHz), not megahertz.
+
+    ``earfcn_active_text`` lists each component as ``EARFCN/PCI(PCC)`` or ``EARFCN/PCI(SCC)``,
+    comma-separated (PCI omitted from the slash pair only if the modem did not report one).
     """
     carriers: list[dict[str, Any]] = []
     for raw in lines:
@@ -227,17 +263,12 @@ def _parse_qcainfo_for_snapshot(lines: list[str]) -> dict[str, Any]:
         carriers.append(c_row)
 
     earfcns = [c.get("earfcn") for c in carriers if isinstance(c.get("earfcn"), int)]
-    parts_txt: list[str] = []
     component_mhz: list[int] = []
     for c in carriers:
-        e = c.get("earfcn")
-        r = c.get("role")
-        if isinstance(e, int) and r:
-            parts_txt.append(f"{e} ({r})")
         mw = _qcainfo_bandwidth_field_to_mhz(c.get("dl_bw_rb"))
         if isinstance(mw, int) and mw > 0:
             component_mhz.append(mw)
-    text = "; ".join(parts_txt) if parts_txt else None
+    text = format_qcainfo_carriers_pcc_scc_rows(carriers)
     agg: int | None = sum(component_mhz) if component_mhz else None
     return {
         "carriers": carriers,

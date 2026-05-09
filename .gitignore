@@ -4,3 +4,11 @@ backend/**/__pycache__/
 backend/**/*.pyc
 backend/build/
 backend/dist/
+
+# Local scratch / duplicate iperf tree (vendor copy lives under backend/vendor/iperf/)
+backend/_modem_check_out.txt
+/iperf3.1.1_32/
+
+# Automated test run output (bundled profiles stay in test_cases/)
+backend/automated_tests/test_results/*
+!backend/automated_tests/test_results/.gitkeep

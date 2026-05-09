@@ -1,6 +1,12 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 1.21** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **1.21.0**).
+**Version 2.0** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **2.0.0**).
+
+Notes for **v2.0**:
+
+- **Test runner**: **`app/test_runner.py`**; bundled profiles **`automated_tests/test_cases/*.json`** merged with **`.state/test_profiles.json`**. Root **Changes in v2.0** describes **`smoke_iperf_ul`**, **`connect_timeout_sec`**, and **`MD_IPERF_BIN`** / **`--connect-timeout`** behaviour.
+- **QCAINFO**: **`kpi_service`** formats PCC/SCC active text as **`EARFCN/PCI(ROLE)`** (comma-separated).
+- OpenAPI / page header: **v2.0**.
 
 Notes for **v1.21**:
 

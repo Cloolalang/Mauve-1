@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "name": "smoke_iperf_ul",
+  "project_name": "Example",
+  "test_location": "",
+  "engineer": "",
+  "modem_antenna_config": "SISO",
+  "modem_requirements": {},
+  "test_type": "iperf_upload",
+  "test_config": {
+    "host": "iperf.as42831.net",
+    "port": 5361,
+    "duration_sec": 5,
+    "protocol": "tcp",
+    "parallel_streams": 10,
+    "connect_timeout_sec": 10,
+    "bitrate_limit_mbps": 0,
+    "mobile_only": true
+  }
+}

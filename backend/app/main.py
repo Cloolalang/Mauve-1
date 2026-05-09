@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import ipaddress
 import json
 import logging
+import math
 import os
 import sys
 import re
@@ -15,12 +17,13 @@ from contextlib import asynccontextmanager
 
 from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 from serial.tools import list_ports
 
 from app.kpi_service import KpiRuntime, _parse_cgdcont, _parse_cgauth, _parse_qiact, _parse_qicsgp, kpi_poll_loop
+from app import test_runner as tr
 from app.serial_engine import SerialEngine
 from app.at_modem_errors import combine_errors, describe_modem_send_result
 from app.sim_usim_services import (
@@ -31,7 +34,7 @@ from app.sim_usim_services import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.21"
+APP_VERSION = "2.0"
 
 
 def _serial_state_file_path() -> str:
@@ -87,6 +90,10 @@ _desired_locks: dict[str, str] = {}
 _desired_locks_lock = asyncio.Lock()
 _lock_guard_paused: bool = False
 _modem_exclusive_lock = asyncio.Lock()
+
+# In-flight `POST /api/test/run` session (single active run for cancel from UI/API).
+_test_run_session_lock = asyncio.Lock()
+_test_run_session: dict[str, Any] | None = None
 
 # Shared AT+CLCC for `/api/tools/voice-call-status` and host auto-answer (single serial queue).
 _voice_clcc_cache_ts: float = 0.0
@@ -298,7 +305,7 @@ class LockSetBody(BaseModel):
 
 class VolteTestBody(BaseModel):
     number: str = Field(min_length=3, max_length=40, description="Dial number, e.g. +447700900123")
-    hold_sec: int = Field(default=10, ge=3, le=120, description="Call hold duration before hangup")
+    hold_sec: int = Field(default=10, ge=1, le=120, description="Call hold duration before hangup")
     connect_timeout_sec: int = Field(
         default=120,
         ge=20,
@@ -345,8 +352,8 @@ class IperfTestBody(BaseModel):
     bind_ip: str | None = Field(default=None, description="Optional local IPv4 to bind using iperf -B.")
     bitrate_limit_mbps: float | None = Field(
         default=None,
-        gt=0,
-        description="Optional TCP bitrate limit for iperf -b (Mbit/s), e.g. 10 → -b 10M.",
+        ge=0,
+        description="Optional TCP bitrate limit for iperf -b (Mbit/s); 0 or None = unlimited.",
     )
     parallel_streams: int = Field(
         default=10,
@@ -354,12 +361,60 @@ class IperfTestBody(BaseModel):
         le=64,
         description="iperf3 parallel streams (-P), 1–64.",
     )
+    connect_timeout_sec: float = Field(
+        default=10.0,
+        ge=1.0,
+        le=120.0,
+        description=(
+            "iperf3 control-connection startup budget in seconds (maps to --connect-timeout in ms when the binary supports it). "
+            "Default 10. Bundled iperf 3.1.1 omits the flag but the subprocess wall-clock still allows this headroom."
+        ),
+    )
 
 
 class IcmpPingSweepBody(BaseModel):
     host: str = Field(default="8.8.8.8", min_length=1, max_length=253)
     count: int = Field(default=10, ge=1, le=100)
     bind_ipv4: str | None = Field(default=None, description="Windows: ping -S source IPv4 (optional).")
+    timeout_ms: int | None = Field(
+        default=None,
+        ge=500,
+        le=60000,
+        description="Windows: per-reply timeout for ping -w (ms). Default 3000 when omitted.",
+    )
+
+
+class TestRunBody(BaseModel):
+    profile_name: str = Field(min_length=1, max_length=120)
+    project_name: str = Field(default="", max_length=200)
+    test_location: str = Field(default="", max_length=400)
+    engineer: str = Field(default="", max_length=200)
+    note: str = Field(default="", max_length=4000, description="Optional free-text note stored on the run (CSV + UI snapshot).")
+    ping_bind_ipv4_override: str | None = Field(
+        default=None,
+        description="ping profiles only: set to force bind (-S on Windows). Empty string = OS default route (no bind). Omit to use profile test_config.bind_ipv4.",
+    )
+    include_ui_snapshot: bool = True
+    ui_controls: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional client dashboard control values; password-like keys are redacted server-side.",
+    )
+    unlock_password: str | None = Field(default=None, description="Required for volte_call_outbound profiles.")
+    test_iterations: int = Field(default=1, ge=1, le=100, description="Run the profile tool this many times; CSV gets one row per iteration.")
+    test_iteration_delay_sec: float = Field(
+        default=10.0,
+        ge=10.0,
+        le=3600.0,
+        description="Seconds to wait between iterations (minimum 10; not applied after the last).",
+    )
+
+
+class TestCancelBody(BaseModel):
+    run_id: str | None = Field(
+        default=None,
+        max_length=32,
+        description="If set, must match the active test run id or the cancel request is rejected.",
+    )
 
 
 def _parse_icmp_ping_rtts_windows(text: str) -> list[float]:
@@ -401,6 +456,44 @@ def _icmp_jitter_ms(rtts: list[float]) -> float | None:
         return 0.0 if rtts else None
     diffs = [abs(rtts[i] - rtts[i - 1]) for i in range(1, len(rtts))]
     return round(sum(diffs) / len(diffs), 3)
+
+
+@functools.lru_cache(maxsize=16)
+def _iperf_supports_connect_timeout(binary: str) -> bool:
+    """True if *binary* accepts ``--connect-timeout`` (iperf3 newer than ~3.1.x)."""
+    try:
+        proc = subprocess.run(
+            [binary, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+        blob = f"{proc.stdout or ''}\n{proc.stderr or ''}".lower()
+        return "connect-timeout" in blob
+    except Exception:
+        return False
+
+
+def _iperf_connect_timeout_sec_clamped(raw: Any) -> float | None:
+    """Return 1..120 seconds or None when unset / invalid / non-positive."""
+    if raw is None or raw == "":
+        return None
+    try:
+        f = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if f <= 0:
+        return None
+    return max(1.0, min(120.0, f))
+
+
+def _iperf_connect_timeout_for_profile(cfg: dict[str, Any]) -> float:
+    """Default 10 s when profile omits ``connect_timeout_sec``; otherwise clamp or fall back to 10 if unset/null."""
+    if "connect_timeout_sec" not in cfg:
+        return 10.0
+    c = _iperf_connect_timeout_sec_clamped(cfg.get("connect_timeout_sec"))
+    return 10.0 if c is None else float(c)
 
 
 def _discover_iperf_binary(explicit: str | None = None) -> str | None:
@@ -1452,7 +1545,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="1.21.0",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -1728,7 +1821,7 @@ async def home() -> HTMLResponse:
       <div class="row" title="FDD or TDD from AT+QENG serving LTE cell (field after RAT on the LTE row)."><span class="label">Duplex</span><span id="lte-duplex">-</span></div>
       <div class="row"><span class="label">DL/UL BW</span><span id="bwpair">-</span></div>
       <div class="row"><span class="label">EARFCN/PCI</span><span id="earfcnpci">-</span></div>
-      <div class="row" title="LTE carrier aggregation component carriers from AT+QCAINFO (PCC then SCC)."><span class="label">EARFCN active (CA)</span><span id="earfcn-active-ca">-</span></div>
+      <div class="row" title="LTE CA components from AT+QCAINFO: EARFCN/PCI per PCC and SCC, comma-separated."><span class="label">EARFCN active (CA)</span><span id="earfcn-active-ca">-</span></div>
       <div class="row" title="Sum of decoded DL bandwidths (MHz) for each PCC/SCC row in AT+QCAINFO where the bandwidth field maps to RB count or QENG-style 0–5 index. — if a component cannot be decoded it is omitted from the sum."><span class="label">CA aggregated DL BW</span><span id="ca-agg-dl-bw">-</span></div>
       <div class="row"><span class="label">Cell ID</span><span id="cellid">-</span></div>
       <div class="label" style="margin-top:10px;">Primary cell RF KPI</div>
@@ -2125,6 +2218,10 @@ async def home() -> HTMLResponse:
           <input id="iperf-parallel" type="number" min="1" max="64" value="10" title="iperf3 -P: number of parallel client streams" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
         </div>
       </div>
+      <div style="margin-top:8px;">
+        <div class="label" title="iperf3 control-connection startup timeout (--connect-timeout in ms). Default 10 s. Applied only if your iperf3 build supports the flag (bundled 3.1.1 skips it; subprocess still allows this headroom).">Connect timeout (s)</div>
+        <input id="iperf-connect-timeout" type="number" min="1" max="120" step="1" value="10" style="width:100%; max-width:220px; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+      </div>
       <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:8px;">
         <div>
           <div class="label">Direction:</div>
@@ -2238,6 +2335,65 @@ async def home() -> HTMLResponse:
       <div class="label">ICMP Ping Trend (ms)</div>
       <canvas id="ph-sweep-chart" width="420" height="180" style="width:100%; height:180px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
+    </div>
+
+    <div class="card" style="grid-column: 1 / -1;">
+      <div class="label">Test Runner (saved profiles)</div>
+      <div class="label" style="margin-top:6px; font-size:11px; line-height:1.4;">
+        Runs a saved profile; each run creates a folder under <code>backend/automated_tests/test_results/</code> (name: project + location + UTC time + run id) containing <code>run_*_summary.csv</code>, <code>run_*_kpi.jsonl</code>, and <code>run_*_ui.json</code>. Bundled profiles live in <code>automated_tests/test_cases/</code>.
+        To exercise <strong>specific modem radio settings</strong> (for example LTE/NR band lock, RAT mode, CA on/off, single-band or neighbour locks), configure them <strong>manually in this dashboard first</strong>—the Test Runner applies each profile’s optional modem requirements (if any) but does not replace full lock/MNO setup you want for the test.
+        For <strong>ping</strong> profiles, use <strong>Ping bind</strong> (same IPv4 list as ICMP sweep) so traffic uses the modem interface; <strong>Auto</strong> skips <code>-S</code>. <strong>Profile bind_ipv4</strong> uses the JSON value only when that option is selected.
+        For <strong>iperf</strong> profiles, optional <code>test_config.connect_timeout_sec</code> (1–120; default <strong>10</strong> when omitted) maps to iperf3 <code>--connect-timeout</code> when the binary supports it (bundled 3.1.1 skips the flag; subprocess still allows the timeout headroom).
+        VoLTE runs require unlock password below. Password fields in UI snapshot are redacted server-side.
+        <strong>Delay between iterations</strong> is at least 10 seconds when a profile runs more than once. Use <strong>Cancel run</strong> (or <code>POST /api/test/cancel</code>) to stop after the current tool step or during the delay; the modem cannot abort a ping/iperf/VoLTE call mid-flight.
+      </div>
+      <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-top:10px;">
+        <div style="min-width:220px; flex:1;">
+          <div class="label">Profile</div>
+          <select id="test-runner-profile" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px;"></select>
+        </div>
+        <div style="min-width:140px;">
+          <div class="label">Project</div>
+          <input id="test-runner-project" placeholder="Project name" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px;" />
+        </div>
+        <div style="min-width:140px;">
+          <div class="label">Location / zone</div>
+          <input id="test-runner-location" placeholder="Site, room, …" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px;" />
+        </div>
+        <div style="min-width:120px;">
+          <div class="label">Engineer</div>
+          <input id="test-runner-engineer" placeholder="Name or ID" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px;" />
+          <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:6px;">
+            <label style="flex:1; min-width:140px;">Iterations
+              <input id="test-runner-iterations" type="number" min="1" max="100" value="1" style="width:100%; margin-top:4px; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px;" />
+            </label>
+            <label style="flex:1; min-width:160px;">Delay between (sec)
+              <input id="test-runner-iter-delay" type="number" min="10" max="3600" step="1" value="10" style="width:100%; margin-top:4px; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px;" />
+            </label>
+          </div>
+        </div>
+        <div style="min-width:280px; flex:1;">
+          <div class="label">Ping bind (Windows <code>-S</code>, Test Runner)</div>
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <select id="test-runner-bind-select" style="flex:1; min-width:200px; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px;"></select>
+            <button id="btn-test-runner-refresh-ifaces" type="button">Refresh ifaces</button>
+          </div>
+          <input id="test-runner-bind-ip" placeholder="Manual IPv4 when Manual is selected" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:6px; display:none;" />
+        </div>
+        <div style="min-width:180px;">
+          <div class="label">Unlock (VoLTE runs)</div>
+          <input id="test-runner-unlock" type="password" autocomplete="off" placeholder="Same as Allow Data" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px;" />
+        </div>
+        <button id="btn-test-runner-refresh" type="button">Refresh profiles</button>
+        <button id="btn-test-runner-run" type="button">Run test</button>
+        <button id="btn-test-runner-cancel" type="button" disabled>Cancel run</button>
+      </div>
+      <div style="margin-top:10px; width:100%; max-width:900px;">
+        <div class="label">Note</div>
+        <textarea id="test-runner-note" rows="2" placeholder="Optional run note (saved with results)" style="width:100%; box-sizing:border-box; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:8px; resize:vertical; font-family:inherit; font-size:13px;"></textarea>
+      </div>
+      <div id="test-runner-msg" class="label" style="margin-top:8px;">-</div>
+      <div id="test-runner-progress" class="label" style="margin-top:6px; font-size:12px; min-height:1.3em; color:#9cf;"> </div>
     </div>
 
     <div class="card" style="grid-column: 1 / -1;">
@@ -4112,6 +4268,30 @@ async def home() -> HTMLResponse:
       return String(v || "").trim();
     }
 
+    function syncTestRunnerBindUi() {
+      const sel = el("test-runner-bind-select");
+      const inp = el("test-runner-bind-ip");
+      if (!sel || !inp) return;
+      const v = sel.value;
+      if (v === "manual") {
+        inp.style.display = "block";
+      } else {
+        inp.style.display = "none";
+        if (v === "auto" || v === "__profile__") inp.value = "";
+      }
+    }
+
+    function resolveTestRunnerBindIp() {
+      const sel = el("test-runner-bind-select");
+      const inp = el("test-runner-bind-ip");
+      if (!sel) return "";
+      const v = sel.value;
+      if (v === "__profile__") return "";
+      if (v === "manual") return String(inp?.value || "").trim();
+      if (v === "auto") return "";
+      return String(v || "").trim();
+    }
+
     async function loadBindInterfaces() {
       try {
         const r = await fetch("/api/tools/bind-interfaces");
@@ -4161,6 +4341,18 @@ async def home() -> HTMLResponse:
         const prevPh = selPh ? selPh.value : "auto";
         populateBindSelect(selIp, prevIp, "Auto-detect mobile broadband IPv4");
         populateBindSelect(selPh, prevPh, "Auto (OS default route)");
+        const selTr = el("test-runner-bind-select");
+        if (selTr) {
+          const prevTr = selTr.value || "auto";
+          populateBindSelect(selTr, prevTr, "Auto (OS default route)");
+          const optProf = document.createElement("option");
+          optProf.value = "__profile__";
+          optProf.textContent = "Profile bind_ipv4 (JSON)";
+          const manIdx = Array.from(selTr.options).findIndex((o) => o.value === "manual");
+          if (manIdx >= 0) selTr.insertBefore(optProf, selTr.options[manIdx]);
+          else selTr.appendChild(optProf);
+          syncTestRunnerBindUi();
+        }
         syncIperfBindUi();
         syncPhBindUi();
       } catch (_) {}
@@ -4208,6 +4400,14 @@ async def home() -> HTMLResponse:
         iperfBusy = false;
         return;
       }
+      const connectToRaw = String(el("iperf-connect-timeout")?.value || "").trim();
+      const cCt = Number(connectToRaw || 10);
+      if (!Number.isFinite(cCt) || cCt < 1 || cCt > 120) {
+        el("iperf-msg").textContent = "Connect timeout must be 1..120 seconds.";
+        iperfBusy = false;
+        return;
+      }
+      const connectTimeoutSec = Math.trunc(cCt);
       try {
         el("iperf-msg").textContent = `Running iperf ${direction} test...`;
         el("iperf-trace").textContent = "Running...";
@@ -4223,6 +4423,7 @@ async def home() -> HTMLResponse:
           };
           if (bindIp) body.bind_ip = bindIp;
           if (speedLimit !== null) body.bitrate_limit_mbps = speedLimit;
+          body.connect_timeout_sec = connectTimeoutSec;
           const r = await fetch("/api/tools/iperf-test", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -7080,6 +7281,239 @@ async def home() -> HTMLResponse:
       } catch (_) {}
     }
 
+    function _trVal(id) {
+      const n = el(id);
+      if (!n) return null;
+      if (n.type === "checkbox") return !!n.checked;
+      const s = String(n.value ?? "").trim();
+      return s.length ? s : null;
+    }
+    function collectUiControlsForRun() {
+      return {
+        chart: {
+          window_sec: Number(el("chart-window-select")?.value || 600),
+          gap_mode: !!chartGapModeEnabled,
+          rf_smoothing: !!el("rf-smooth-toggle")?.checked,
+          rf_std_sample_n: Number(el("rf-std-sample-count")?.value || 60),
+        },
+        serial: { port: _trVal("serial-port-select"), baud: serialBaud },
+        cops_scan_uk_only: _trVal("cops-scan-uk-only"),
+        data_service_form: {
+          apn: _trVal("ds-apn-set"),
+          pdp_type: _trVal("ds-pdp-type"),
+          pdp_auth: _trVal("ds-pdp-auth-type"),
+          pdp_username: _trVal("ds-pdp-net-user"),
+          reactivate_checked: _trVal("ds-apn-reactivate"),
+        },
+        mno: {
+          select: _trVal("mno-select"),
+          cops_mode: _trVal("mno-cops-mode"),
+          skip_dereg: _trVal("mno-skip-dereg"),
+        },
+        locks: {
+          ratmode: _trVal("input-ratmode"),
+          ca_enable: _trVal("input-ca-enable"),
+          ca_on_bands: _trVal("input-ca-on-bands"),
+          ca_single_band: _trVal("input-ca-single-band"),
+          lte_bands: _trVal("input-lteband"),
+          nr_bands: _trVal("input-nrband"),
+          nrdc_enable: _trVal("input-nrdc-enable"),
+        },
+        volte_panel: {
+          number: _trVal("volte-number"),
+          hold_sec: _trVal("volte-hold-sec"),
+          connect_timeout: _trVal("volte-connect-timeout"),
+          autoanswer_enabled: _trVal("autoanswer-enabled"),
+          autoanswer_rings: _trVal("autoanswer-rings"),
+        },
+        iperf: {
+          host: _trVal("iperf-host"),
+          port: _trVal("iperf-port"),
+          duration: _trVal("iperf-duration"),
+          parallel: _trVal("iperf-parallel"),
+          connect_timeout_sec: _trVal("iperf-connect-timeout"),
+          direction: _trVal("iperf-direction"),
+          protocol: _trVal("iperf-protocol"),
+          bind_select: _trVal("iperf-bind-select"),
+          bind_ip: _trVal("iperf-bind-ip"),
+          speed_limit: _trVal("iperf-speed-limit"),
+        },
+        ping_sweep: {
+          host: _trVal("ph-host"),
+          count: _trVal("ph-count"),
+          bind_select: _trVal("ph-bind-select"),
+          bind_ip: _trVal("ph-bind-ip"),
+          repeat: _trVal("ph-repeat-toggle"),
+        },
+        test_runner: {
+          bind_select: _trVal("test-runner-bind-select"),
+          bind_ip: _trVal("test-runner-bind-ip"),
+          note: String(el("test-runner-note")?.value || "").trim() || null,
+          test_iterations: Number(el("test-runner-iterations")?.value || 1),
+          test_iteration_delay_sec: Number(el("test-runner-iter-delay")?.value || 10),
+        },
+      };
+    }
+    async function refreshTestRunnerProfiles() {
+      const sel = el("test-runner-profile");
+      if (!sel) return;
+      try {
+        const r = await fetch("/api/test/profiles");
+        const j = await r.json();
+        const names = Array.isArray(j.names) ? j.names : [];
+        sel.innerHTML = "";
+        for (const n of names) {
+          const o = document.createElement("option");
+          o.value = n;
+          o.textContent = n;
+          sel.appendChild(o);
+        }
+        if (!names.length) {
+          const o = document.createElement("option");
+          o.value = "";
+          o.textContent = "(no profiles)";
+          sel.appendChild(o);
+        }
+      } catch (e) {
+        sel.innerHTML = "";
+        const o = document.createElement("option");
+        o.value = "";
+        o.textContent = "Load failed";
+        sel.appendChild(o);
+      }
+    }
+    let _testRunnerProgressTimer = null;
+    function stopTestRunnerProgressPoll() {
+      if (_testRunnerProgressTimer) {
+        clearInterval(_testRunnerProgressTimer);
+        _testRunnerProgressTimer = null;
+      }
+      const pr = el("test-runner-progress");
+      if (pr) pr.textContent = "";
+    }
+    function startTestRunnerProgressPoll() {
+      stopTestRunnerProgressPoll();
+      const pr = el("test-runner-progress");
+      const tick = async () => {
+        try {
+          const r = await fetch("/api/test/active");
+          if (!r.ok) return;
+          const j = await r.json();
+          if (!pr) return;
+          if (!j.active) {
+            pr.textContent = "";
+            return;
+          }
+          const tot = Number(j.iterations_total) || 1;
+          if (tot < 2) {
+            pr.textContent = "";
+            return;
+          }
+          if (j.phase === "delay" && typeof j.seconds_until_next === "number") {
+            const next = Number(j.iteration_next);
+            const s = Math.max(0, Math.ceil(j.seconds_until_next));
+            pr.textContent = Number.isFinite(next)
+              ? `Next iteration ${next}/${tot} in ${s}s`
+              : `Next iteration in ${s}s`;
+          } else if (j.phase === "tool" && j.iteration_running) {
+            pr.textContent = `Running iteration ${j.iteration_running}/${tot}`;
+          } else if (j.phase === "modem_requirements") {
+            pr.textContent = "Preparing modem for test…";
+          } else if (j.phase === "complete") {
+            pr.textContent = "Finishing…";
+          } else {
+            pr.textContent = "";
+          }
+        } catch (_) {}
+      };
+      tick();
+      _testRunnerProgressTimer = setInterval(tick, 400);
+    }
+    async function cancelTestRunnerRun() {
+      const msg = el("test-runner-msg");
+      try {
+        const r = await fetch("/api/test/cancel", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(userFacingBackendError(j, `HTTP ${r.status}`));
+        const rid = j.run_id ? ` run_id=${j.run_id}` : "";
+        if (msg) msg.textContent = `${msg.textContent || ""} Cancel requested.${rid}`.trim();
+      } catch (e) {
+        if (msg) msg.textContent = `Cancel: ${e?.message || e}`;
+      }
+    }
+    async function runTestRunnerProfile() {
+      const msg = el("test-runner-msg");
+      const sel = el("test-runner-profile");
+      const btnRun = el("btn-test-runner-run");
+      const btnCancel = el("btn-test-runner-cancel");
+      if (!sel || !String(sel.value || "").trim()) {
+        if (msg) msg.textContent = "Select a profile first (create one via POST /api/test/profiles).";
+        return;
+      }
+      if (msg) msg.textContent = "Running…";
+      if (btnRun) btnRun.disabled = true;
+      if (btnCancel) btnCancel.disabled = false;
+      try {
+        let nIt = Math.max(1, Math.min(100, Math.floor(Number(el("test-runner-iterations")?.value) || 1)));
+        let dIt = Math.max(10, Math.min(3600, Number(el("test-runner-iter-delay")?.value) || 10));
+        if (!Number.isFinite(nIt)) nIt = 1;
+        if (!Number.isFinite(dIt)) dIt = 10;
+        const body = {
+          profile_name: String(sel.value).trim(),
+          project_name: String(el("test-runner-project")?.value || "").trim(),
+          test_location: String(el("test-runner-location")?.value || "").trim(),
+          engineer: String(el("test-runner-engineer")?.value || "").trim(),
+          note: String(el("test-runner-note")?.value || "").trim(),
+          test_iterations: nIt,
+          test_iteration_delay_sec: dIt,
+          include_ui_snapshot: true,
+          ui_controls: collectUiControlsForRun(),
+          unlock_password: String(el("test-runner-unlock")?.value || "") || null,
+        };
+        const trBind = el("test-runner-bind-select");
+        if (trBind) {
+          if (trBind.value === "__profile__") {
+            /* omit ping_bind_ipv4_override → server uses profile test_config.bind_ipv4 */
+          } else if (trBind.value === "manual") {
+            const ip = String(el("test-runner-bind-ip")?.value || "").trim();
+            if (!ip) {
+              if (msg) msg.textContent = "Ping bind: choose an interface or enter a manual IPv4.";
+              return;
+            }
+            body.ping_bind_ipv4_override = ip;
+          } else if (trBind.value === "auto") {
+            body.ping_bind_ipv4_override = "";
+          } else {
+            body.ping_bind_ipv4_override = String(trBind.value || "").trim();
+          }
+        }
+        startTestRunnerProgressPoll();
+        const r = await fetch("/api/test/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const j = await r.json();
+        if (!r.ok) throw new Error(userFacingBackendError(j, `HTTP ${r.status}`));
+        if (msg) {
+          const folder = j.run_folder ? ` folder=${j.run_folder}` : "";
+          const dirHint = j.artifacts_dir ? ` Files: ${j.artifacts_dir}` : "";
+          const cx = j.run_cancelled ? " cancelled=true" : "";
+          msg.textContent = `OK run_id=${j.run_id} success=${j.run_success}.${cx}${folder}${dirHint}`;
+        }
+      } catch (e) {
+        if (msg) msg.textContent = `Error: ${e?.message || e}`;
+      } finally {
+        stopTestRunnerProgressPoll();
+        if (btnRun) btnRun.disabled = false;
+        if (btnCancel) btnCancel.disabled = true;
+      }
+    }
+
     const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${wsProto}//${location.host}/ws/kpi`);
     ws.onopen = () => { el("status").textContent = "WebSocket connected."; el("status").className = "label ok"; };
@@ -7135,6 +7569,16 @@ async def home() -> HTMLResponse:
     if (btnPhRefresh) btnPhRefresh.addEventListener("click", () => loadBindInterfaces());
     const btnPhRun = el("btn-ph-run");
     if (btnPhRun) btnPhRun.addEventListener("click", () => runPingSweepTest());
+    const btnTrRefresh = el("btn-test-runner-refresh");
+    if (btnTrRefresh) btnTrRefresh.addEventListener("click", () => refreshTestRunnerProfiles());
+    const btnTrIf = el("btn-test-runner-refresh-ifaces");
+    if (btnTrIf) btnTrIf.addEventListener("click", () => loadBindInterfaces());
+    const trBindSel = el("test-runner-bind-select");
+    if (trBindSel) trBindSel.addEventListener("change", () => syncTestRunnerBindUi());
+    const btnTrRun = el("btn-test-runner-run");
+    if (btnTrRun) btnTrRun.addEventListener("click", () => runTestRunnerProfile());
+    const btnTrCancel = el("btn-test-runner-cancel");
+    if (btnTrCancel) btnTrCancel.addEventListener("click", () => cancelTestRunnerRun());
     const phRepeatToggle = el("ph-repeat-toggle");
     if (phRepeatToggle) phRepeatToggle.addEventListener("change", (ev) => setPhRepeatPing(!!ev.target.checked));
     el("btn-clear-charts").addEventListener("click", () => clearAllCharts());
@@ -7185,6 +7629,7 @@ async def home() -> HTMLResponse:
     updateChartGapButton();
     redrawAllCharts();
     loadBindInterfaces();
+    refreshTestRunnerProfiles();
     installRfChartHoverListeners();
   </script>
 </body>
@@ -8127,6 +8572,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
         raise HTTPException(status_code=400, detail="Only protocol='tcp' is currently supported.")
     reverse = direction == "download"
     parallel_streams = int(body.parallel_streams)
+    ct_sec = max(1.0, min(120.0, float(body.connect_timeout_sec)))
     limit_mbps = body.bitrate_limit_mbps
     bind_ip = str(body.bind_ip or "").strip() or None
     if bind_ip:
@@ -8150,6 +8596,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
                 "bind_ip": None,
                 "bitrate_limit_mbps": limit_mbps,
                 "parallel_streams": parallel_streams,
+                "connect_timeout_sec": ct_sec,
             }
     binary = _discover_iperf_binary()
     if not binary:
@@ -8165,6 +8612,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
             "bind_ip": bind_ip,
             "bitrate_limit_mbps": limit_mbps,
             "parallel_streams": parallel_streams,
+            "connect_timeout_sec": ct_sec,
         }
     cmd = [
         binary,
@@ -8182,16 +8630,20 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
         cmd.append("-R")
     if bind_ip:
         cmd.extend(["-B", bind_ip])
-    if limit_mbps is not None:
+    if limit_mbps is not None and float(limit_mbps) > 0:
         cmd.extend(["-b", f"{float(limit_mbps):g}M"])
     cmd.extend(["-P", str(parallel_streams)])
+    if _iperf_supports_connect_timeout(binary):
+        ms = max(1, int(round(float(ct_sec) * 1000.0)))
+        cmd.extend(["--connect-timeout", str(ms)])
     dur = int(body.duration_sec)
     # Wall-clock often exceeds iperf -t: TCP slow-start, JSON flush, cellular UL teardown.
     # Upload (no -R) is slower and needs more headroom than download (-R).
     slack_dl = 40
     slack_ul = max(75, dur // 2 + 60)
     stream_slack = min(120, max(0, parallel_streams - 1) * 10)
-    timeout_sec = dur + (slack_dl if reverse else slack_ul) + stream_slack
+    connect_slack = int(math.ceil(float(ct_sec)))
+    timeout_sec = dur + (slack_dl if reverse else slack_ul) + stream_slack + connect_slack
     try:
         proc = await asyncio.to_thread(
             subprocess.run,
@@ -8215,6 +8667,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
             "bind_ip": bind_ip,
             "bitrate_limit_mbps": limit_mbps,
             "parallel_streams": parallel_streams,
+            "connect_timeout_sec": ct_sec,
         }
     stdout = str(proc.stdout or "")
     stderr = str(proc.stderr or "")
@@ -8242,6 +8695,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
         "detected_mobile_adapter": detected_adapter,
         "bitrate_limit_mbps": limit_mbps,
         "parallel_streams": parallel_streams,
+        "connect_timeout_sec": ct_sec,
         "throughput_mbps": round(float(mbps), 3) if mbps is not None else None,
         "throughput_source": source,
         "command": cmd,
@@ -8265,8 +8719,12 @@ async def tools_icmp_ping(body: IcmpPingSweepBody) -> dict:
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"Invalid bind_ipv4: {bind}") from exc
 
+    ping_timeout_ms: int | None = None
     if os.name == "nt":
-        cmd = ["ping", "-4", "-n", str(count), "-w", "3000"]
+        w_ms = int(body.timeout_ms) if body.timeout_ms is not None else 3000
+        w_ms = max(500, min(60000, w_ms))
+        ping_timeout_ms = int(w_ms)
+        cmd = ["ping", "-4", "-n", str(count), "-w", str(w_ms)]
         if bind:
             cmd.extend(["-S", bind])
         cmd.append(host)
@@ -8326,6 +8784,7 @@ async def tools_icmp_ping(body: IcmpPingSweepBody) -> dict:
         "jitter_ms": jitter,
         "bind_ipv4": bind,
         "bind_supported": os.name == "nt",
+        "timeout_ms": ping_timeout_ms,
         "command": cmd,
         "exit_code": proc.returncode,
         "stdout_tail": stdout[-4000:] if stdout else "",
@@ -8640,6 +9099,492 @@ async def tools_volte_test(body: VolteTestBody) -> dict:
             "qnwinfo_before": nw_before_res,
             "qnwinfo_during": nw_during_res,
             "qnwinfo_after": nw_after_res,
+        },
+    }
+
+
+async def _server_ui_state_for_test_export() -> dict[str, Any]:
+    st = await engine.status()
+    async with kpi_runtime.lock:
+        return {
+            "serial_port": st.get("port"),
+            "serial_baudrate": st.get("baudrate"),
+            "serial_open": st.get("serial_open"),
+            "serial_queue_depth": st.get("queue_depth"),
+            "kpi_poll_hz": kpi_runtime.poll_hz,
+            "kpi_poll_running": kpi_runtime.poll_running,
+            "kpi_last_error": kpi_runtime.last_error,
+        }
+
+
+async def _apply_modem_requirements(mr: Any, test_type: str) -> None:
+    if not isinstance(mr, dict) or not mr:
+        return
+    if mr.get("require_packet_data") and test_type in ("ping", "iperf_download", "iperf_upload"):
+        await _require_packet_data_for_host_traffic_tests()
+    if mr.get("require_serving_cell"):
+        deadline = time.time() + float(mr.get("max_start_wait_sec") or 60)
+        min_r = mr.get("min_rsrp_dbm")
+        while time.time() < deadline:
+            async with kpi_runtime.lock:
+                net = kpi_runtime.snapshot.get("network") or {}
+                srv = kpi_runtime.snapshot.get("servingcell") or {}
+                lte = srv.get("lte") or {}
+                service_ok = str(net.get("service") or "").upper() != "NO SERVICE" and bool(net.get("act"))
+                rsrp = lte.get("rsrp")
+            if service_ok and (min_r is None or (isinstance(rsrp, (int, float)) and float(rsrp) >= float(min_r))):
+                return
+            await asyncio.sleep(1.0)
+        raise HTTPException(
+            status_code=400,
+            detail="modem_requirements: serving cell / RSRP gate not met within max_start_wait_sec.",
+        )
+
+
+@app.get("/api/ui/state")
+async def api_ui_state() -> dict[str, Any]:
+    s = await _server_ui_state_for_test_export()
+    return {"ok": True, "ui_controls": {"server": s}}
+
+
+@app.get("/api/test/profiles")
+async def api_test_profiles_list() -> dict[str, Any]:
+    merged = tr.list_merged_profiles()
+    names = [str(p.get("name") or "").strip() for p in merged if isinstance(p, dict)]
+    return {
+        "ok": True,
+        "profiles": merged,
+        "names": names,
+        "example_profile_names": tr.example_only_profile_names(),
+        "bundled_examples_dir": tr.bundled_example_profiles_dir(),
+        "test_cases_dir": tr.test_case_profiles_dir(),
+        "test_results_root_dir": tr.test_results_root_dir(),
+        "automated_tests_root": tr.automated_tests_root(),
+    }
+
+
+@app.get("/api/test/profiles/{name}")
+async def api_test_profiles_get(name: str) -> dict[str, Any]:
+    p = tr.get_profile_by_name(name)
+    if not p:
+        raise HTTPException(status_code=404, detail="Profile not found.")
+    return {"ok": True, "profile": p}
+
+
+@app.post("/api/test/profiles")
+async def api_test_profiles_upsert(body: dict[str, Any]) -> dict[str, Any]:
+    try:
+        tr.upsert_profile(body)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return {"ok": True, "name": body.get("name")}
+
+
+@app.delete("/api/test/profiles/{name}")
+async def api_test_profiles_delete(name: str) -> dict[str, Any]:
+    if not tr.delete_profile(name):
+        raise HTTPException(status_code=404, detail="Profile not found.")
+    return {"ok": True}
+
+
+_RUN_DOWNLOAD_KIND = {"summary": "_summary.csv", "kpi": "_kpi.jsonl", "ui": "_ui.json"}
+
+
+@app.get("/api/test/download/{run_id}/{kind}")
+async def api_test_download(run_id: str, kind: str) -> FileResponse:
+    if not re.fullmatch(r"[0-9a-fA-F]{8}", run_id or ""):
+        raise HTTPException(status_code=400, detail="Invalid run_id.")
+    low = kind.lower()
+    if low not in _RUN_DOWNLOAD_KIND:
+        raise HTTPException(status_code=400, detail="kind must be summary, kpi, or ui.")
+    parent = tr.resolve_run_artifacts_dir(run_id)
+    if not parent:
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    path = os.path.join(parent, f"run_{run_id.lower()}{_RUN_DOWNLOAD_KIND[low]}")
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail="Artifact not found.")
+    media = "text/csv" if low == "summary" else "application/x-ndjson" if low == "kpi" else "application/json"
+    fname = os.path.basename(path)
+    return FileResponse(path, filename=fname, media_type=media)
+
+
+async def _interruptible_sleep_test_delay(total_sec: float, cancel_ev: asyncio.Event) -> bool:
+    """Return True if *cancel_ev* was set before the full delay elapsed."""
+    total_sec = max(0.0, float(total_sec))
+    deadline = time.time() + total_sec
+    while True:
+        if cancel_ev.is_set():
+            return True
+        now = time.time()
+        if now >= deadline:
+            return False
+        await asyncio.sleep(min(0.25, deadline - now))
+
+
+@app.get("/api/test/active")
+async def api_test_active() -> dict[str, Any]:
+    idle: dict[str, Any] = {
+        "active": False,
+        "run_id": None,
+        "phase": None,
+        "iterations_total": None,
+        "iteration_running": None,
+        "iteration_next": None,
+        "seconds_until_next": None,
+    }
+    async with _test_run_session_lock:
+        if not _test_run_session:
+            return idle
+        sess = _test_run_session
+        rid = str(sess.get("run_id") or "")
+        st = sess.get("state")
+        if not isinstance(st, dict):
+            return {
+                "active": True,
+                "run_id": rid,
+                "phase": None,
+                "iterations_total": None,
+                "iteration_running": None,
+                "iteration_next": None,
+                "seconds_until_next": None,
+            }
+        phase = st.get("phase")
+        it_total = st.get("iterations_total")
+        it_run = st.get("iteration_running")
+        it_next = st.get("iteration_next")
+        sec_until: float | None = None
+        if phase == "delay":
+            ddl = st.get("delay_deadline_ts")
+            if isinstance(ddl, (int, float)):
+                sec_until = max(0.0, float(ddl) - time.time())
+        return {
+            "active": True,
+            "run_id": rid,
+            "phase": phase,
+            "iterations_total": it_total,
+            "iteration_running": it_run,
+            "iteration_next": it_next,
+            "seconds_until_next": round(sec_until, 1) if sec_until is not None else None,
+        }
+
+
+@app.post("/api/test/cancel")
+async def api_test_cancel(body: TestCancelBody = Body(default_factory=TestCancelBody)) -> dict[str, Any]:
+    want = (body.run_id or "").strip().lower()
+    async with _test_run_session_lock:
+        sess = _test_run_session
+        if not sess:
+            raise HTTPException(status_code=404, detail="No test run in progress.")
+        cur = str(sess.get("run_id") or "").lower()
+        if want and want != cur:
+            raise HTTPException(status_code=409, detail="run_id does not match the active test run.")
+        ev: asyncio.Event = sess["cancel"]
+        ev.set()
+    return {
+        "ok": True,
+        "run_id": cur,
+        "message": "Cancellation requested; the run stops after the current tool step and any interruptible delay.",
+    }
+
+
+@app.post("/api/test/run")
+async def api_test_run(body: TestRunBody) -> dict[str, Any]:
+    global _test_run_session
+    prof = tr.get_profile_by_name(body.profile_name.strip())
+    if not prof:
+        raise HTTPException(status_code=404, detail="Unknown profile_name.")
+    errs = tr.validate_profile(prof)
+    if errs:
+        raise HTTPException(status_code=400, detail="; ".join(errs))
+    test_type = str(prof.get("test_type") or "").strip()
+    cfg = prof.get("test_config") if isinstance(prof.get("test_config"), dict) else {}
+    mr = prof.get("modem_requirements") if isinstance(prof.get("modem_requirements"), dict) else {}
+
+    project_name = (body.project_name or "").strip() or str(prof.get("project_name") or "").strip()
+    test_location = (body.test_location or "").strip() or str(prof.get("test_location") or "").strip()
+    engineer = (body.engineer or "").strip() or str(prof.get("engineer") or "").strip()
+    run_note = (body.note or "").strip()
+
+    run_id = tr.new_run_id()
+    started = time.time()
+    out_dir = tr.prepare_run_artifacts_dir(
+        project_name=project_name,
+        test_location=test_location,
+        started_ts=started,
+        run_id=run_id,
+    )
+    csv_path = os.path.join(out_dir, f"run_{run_id}_summary.csv")
+    kpi_path = os.path.join(out_dir, f"run_{run_id}_kpi.jsonl")
+    ui_path = os.path.join(out_dir, f"run_{run_id}_ui.json")
+
+    n_it = max(1, min(100, int(body.test_iterations)))
+    delay_s = max(10.0, min(3600.0, float(body.test_iteration_delay_sec)))
+    if delay_s == int(delay_s):
+        delay_csv = str(int(delay_s))
+    else:
+        delay_csv = str(round(delay_s, 3)).rstrip("0").rstrip(".")
+
+    cancel_ev = asyncio.Event()
+    run_state: dict[str, Any] = {"cancelled": False}
+    iteration_log: list[dict[str, Any]] = []
+    cancel_tool_result: dict[str, Any] = {"ok": False, "error": "Test run cancelled.", "cancelled": True}
+    tr_progress_state: dict[str, Any] = {
+        "phase": "queued",
+        "iterations_total": n_it,
+        "iteration_running": None,
+        "iteration_next": None,
+        "delay_deadline_ts": None,
+    }
+
+    async def run_one_tool() -> dict[str, Any]:
+        tr_progress_state["phase"] = "modem_requirements"
+        tr_progress_state["iteration_running"] = None
+        tr_progress_state["iteration_next"] = None
+        tr_progress_state["delay_deadline_ts"] = None
+        await _apply_modem_requirements(mr, test_type)
+        iteration_log.clear()
+        last_tr: dict[str, Any] = {"ok": False, "error": "no result"}
+        for i in range(n_it):
+            if cancel_ev.is_set():
+                run_state["cancelled"] = True
+                return cancel_tool_result
+            tr_progress_state["phase"] = "tool"
+            tr_progress_state["iteration_running"] = i + 1
+            tr_progress_state["iteration_next"] = None
+            tr_progress_state["delay_deadline_ts"] = None
+            t_iter0 = time.time()
+            if test_type == "ping":
+                bind_ip: str | None
+                if body.ping_bind_ipv4_override is not None:
+                    bind_ip = str(body.ping_bind_ipv4_override).strip() or None
+                else:
+                    bind_ip = str(cfg.get("bind_ipv4") or "").strip() or None
+                last_tr = await tools_icmp_ping(
+                    IcmpPingSweepBody(
+                        host=str(cfg["host"]),
+                        count=int(cfg["count"]),
+                        bind_ipv4=bind_ip,
+                        timeout_ms=int(cfg["timeout_ms"]),
+                    )
+                )
+            elif test_type == "iperf_download":
+                lim = cfg.get("bitrate_limit_mbps")
+                lim_f = float(lim) if lim is not None else None
+                if lim_f is not None and lim_f <= 0:
+                    lim_f = None
+                last_tr = await tools_iperf_test(
+                    IperfTestBody(
+                        host=str(cfg["host"]),
+                        port=int(cfg["port"]),
+                        duration_sec=int(cfg["duration_sec"]),
+                        direction="download",
+                        protocol=str(cfg.get("protocol") or "tcp").lower(),
+                        mobile_only=bool(cfg["mobile_only"]),
+                        bind_ip=None,
+                        bitrate_limit_mbps=lim_f,
+                        parallel_streams=int(cfg["parallel_streams"]),
+                        connect_timeout_sec=_iperf_connect_timeout_for_profile(cfg),
+                    )
+                )
+            elif test_type == "iperf_upload":
+                lim = cfg.get("bitrate_limit_mbps")
+                lim_f = float(lim) if lim is not None else None
+                if lim_f is not None and lim_f <= 0:
+                    lim_f = None
+                last_tr = await tools_iperf_test(
+                    IperfTestBody(
+                        host=str(cfg["host"]),
+                        port=int(cfg["port"]),
+                        duration_sec=int(cfg["duration_sec"]),
+                        direction="upload",
+                        protocol=str(cfg.get("protocol") or "tcp").lower(),
+                        mobile_only=bool(cfg["mobile_only"]),
+                        bind_ip=None,
+                        bitrate_limit_mbps=lim_f,
+                        parallel_streams=int(cfg["parallel_streams"]),
+                        connect_timeout_sec=_iperf_connect_timeout_for_profile(cfg),
+                    )
+                )
+            elif test_type == "volte_call_outbound":
+                if not body.unlock_password:
+                    raise HTTPException(status_code=400, detail="unlock_password is required for VoLTE test runs.")
+                hold = max(1, min(int(cfg.get("call_duration_sec") or 10), 120))
+                if not bool(cfg.get("auto_hangup", True)):
+                    hold = 1
+                conn_to = max(20, min(int(cfg.get("answer_wait_sec") or 120), 300))
+                last_tr = await tools_volte_test(
+                    VolteTestBody(
+                        number=str(cfg["phone_number"]),
+                        hold_sec=hold,
+                        connect_timeout_sec=conn_to,
+                        password=body.unlock_password,
+                    )
+                )
+            else:
+                raise HTTPException(status_code=400, detail=f"Unsupported test_type: {test_type}")
+            iteration_log.append(
+                {
+                    "iteration": i + 1,
+                    "started": t_iter0,
+                    "ended": time.time(),
+                    "tool_result": last_tr,
+                }
+            )
+            if i < n_it - 1:
+                if cancel_ev.is_set():
+                    run_state["cancelled"] = True
+                    tr_progress_state["delay_deadline_ts"] = None
+                    tr_progress_state["iteration_next"] = None
+                    return cancel_tool_result
+                tr_progress_state["phase"] = "delay"
+                tr_progress_state["iteration_running"] = None
+                tr_progress_state["iteration_next"] = i + 2
+                tr_progress_state["delay_deadline_ts"] = time.time() + delay_s
+                interrupted = await _interruptible_sleep_test_delay(delay_s, cancel_ev)
+                tr_progress_state["delay_deadline_ts"] = None
+                tr_progress_state["iteration_next"] = None
+                if interrupted or cancel_ev.is_set():
+                    run_state["cancelled"] = True
+                    return cancel_tool_result
+        tr_progress_state["phase"] = "complete"
+        tr_progress_state["iteration_running"] = None
+        tr_progress_state["iteration_next"] = None
+        tr_progress_state["delay_deadline_ts"] = None
+        return last_tr
+
+    def current_snap() -> dict[str, Any]:
+        return kpi_runtime.snapshot if isinstance(kpi_runtime.snapshot, dict) else {}
+
+    try:
+        async with _test_run_session_lock:
+            _test_run_session = {"run_id": run_id.lower(), "cancel": cancel_ev, "state": tr_progress_state}
+        kpi_pre, kpi_post, tool_result, samples = await tr.run_with_kpi_sampling(
+            kpi_jsonl_path=kpi_path,
+            kpi_lock=kpi_runtime.lock,
+            get_snapshot=current_snap,
+            interval_sec=1.0,
+            execute_test=run_one_tool,
+        )
+    finally:
+        async with _test_run_session_lock:
+            if _test_run_session is not None and _test_run_session.get("run_id") == run_id.lower():
+                _test_run_session = None
+
+    ended = time.time()
+    run_ended_utc = tr._utc_iso(ended)
+
+    tc_json = json.dumps(cfg, separators=(",", ":"))
+    agg = tr.aggregate_snapshots(samples)
+    try:
+        lock_st = await _read_lock_status()
+        locks = lock_st.get("values") if isinstance(lock_st, dict) else None
+        agg["band_locked"] = tr.format_band_locked(locks)
+    except Exception:
+        pass
+
+    agg_str = {k: str(v) for k, v in agg.items()}
+    logs: list[dict[str, Any]] = list(iteration_log)
+    if not logs:
+        logs = [{"iteration": 1, "started": started, "ended": ended, "tool_result": tool_result}]
+
+    tool_results_list = [dict(e["tool_result"]) if isinstance(e.get("tool_result"), dict) else {"ok": False, "error": "no result"} for e in logs]
+    if run_state["cancelled"]:
+        ok_run = False
+        errs = [str(x.get("error") or "").strip() for x in tool_results_list if not bool(x.get("ok"))]
+        err_run = "; ".join(e for e in errs if e)
+        err_run = (err_run + "; " if err_run else "") + "Run cancelled by user."
+    else:
+        ok_run = all(bool(x.get("ok")) for x in tool_results_list) if tool_results_list else bool(tool_result.get("ok"))
+        errs = [str(x.get("error") or "").strip() for x in tool_results_list if not bool(x.get("ok"))]
+        err_run = "; ".join(e for e in errs if e) or (str(tool_result.get("error") or "").strip() if not ok_run else "")
+
+    first_csv = True
+    for entry in logs:
+        tr_one = entry.get("tool_result")
+        if not isinstance(tr_one, dict):
+            tr_one = {"ok": False, "error": "invalid tool_result"}
+        ping_cols, iperf_cols, volte_cols = tr.tool_csv_columns_for_test_type(test_type, cfg, tr_one)
+        t0 = entry.get("started", started)
+        t1 = entry.get("ended", ended)
+        if not isinstance(t0, (int, float)):
+            t0 = started
+        if not isinstance(t1, (int, float)):
+            t1 = ended
+        iter_dur_ms = int(round((float(t1) - float(t0)) * 1000))
+        row = tr.build_csv_row(
+            project_name=project_name,
+            test_location=test_location,
+            engineer=engineer,
+            modem_antenna_config=tr.profile_modem_antenna_config(prof),
+            note=run_note,
+            run_started_utc=tr._utc_iso(float(t0)),
+            run_ended_utc=tr._utc_iso(float(t1)),
+            profile_name=body.profile_name.strip(),
+            test_type=test_type,
+            run_success=bool(tr_one.get("ok")),
+            run_error=str(tr_one.get("error") or "").strip(),
+            run_duration_ms=iter_dur_ms,
+            test_config_json=tc_json,
+            test_iteration_index=int(entry.get("iteration") or 1),
+            test_iterations_total=n_it,
+            test_iteration_delay_sec=delay_csv,
+            ping_cols=ping_cols,
+            iperf_cols=iperf_cols,
+            volte_cols=volte_cols,
+            agg=agg_str,
+        )
+        if first_csv:
+            tr.write_summary_csv(csv_path, row)
+            first_csv = False
+        else:
+            tr.append_summary_csv_row(csv_path, row)
+
+    ui_payload: dict[str, Any] = {
+        "run_id": run_id,
+        "captured_utc": run_ended_utc,
+        "modem_antenna_config": tr.profile_modem_antenna_config(prof),
+        "note": run_note,
+    }
+    server_ui = await _server_ui_state_for_test_export()
+    if body.include_ui_snapshot:
+        client_ui: dict[str, Any] = {}
+        if isinstance(body.ui_controls, dict):
+            client_ui = tr.redact_ui_controls(body.ui_controls)
+        ui_payload["server"] = server_ui
+        ui_payload["client_ui"] = client_ui
+    else:
+        ui_payload["server"] = server_ui
+        ui_payload["client_ui"] = None
+    with open(ui_path, "w", encoding="utf-8") as uf:
+        json.dump({"ui_controls": ui_payload}, uf, indent=2, default=tr._json_default)
+
+    rel = os.path.basename
+    return {
+        "ok": True,
+        "run_id": run_id,
+        "modem_antenna_config": tr.profile_modem_antenna_config(prof),
+        "note": run_note,
+        "run_success": ok_run,
+        "error": err_run if not ok_run else None,
+        "tool_result": tool_result,
+        "tool_results": tool_results_list,
+        "test_iterations": n_it,
+        "test_iteration_delay_sec": delay_s,
+        "run_cancelled": bool(run_state["cancelled"]),
+        "kpi_pre": kpi_pre,
+        "kpi_post": kpi_post,
+        "kpi_sample_count": len(samples),
+        "artifacts_dir": os.path.abspath(out_dir),
+        "run_folder": os.path.basename(out_dir),
+        "artifacts": {
+            "summary_csv": rel(csv_path),
+            "kpi_jsonl": rel(kpi_path),
+            "ui_json": rel(ui_path),
+        },
+        "download_paths": {
+            "summary": f"/api/test/download/{run_id}/summary",
+            "kpi": f"/api/test/download/{run_id}/kpi",
+            "ui": f"/api/test/download/{run_id}/ui",
         },
     }
 
