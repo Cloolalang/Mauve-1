@@ -1,6 +1,12 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 3.0** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.0**).
+**Version 3.1** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.1**).
+
+Notes for **v3.1**:
+
+- **CA CC RF charts (dashboard)**: four new per-component-carrier trend charts — RSRP, RSRQ, RSSI, SINR — drawn from `AT+QCAINFO` carrier rows. Only plot while CA is active (SCC present). RF smoothing (rolling avg) applied per-carrier series. EARFCN/PCI colour palette shared with primary-cell charts.
+- **`registration_state` CSV**: simplified to `Home network` / `Roaming` / `MOCN` (with PLMN + operator prefix) — matches dashboard display.
+- OpenAPI / page header: **v3.1**.
 
 Notes for **v3.0**:
 

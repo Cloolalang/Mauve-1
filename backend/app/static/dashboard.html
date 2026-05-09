@@ -398,6 +398,31 @@
     </div>
 
     <div class="card">
+      <div class="label">CA CC RSRP — PCC &amp; SCC per component (dBm)</div>
+      <div class="label" style="font-size:11px; margin-top:4px; line-height:1.35;">Only plots while CA is active (SCC present in <code>AT+QCAINFO</code>). Line colours match the EARFCN/PCI keys used in all other RF charts.</div>
+      <canvas id="ca-rsrp-chart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
+    </div>
+
+    <div class="card">
+      <div class="label">CA CC RSRQ — PCC &amp; SCC per component (dB)</div>
+      <canvas id="ca-rsrq-chart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
+    </div>
+
+    <div class="card">
+      <div class="label">CA CC RSSI — PCC &amp; SCC per component (dBm)</div>
+      <canvas id="ca-rssi-chart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
+    </div>
+
+    <div class="card">
+      <div class="label">CA CC SINR — PCC &amp; SCC per component (dB)</div>
+      <canvas id="ca-sinr-chart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
+    </div>
+
+    <div class="card">
       <div class="label">State Trend</div>
       <canvas id="statechart" width="420" height="160" style="width:100%; height:160px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
       <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m</div>
@@ -795,13 +820,12 @@
 
     <div class="card" style="grid-column: 1 / -1;">
       <div class="label">Test Runner (saved profiles)</div>
-      <div class="label" style="margin-top:6px; font-size:11px; line-height:1.4;">
-        Runs a saved profile; each run creates a folder under <code>backend/automated_tests/test_results/</code> (name: project + location + UTC time + run id) containing <code>run_*_summary.csv</code>, <code>run_*_kpi.jsonl</code>, and <code>run_*_ui.json</code>. Bundled profiles live in <code>automated_tests/test_cases/</code>.
-        To exercise <strong>specific modem radio settings</strong> (for example LTE/NR band lock, RAT mode, CA on/off, single-band or neighbour locks), configure them <strong>manually in this dashboard first</strong>—the Test Runner applies each profile’s optional modem requirements (if any) but does not replace full lock/MNO setup you want for the test.
-        For <strong>ping</strong> profiles, use <strong>Ping bind</strong> (same IPv4 list as ICMP sweep) so traffic uses the modem interface; <strong>Auto</strong> skips <code>-S</code>. <strong>Profile bind_ipv4</strong> uses the JSON value only when that option is selected.
-        Profile <code>test_type</code> <strong>iperf_download_upload</strong> runs TCP <strong>download</strong> then <strong>upload</strong> (same chosen server port for both legs, ~0.8 s gap). Other iperf types are single-direction. Optional <code>test_config.port_range_max</code> (with <code>port</code> ≤ max) picks a random server port for the download leg; upload reuses that port. Optional <code>test_config.connect_timeout_sec</code> (1–120; default <strong>10</strong> when omitted) maps to iperf3 <code>--connect-timeout</code> when supported (else TCP pre-connect).
-        Test runs require the unlock password below (same as Allow Data). Password fields in UI snapshot are redacted server-side.
-        <strong>Delay between iterations</strong> is at least 10 seconds when a profile runs more than once. Use <strong>Cancel run</strong> (or <code>POST /api/test/cancel</code>) to stop after the current tool step or during the delay; the modem cannot abort a ping/iperf/VoLTE call mid-flight.
+      <div class="label" style="margin-top:6px; font-size:11px; line-height:1.5;">
+        Results saved to <code>automated_tests/test_results/</code> as <code>summary.csv</code>, <code>kpi.jsonl</code>, and <code>ui.json</code>.
+        Set any band locks, RAT mode, or MNO <strong>before</strong> running — the runner does not replace your radio setup.
+        Ping: set <strong>Ping bind</strong> to the modem interface IP so traffic routes correctly.
+        iperf <code>download_upload</code> runs both directions on the same port. Requires unlock password (same as Allow Data).
+        Multi-iteration runs wait at least 10 s between steps. <strong>Cancel run</strong> stops after the current step completes.
       </div>
       <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:flex-end; margin-top:10px;">
         <div style="min-width:220px; flex:1;">
@@ -985,6 +1009,7 @@
     const nbrInterCountHistory = [];
     const bwHistory = [];
     const caAggBwHistory = [];
+    const caCarrierHistory = [];  // per-sample CA carrier snapshots: [{t, carriers:[{role,earfcn,pci,rsrp?,rsrq?,rssi?,sinr?}]}]
     const carrierReselPciHistory = [];
     const carrierReselEarfcnHistory = [];
     const categoryHistory = { state: [], rat: [], regTrend: [], band: [], caEarfcn: [], nrBand: [] };
@@ -1021,7 +1046,11 @@
       "nr-bandbwcombinedchart",
       "ratchart",
       "registrationchart",
-      "ca-combo-chart"
+      "ca-combo-chart",
+      "ca-rsrp-chart",
+      "ca-rsrq-chart",
+      "ca-rssi-chart",
+      "ca-sinr-chart"
     ];
     const RF_CHART_TITLE_BY_ID = {
       rsrpchart: "Primary and 1st strongest intra-cell neighbour RSRP Trend (dBm)",
@@ -1040,6 +1069,10 @@
       registrationchart:
         "Registration trend — LTE PLMN (QENG serving), EPS scope (+CEREG), optional UK MOCN hint",
       "ca-combo-chart": "CA EARFCN config & aggregated bandwidth",
+      "ca-rsrp-chart": "CA CC RSRP — PCC & SCC per component (dBm)",
+      "ca-rsrq-chart": "CA CC RSRQ — PCC & SCC per component (dB)",
+      "ca-rssi-chart": "CA CC RSSI — PCC & SCC per component (dBm)",
+      "ca-sinr-chart": "CA CC SINR — PCC & SCC per component (dB)",
       "nr-rsrpchart": "NR5G — Primary & 1st strongest intra NR neighbour RSRP (dBm)",
       "nr-rsrqchart": "NR5G — Primary & 1st strongest intra NR neighbour RSRQ (dB)",
       "nr-sinrchart": "NR5G — Primary & 1st strongest intra NR neighbour SNIR (dB)",
@@ -1080,12 +1113,12 @@
       let epsLbl = "?";
       if (ds.eps_reg_scope === "home") epsLbl = "home";
       else if (ds.eps_reg_scope === "roaming") epsLbl = "roam";
-      const cf = String(mcn.confidence || "").trim();
-      let suffix = "";
-      if (cf === "reciprocal_mocn") suffix = " MOCN";
-      else if (cf && cf !== "home_on_registered_layer") suffix = " n/a";
+      const isMocn = mcn.confidence === "reciprocal_mocn" || !!mcn.partner_layer_possible;
       const core = plmn.length ? plmn : "?";
-      return `${core} EPS:${epsLbl}${suffix}`;
+      if (isMocn) return `${core} MOCN`;
+      if (ds.eps_reg_scope === "home") return `${core} Home network`;
+      if (ds.eps_reg_scope === "roaming") return `${core} Roaming`;
+      return `${core} EPS:${epsLbl}`;
     }
 
     /** Prefer server *error*, append *modem_detail* only when distinct (CME/CMS hints). */
@@ -1126,6 +1159,7 @@
       pruneHistoryByAge(nbrInterCountHistory, nowMs);
       pruneHistoryByAge(bwHistory, nowMs);
       pruneHistoryByAge(caAggBwHistory, nowMs);
+      pruneHistoryByAge(caCarrierHistory, nowMs);
       pruneHistoryByAge(carrierReselPciHistory, nowMs);
       pruneHistoryByAge(carrierReselEarfcnHistory, nowMs);
       Object.values(nrRfHistory).forEach((h) => pruneHistoryByAge(h, nowMs));
@@ -1162,6 +1196,7 @@
       drawNeighbourCountCharts();
       drawBandBwCombinedChart();
       drawCaCombinedChart();
+      drawCaCarrierCharts();
       drawCarrierReselChart();
       drawCategoryCharts();
       drawNrRfCharts();
@@ -1407,19 +1442,7 @@
       const epsTip =
         "EPS registration from AT+CEREG (3GPP: stat 1 = home PLMN, 5 = roaming). Refreshes with Data Service KPI (~5s).";
 
-      let mcnTail = "";
-      if (mcn.confidence === "reciprocal_mocn" || mcn.partner_layer_possible) {
-        const po = String(mcn.partner_operator || "").trim();
-        mcnTail = po ? ` \\u00b7 MOCN: on ${po} anchors` : " \\u00b7 MOCN: reciprocal layer";
-      } else if (mcn.confidence === "home_on_registered_layer") {
-        mcnTail = " \\u00b7 MOCN: no (home anchors)";
-      } else if (
-        mcn.confidence === "earfcn_outside_home_lists" ||
-        mcn.confidence === "unknown_registration_plmn" ||
-        mcn.confidence === "missing_registration_plmn"
-      ) {
-        mcnTail = " \\u00b7 MOCN heuristic: N/A";
-      }
+      const isMocn = mcn.confidence === "reciprocal_mocn" || mcn.partner_layer_possible;
 
       const scopeEl = el("access-eps-scope");
       if (scopeEl) {
@@ -1434,26 +1457,22 @@
         scopeEl.title = tipLines.join("\n");
 
         let regMain = "-";
-        if (epsScope === "home") {
+        let regClass = "";
+        if (isMocn) {
+          regMain = "MOCN";
+          regClass = "warn";
+        } else if (epsScope === "home") {
           regMain = "Home network";
+          regClass = "ok";
         } else if (epsScope === "roaming") {
           regMain = "Roaming";
+          regClass = "warn";
         } else if (epsStat !== null && epsStat !== undefined && `${epsStat}`.length) {
-          regMain = `Not home/roaming (${epsStat})`;
-        } else {
-          regMain = "-";
+          regMain = `Not registered (${epsStat})`;
         }
 
-        scopeEl.textContent = `${regMain}${mcnTail}`;
-        if (epsScope === "home") {
-          scopeEl.className = "ok";
-        } else if (epsScope === "roaming") {
-          scopeEl.className = "warn";
-        } else if (epsStat !== null && epsStat !== undefined && `${epsStat}`.length) {
-          scopeEl.className = "";
-        } else {
-          scopeEl.className = "";
-        }
+        scopeEl.textContent = regMain;
+        scopeEl.className = regClass;
       }
       el("band").textContent = net.band || "-";
       {
@@ -1748,6 +1767,7 @@
             addCategorySample("caEarfcn", caTrVal, trendTs, { carriers: qcaTr.carriers });
             const caAggMhz = Number(qcaTr.dl_bw_aggregate_mhz);
             if (Number.isFinite(caAggMhz) && caAggMhz > 0) addCaAggBwSample(caAggMhz, trendTs, qcaTr.carriers);
+            addCaCarrierSample(qcaTr, trendTs);
           }
           addInterNeighbourTrendSamples(nb, lte, trendTs);
           addNeighbourCountTrendSamples(nb, trendTs);
@@ -1757,6 +1777,7 @@
           drawNeighbourCountCharts();
           drawBandBwCombinedChart();
           drawCaCombinedChart();
+          drawCaCarrierCharts();
           drawCategoryCharts();
         }
         if (nrCellDataAvailable) {
@@ -3370,6 +3391,35 @@
       drawCaCombinedChart();
     }
 
+    /** Push a CA carrier sample (PCC + all SCCs) with all available RF metrics. Only when QCAINFO has ≥1 SCC. */
+    function addCaCarrierSample(qcainfo, trendTs) {
+      if (!caSampleHasScc(qcainfo)) return;
+      const t = trendTs ? Number(trendTs) * 1000 : Date.now();
+      const carriers = (qcainfo.carriers || [])
+        .filter((c) => {
+          const role = String(c?.role || "").toUpperCase();
+          return (role === "PCC" || role === "SCC") &&
+            Number.isFinite(Number(c.earfcn)) &&
+            Number.isFinite(Number(c.pci));
+        })
+        .map((c) => {
+          const row = {
+            role: String(c.role).toUpperCase(),
+            earfcn: Number(c.earfcn),
+            pci: Number(c.pci)
+          };
+          if (Number.isFinite(Number(c.rsrp)))     row.rsrp = Number(c.rsrp);
+          if (Number.isFinite(Number(c.rsrq)))     row.rsrq = Number(c.rsrq);
+          if (Number.isFinite(Number(c.rssi)))     row.rssi = Number(c.rssi);
+          if (Number.isFinite(Number(c.sinr_raw))) row.sinr = Number(c.sinr_raw);
+          return row;
+        });
+      if (!carriers.length) return;
+      caCarrierHistory.push({ t, carriers });
+      pruneHistoryByAge(caCarrierHistory, t);
+      drawCaCarrierCharts();
+    }
+
     function addCategorySample(kind, value, tsSec = null, meta = null) {
       if (!categoryHistory[kind]) return;
       const v = String(value || "-").trim() || "-";
@@ -4584,6 +4634,47 @@
         return;
       }
 
+      if (hover && hover.caRsrp && Array.isArray(hover.seriesList)) {
+        const { seriesList, x0, x1, y0, y1, yMin, yMax, span, samples, gapBreakMs, chartNowMs, cwMs, gapMode } = hover;
+        const chartTitle = RF_CHART_TITLE_BY_ID[canvas.id] || canvas.id;
+        const n = samples.length;
+        const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
+        const windowStartMs = chartNowMs - cwMs;
+        const xForPt = (p) => {
+          if (!gapMode) return x0 + p.i * xStep;
+          const ratio = Math.max(0, Math.min(1, (Number(p.t) - windowStartMs) / cwMs));
+          return x0 + ratio * (x1 - x0);
+        };
+        const fmtTime = (tsMs) => {
+          const t = Number(tsMs);
+          if (!Number.isFinite(t)) return "—";
+          return new Date(t).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        };
+        let best = null;
+        let bestD = Infinity;
+        const hitR = 22;
+        const hitR2 = hitR * hitR;
+        for (const serie of seriesList) {
+          for (const p of serie.points) {
+            const x = xForPt(p);
+            const y = y0 - ((p.v - yMin) / span) * (y0 - y1);
+            const d2 = (mx - x) * (mx - x) + (my - y) * (my - y);
+            if (d2 < bestD) { bestD = d2; best = { p, serie }; }
+          }
+        }
+        if (best && bestD <= hitR2) {
+          const { p, serie } = best;
+          showRfChartTooltip(
+            ev.clientX, ev.clientY,
+            `${chartTitle} — ${serie.role} ${serie.key}`,
+            `${p.v.toFixed(1)}`, "dBm", serie.key
+          );
+          return;
+        }
+        hideRfChartTooltip();
+        return;
+      }
+
       if (hover && hover.categoryStep && Array.isArray(hover.samples) && hover.samples.length) {
         const { samples, labels, levels, x0, x1, y0, y1, gapBreakMs, chartNowMs, cwMs, gapMode } = hover;
         const vlab = hover.categoryValueLabel && String(hover.categoryValueLabel).trim() ? String(hover.categoryValueLabel).trim() : "RAT";
@@ -5424,6 +5515,174 @@
       };
     }
 
+    /**
+     * Generic CA component-carrier metric chart.
+     * metricKey: "rsrp" | "rsrq" | "rssi" | "sinr"  (matches field names in caCarrierHistory carriers)
+     * unit: "dBm" | "dB"
+     * Only plots samples where CA is active and the metric is present on at least one carrier.
+     */
+    function drawCaMetricChart(canvasId, metricKey, unit) {
+      const canvas = el(canvasId);
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#101010";
+      ctx.fillRect(0, 0, w, h);
+
+      const nowMs = Date.now();
+      const windowStartMs = nowMs - chartWindowMs;
+      const samples = caCarrierHistory.filter((s) => Number(s.t) >= windowStartMs);
+
+      const noData = (msg) => {
+        canvas._metricHover = null;
+        ctx.fillStyle = "#777";
+        ctx.font = "12px Arial";
+        ctx.fillText(msg, 12, 24);
+      };
+
+      if (!samples.length) { noData("CA not active — no samples"); return; }
+
+      // Build per-carrier series keyed by "EARFCN/PCI"
+      const carrierKeyMeta = new Map();
+      for (const s of samples) {
+        for (const c of (s.carriers || [])) {
+          const key = `${c.earfcn}/${c.pci}`;
+          if (!carrierKeyMeta.has(key)) carrierKeyMeta.set(key, { role: c.role, earfcn: c.earfcn, pci: c.pci });
+        }
+      }
+
+      const seriesList = [...carrierKeyMeta.entries()].map(([key, meta]) => {
+        const { earfcn, pci } = meta;
+        const rawPoints = [];
+        samples.forEach((s, idx) => {
+          const c = (s.carriers || []).find((c) => c.earfcn === earfcn && c.pci === pci);
+          const v = c !== undefined ? c[metricKey] : undefined;
+          if (Number.isFinite(v)) rawPoints.push({ t: s.t, v, i: idx, c: key });
+        });
+        // Apply rolling-average smoothing per-carrier, preserving .i and .t for x-positioning
+        let points = rawPoints;
+        if (rfSmoothingEnabled && rawPoints.length > 1) {
+          points = [];
+          let sum = 0;
+          for (let k = 0; k < rawPoints.length; k++) {
+            sum += rawPoints[k].v;
+            if (k >= RF_SMOOTH_WINDOW) sum -= rawPoints[k - RF_SMOOTH_WINDOW].v;
+            const count = Math.min(k + 1, RF_SMOOTH_WINDOW);
+            points.push({ ...rawPoints[k], v: sum / count });
+          }
+        }
+        return { key, role: meta.role, points, color: colorForCellKey(key, "#4da3ff") };
+      }).filter((s) => s.points.length > 0);
+
+      // PCC first, then SCCs alphabetically
+      seriesList.sort((a, b) => (a.role === "PCC" ? -1 : b.role === "PCC" ? 1 : a.key.localeCompare(b.key)));
+
+      const allVals = seriesList.flatMap((s) => s.points.map((p) => p.v));
+      if (!allVals.length) { noData(`No ${metricKey.toUpperCase()} data from modem`); return; }
+
+      const rawMin = Math.min(...allVals);
+      const rawMax = Math.max(...allVals);
+      const pad = Math.max(0.5, (rawMax - rawMin) * 0.15);
+      const yMin = rawMin - pad;
+      const yMax = rawMax + pad;
+      const span = Math.max(0.1, yMax - yMin);
+
+      const leftPad = 48;
+      const rightPad = 8;
+      const x0 = leftPad;
+      const x1 = w - rightPad;
+      const y0 = h - 16;
+      const y1 = 12;
+      const n = samples.length;
+      const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
+      const expectedStepMs = Math.max(50, 1000 / Math.max(1, Number(currentPollHz) || 2));
+      const gapBreakMs = expectedStepMs * 1.8;
+
+      const xForPt = (p) => {
+        if (!chartGapModeEnabled) return x0 + p.i * xStep;
+        const ratio = Math.max(0, Math.min(1, (Number(p.t) - windowStartMs) / chartWindowMs));
+        return x0 + ratio * (x1 - x0);
+      };
+
+      // Grid
+      ctx.strokeStyle = "#2a2a2a";
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = y1 + (i * (y0 - y1)) / 4;
+        ctx.beginPath();
+        ctx.moveTo(x0, y);
+        ctx.lineTo(x1, y);
+        ctx.stroke();
+      }
+
+      // Y axis labels
+      ctx.fillStyle = "#aaa";
+      ctx.font = "11px Arial";
+      ctx.textAlign = "right";
+      ctx.fillText(`${yMax.toFixed(0)}`, x0 - 2, y1 + 4);
+      ctx.fillText(`${yMin.toFixed(0)}`, x0 - 2, y0);
+      ctx.fillText(unit, x0 - 2, Math.round((y0 + y1) / 2) + 4);
+      ctx.textAlign = "left";
+
+      // Lines + dots per carrier
+      ctx.lineWidth = 2;
+      for (const serie of seriesList) {
+        const pts = serie.points;
+        ctx.strokeStyle = serie.color;
+        for (let i = 1; i < pts.length; i++) {
+          const p0 = pts[i - 1];
+          const p1 = pts[i];
+          const t0 = Number(p0.t);
+          const t1 = Number(p1.t);
+          if (chartGapModeEnabled && Number.isFinite(t0) && Number.isFinite(t1) && (t1 - t0) > gapBreakMs) continue;
+          ctx.beginPath();
+          ctx.moveTo(xForPt(p0), y0 - ((p0.v - yMin) / span) * (y0 - y1));
+          ctx.lineTo(xForPt(p1), y0 - ((p1.v - yMin) / span) * (y0 - y1));
+          ctx.stroke();
+        }
+        ctx.fillStyle = serie.color;
+        for (const p of pts) {
+          ctx.beginPath();
+          ctx.arc(xForPt(p), y0 - ((p.v - yMin) / span) * (y0 - y1), 2.1, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      // Legend — top-right corner
+      ctx.font = "10px Arial";
+      ctx.textAlign = "left";
+      let legY = y1 + 10;
+      for (const serie of seriesList) {
+        ctx.fillStyle = serie.color;
+        ctx.fillRect(x1 - 120, legY - 8, 8, 8);
+        ctx.fillStyle = "#ccc";
+        ctx.fillText(`${serie.role} ${serie.key}`, x1 - 109, legY);
+        legY += 13;
+      }
+
+      canvas._metricHover = {
+        caRsrp: true,          // reuse same hover-handler branch
+        metricKey,
+        unit,
+        seriesList,
+        x0, x1, y0, y1, yMin, yMax, span,
+        samples,
+        gapBreakMs,
+        chartNowMs: nowMs,
+        cwMs: chartWindowMs,
+        gapMode: chartGapModeEnabled
+      };
+    }
+
+    function drawCaCarrierCharts() {
+      drawCaMetricChart("ca-rsrp-chart", "rsrp", "dBm");
+      drawCaMetricChart("ca-rsrq-chart", "rsrq", "dB");
+      drawCaMetricChart("ca-rssi-chart", "rssi", "dBm");
+      drawCaMetricChart("ca-sinr-chart", "sinr", "dB");
+    }
+
     function drawNrBandBwCombinedChart() {
       const canvas = el("nr-bandbwcombinedchart");
       if (!canvas) return;
@@ -5707,6 +5966,7 @@
         { labelMax: 28, leftPad: 126, categoryHover: true, categoryValueLabel: "Registration" }
       );
       drawCaCombinedChart();
+      drawCaCarrierCharts();
     }
 
     function clearDataServiceKpi() {
@@ -5765,6 +6025,7 @@
       nbrInterCountHistory.length = 0;
       bwHistory.length = 0;
       caAggBwHistory.length = 0;
+      caCarrierHistory.length = 0;
       carrierReselPciHistory.length = 0;
       carrierReselEarfcnHistory.length = 0;
       categoryHistory.state.length = 0;
@@ -5791,6 +6052,7 @@
       drawNeighbourCountCharts();
       drawBandBwCombinedChart();
       drawCaCombinedChart();
+      drawCaCarrierCharts();
       drawCarrierReselChart();
       drawCategoryCharts();
       drawNrRfCharts();

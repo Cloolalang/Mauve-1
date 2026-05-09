@@ -442,34 +442,29 @@ def _most_common_nonempty_str(values: list[str]) -> str:
 
 
 def _registration_state_csv_line(sample: dict[str, Any]) -> str:
-    """One-line registration summary for CSV: QENG LTE PLMN, optional catalog label, EPS scope (+CEREG), UK MOCN hint."""
+    """One-line registration summary for CSV matching dashboard 3-state display."""
     reg = sample.get("registration") if isinstance(sample.get("registration"), dict) else {}
     ds = sample.get("data_service") if isinstance(sample.get("data_service"), dict) else {}
     mcn = sample.get("mocn") if isinstance(sample.get("mocn"), dict) else {}
     plmn = str(reg.get("plmn") or "").strip()
     lab = str(reg.get("operator_label") or "").strip()
     eps_scope = ds.get("eps_reg_scope")
-    if eps_scope == "home":
-        eps_lbl = "home"
-    elif eps_scope == "roaming":
-        eps_lbl = "roam"
-    else:
-        eps_lbl = "?"
     cf = str(mcn.get("confidence") or "").strip()
-    parts: list[str] = []
-    if plmn:
-        parts.append(plmn)
-    if lab:
-        parts.append(lab)
-    parts.append(f"EPS:{eps_lbl}")
-    if cf == "reciprocal_mocn":
-        po = str(mcn.get("partner_operator") or "").strip()
-        parts.append(f"MOCN->{po}" if po else "MOCN")
-    elif cf == "home_on_registered_layer":
-        parts.append("layer:own")
-    elif cf:
-        parts.append(f"h:{cf}")
-    return " ".join(parts)
+    is_mocn = cf == "reciprocal_mocn" or bool(mcn.get("partner_layer_possible"))
+
+    if is_mocn:
+        state = "MOCN"
+    elif eps_scope == "home":
+        state = "Home network"
+    elif eps_scope == "roaming":
+        state = "Roaming"
+    else:
+        state = ""
+
+    prefix = " ".join(p for p in [plmn, lab] if p)
+    if prefix and state:
+        return f"{prefix} - {state}"
+    return state or prefix
 
 
 # Match dashboard ``formatOperatorName`` PLMN hints (show friendly MNO name in CSV).

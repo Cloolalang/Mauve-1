@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 3.0**
+**Version 3.1**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v3.0** is shown in the page header with a **Lord Kelvin** quotation on measurement).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v3.1** is shown in the page header with a **Lord Kelvin** quotation on measurement).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -131,6 +131,11 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v3.1**
+
+- **CA CC RSRP / RSRQ / RSSI / SINR charts**: four new dashboard trend charts plot per-component-carrier RF metrics from `AT+QCAINFO` while CA is active (SCC present). Only visible while carrier aggregation is engaged — idle PCC-only sessions show "CA not active". Line colours use the same EARFCN/PCI palette as all other RF charts. RF smoothing (rolling average) applies to each carrier series independently. Hover tooltips show role, EARFCN/PCI, and value.
+- **`registration_state` CSV column simplified**: test runner summary `.csv` now writes `Home network`, `Roaming`, or `MOCN` (prefixed with PLMN and operator label when available), matching the dashboard Registration display.
 
 **Changes in v3.0**
 
