@@ -1,6 +1,14 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 2.2.6** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **2.2.6**).
+**Version 3.0** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.0**).
+
+Notes for **v3.0**:
+
+- **Serial engine hardened**: `asyncio.shield` prevents `wait_for` timeout from cancelling `req.done`; writer loop enforces half-duplex (waits for OK/ERROR before next command). Charts update faster; no more session-breaking AT failures after a timeout.
+- **`main.py` structural split**: HTML/JS → `app/static/dashboard.html`; models → `app/models.py`; persist helpers → `app/persist.py`; singletons → `app/state.py`; serial/AT routes → `app/routes/serial.py`. `main.py` reduced from 10,085 to 3,617 lines.
+- **Dashboard JS escape fixes**: `\\n` / `\\d` / `\\s` corrected to single-escaped in standalone HTML file — restores AT console newlines, interface IP validation, and band token parsing.
+- **PyInstaller spec**: bundles `app/static/*.html` alongside `app/mocn/*.json`.
+- OpenAPI / page header: **v3.0**.
 
 Notes for **v2.2.6**:
 

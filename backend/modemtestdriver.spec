@@ -40,11 +40,16 @@ hiddenimports = _hi
 mocn_dir = BACKEND / "app" / "mocn"
 mocn_datas = [(str(p), str(pathlib.Path("app") / "mocn")) for p in sorted(mocn_dir.glob("*.json"))]
 
+static_dir = BACKEND / "app" / "static"
+static_datas = [(str(p), str(pathlib.Path("app") / "static")) for p in sorted(static_dir.glob("*.html"))]
+
+all_datas = mocn_datas + static_datas
+
 a = Analysis(
     [str(BACKEND / "run_desktop.py")],
     pathex=[str(BACKEND)],
     binaries=[],
-    datas=mocn_datas,
+    datas=all_datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

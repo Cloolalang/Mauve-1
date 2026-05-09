@@ -115,23 +115,31 @@ class SerialEngine:
         req.done = asyncio.get_running_loop().create_future()
         await self._queue.put(req)
 
+        # asyncio.shield keeps req.done alive if wait_for cancels on timeout.
+        # Without shield, wait_for cancels the future itself, so the writer's
+        # subsequent `await req.done` would raise CancelledError and crash the
+        # writer task, breaking all subsequent AT commands.
+        slack = max(5.0, min(30.0, float(timeout_sec) * 0.35))
         try:
-            # Allow the reader slightly more slack than *timeout_sec* so slow OK lines
-            # (common during QNWPREFCFG RAT changes) are not cut off by this outer wait.
-            slack = max(5.0, min(30.0, float(timeout_sec) * 0.35))
-            return await asyncio.wait_for(req.done, timeout=float(req.timeout_sec) + slack)
+            return await asyncio.wait_for(
+                asyncio.shield(req.done), timeout=float(req.timeout_sec) + slack
+            )
         except asyncio.TimeoutError:
-            if self._active_request is req:
-                self._active_request = None
             elapsed_ms = int((time.time() - req.created_at) * 1000)
             await self._record_at_command_complete(float(elapsed_ms))
-            return {
+            timeout_result: dict[str, Any] = {
                 "ok": False,
                 "command": req.command,
                 "final": "TIMEOUT",
                 "lines": list(req.lines),
                 "elapsed_ms": elapsed_ms,
             }
+            # Unblock the writer's `await req.done` so the next command can proceed.
+            if req.done and not req.done.done():
+                req.done.set_result(timeout_result)
+            if self._active_request is req:
+                self._active_request = None
+            return timeout_result
 
     async def _record_at_command_complete(self, elapsed_ms: float) -> None:
         """Rolling stats for completed AT commands (enqueue→final line, includes queue wait)."""
@@ -261,6 +269,12 @@ class SerialEngine:
                 self.at_trace.append(f"> {tx}")
                 await asyncio.to_thread(self._serial.write, payload.encode("utf-8", errors="replace"))
                 await asyncio.to_thread(self._serial.flush)
+                # Half-duplex pacing: do not send the next command until the
+                # reader has delivered a final line (OK/ERROR/+CME ERROR) for
+                # this one, or send_command has already resolved it as TIMEOUT.
+                await req.done
+            except asyncio.CancelledError:
+                raise  # propagate task cancellation cleanly
             except Exception as exc:  # noqa: BLE001
                 if req.done and not req.done.done():
                     elapsed_ms = int((time.time() - req.created_at) * 1000)

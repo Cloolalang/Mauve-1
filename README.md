@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 2.2.6**
+**Version 3.0**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v2.2.6** is shown in the page header with a **Lord Kelvin** quotation on measurement).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v3.0** is shown in the page header with a **Lord Kelvin** quotation on measurement).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -41,11 +41,11 @@ Details: **`backend/run_desktop.py`**, **`backend/modemtestdriver.spec`**, **`ba
 ### Maintainers: publish a Release with binaries
 
 1. Commit and push source changes on **`main`** (no **`dist/`** in git).
-2. Create and push an annotated **version tag** matching **`v*`** (example **`v2.2.6`**):
+2. Create and push an annotated **version tag** matching **`v*`** (example **`v3.0`**):
 
    ```powershell
-   git tag -a v2.2.6 -m "v2.2.6"
-   git push origin v2.2.6
+   git tag -a v3.0 -m "v3.0"
+   git push origin v3.0
    ```
 
 3. GitHub Actions runs **[.github/workflows/release-windows.yml](.github/workflows/release-windows.yml)**, builds the zip, and attaches **`5GModemTestDriver-windows-amd64.zip`** to that Release.
@@ -131,6 +131,13 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v3.0**
+
+- **Serial engine hardened (half-duplex AT pacing)**: `serial_engine.py` now uses `asyncio.shield` so a `wait_for` timeout no longer cancels the underlying Future (which previously killed the writer task and broke all subsequent AT commands for the session). The writer loop waits for each command's response before sending the next — true half-duplex pacing. Charts update noticeably faster as a result.
+- **`main.py` slimmed from 10,085 → 3,617 lines** via structured extraction: dashboard HTML/JS moved to `app/static/dashboard.html` (served from file; editable with syntax highlighting); Pydantic request-body models extracted to `app/models.py`; serial port state helpers to `app/persist.py`; `engine` / `kpi_runtime` singletons to `app/state.py`; serial and AT route handlers to `app/routes/serial.py` (registered via `app.include_router`).
+- **Dashboard JS escape fixes**: `\\n`, `\\d`, `\\s` sequences were double-escaped inside the old Python string and are now correct single-escaped `\n`, `\d`, `\s` in the standalone HTML file — fixes AT console line feeds, interface IP validation, and band-token parsing.
+- **PyInstaller spec**: `app/static/*.html` bundled alongside `app/mocn/*.json`.
 
 **Changes in v2.2.6**
 
