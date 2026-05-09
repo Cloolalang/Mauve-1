@@ -485,20 +485,34 @@ def _qcainfo_ca_status(qca: dict[str, Any]) -> str:
     return ""
 
 
-def format_band_locked(locks: dict[str, Any] | None) -> str:
-    """True if any QNWPREFCFG LTE/NR band string is set to a non-trivial restriction (``0`` = auto / unlocked)."""
-    if not isinstance(locks, dict):
+def format_ca_policy_from_lte_band(lte_band: Any) -> str:
+    """Same CA policy label as the dashboard *Read Locks* row (``applyLocks`` in ``main.py``)."""
+    lte_val = str(lte_band or "").strip()
+    if not lte_val:
         return ""
+    lte_norm = re.sub(r"\s+", "", lte_val)
+    parts = re.split(r"[,:]", lte_val)
+    band_tokens = [p.strip() for p in parts if p.strip().isdigit()]
+    if lte_norm == "0":
+        return "ON (multi/all)"
+    if len(band_tokens) > 1:
+        return "ON (multi/all)"
+    return "OFF (single band)"
 
-    def active(v: Any) -> bool:
-        if v is None:
-            return False
-        s = str(v).strip().strip('"')
-        return bool(s and s != "0")
 
-    if any(active(locks.get(k)) for k in ("lte_band", "nr5g_band", "nsa_nr5g_band")):
-        return "true"
-    return "false"
+def format_nrdc_mode_csv(raw: Any) -> str:
+    """QNWPREFCFG ``nrdc_mode`` for CSV: ``0`` / ``1``, or raw string if non-numeric."""
+    if raw is None:
+        return ""
+    s = str(raw).strip().strip('"')
+    if not s:
+        return ""
+    if s.lower() in ("true", "on"):
+        return "1"
+    try:
+        return "1" if int(float(s)) else "0"
+    except (TypeError, ValueError):
+        return s
 
 
 def aggregate_snapshots(samples: list[dict[str, Any]]) -> dict[str, Any]:
@@ -638,7 +652,6 @@ def aggregate_snapshots(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "primary_earfcn_pci_most_common": _most_common_nonempty_str(earfcn_pci_keys),
         "primary_cell_pci_most_common": _most_common_nonempty_str(primary_cell_pci_keys),
         "primary_cell_id_most_common": _most_common_nonempty_str(cell_id_keys),
-        "band_locked": "",
         "apn_most_common": _most_common_nonempty_str(apn_keys),
         "operator_most_common": _operator_most_common_display(operator_keys),
         "rat_most_common": _most_common_nonempty_str(rat_keys),
@@ -680,7 +693,29 @@ def _empty_iperf_tool_cols() -> dict[str, str]:
 
 
 def _empty_volte_tool_cols() -> dict[str, str]:
-    return {k: "" for k in ("volte_number", "volte_connected", "volte_answer_delay_sec", "volte_call_duration_sec")}
+    return {
+        k: ""
+        for k in (
+            "volte_number",
+            "volte_connected",
+            "volte_answer_delay_sec",
+            "volte_call_duration_sec",
+            "volte_ceer",
+            "volte_modem_call_messages",
+        )
+    }
+
+
+def _volte_modem_msgs_csv(tool_result: dict[str, Any]) -> str:
+    raw = tool_result.get("call_urc_lines")
+    if not isinstance(raw, list):
+        return ""
+    parts = []
+    for x in raw:
+        s = str(x).strip()
+        if s:
+            parts.append(s)
+    return "; ".join(parts)
 
 
 def ping_tool_csv_columns(cfg: dict[str, Any], tool_result: dict[str, Any]) -> dict[str, str]:
@@ -751,11 +786,15 @@ def volte_tool_csv_columns(cfg: dict[str, Any], tool_result: dict[str, Any]) -> 
     ans_sec = ""
     if isinstance(setup_ms, (int, float)):
         ans_sec = str(round(float(setup_ms) / 1000.0, 3))
+    ceer_raw = tool_result.get("ceer")
+    ceer_txt = "" if ceer_raw is None else str(ceer_raw).strip()
     return {
         "volte_number": str(tool_result.get("number") or ""),
         "volte_connected": str(bool(tool_result.get("call_connected"))).lower(),
         "volte_answer_delay_sec": ans_sec,
         "volte_call_duration_sec": str(tool_result.get("call_duration_s") or ""),
+        "volte_ceer": ceer_txt,
+        "volte_modem_call_messages": _volte_modem_msgs_csv(tool_result),
     }
 
 
@@ -836,6 +875,8 @@ def build_csv_row(
         volte_cols.get("volte_connected", ""),
         volte_cols.get("volte_answer_delay_sec", ""),
         volte_cols.get("volte_call_duration_sec", ""),
+        volte_cols.get("volte_ceer", ""),
+        volte_cols.get("volte_modem_call_messages", ""),
         agg.get("kpi_sample_count", ""),
         agg.get("primary_rsrp_avg_dbm", ""),
         agg.get("primary_rssi_avg_dbm", ""),
@@ -844,7 +885,11 @@ def build_csv_row(
         agg.get("primary_earfcn_pci_most_common", ""),
         agg.get("primary_cell_pci_most_common", ""),
         agg.get("primary_cell_id_most_common", ""),
-        agg.get("band_locked", ""),
+        agg.get("lock_rat_mode", ""),
+        agg.get("lock_lte_bands", ""),
+        agg.get("lock_ca_policy", ""),
+        agg.get("lock_nr_bands", ""),
+        agg.get("lock_nrdc", ""),
         agg.get("apn_most_common", ""),
         agg.get("operator_most_common", ""),
         agg.get("rat_most_common", ""),
@@ -902,6 +947,8 @@ CSV_HEADER = [
     "volte_connected",
     "volte_answer_delay_sec",
     "volte_call_duration_sec",
+    "volte_ceer",
+    "volte_modem_call_messages",
     "kpi_sample_count",
     "primary_rsrp_avg_dbm",
     "primary_rssi_avg_dbm",
@@ -910,7 +957,11 @@ CSV_HEADER = [
     "primary_earfcn_pci_most_common",
     "primary_cell_pci_most_common",
     "primary_cell_id_most_common",
-    "band_locked",
+    "lock_rat_mode",
+    "lock_lte_bands",
+    "lock_ca_policy",
+    "lock_nr_bands",
+    "lock_nrdc",
     "apn_most_common",
     "operator_most_common",
     "rat_most_common",

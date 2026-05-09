@@ -24,7 +24,15 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 from serial.tools import list_ports
 
-from app.kpi_service import KpiRuntime, _parse_cgdcont, _parse_cgauth, _parse_qiact, _parse_qicsgp, kpi_poll_loop
+from app.kpi_service import (
+    KpiRuntime,
+    _parse_cgdcont,
+    _parse_cgauth,
+    _parse_qiact,
+    _parse_qicsgp,
+    _read_qicsgp_best_effort,
+    kpi_poll_loop,
+)
 from app import test_runner as tr
 from app.serial_engine import SerialEngine
 from app.at_modem_errors import combine_errors, describe_modem_send_result
@@ -36,7 +44,7 @@ from app.sim_usim_services import (
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "2.2"
+APP_VERSION = "2.2.5"
 
 
 def _serial_state_file_path() -> str:
@@ -728,38 +736,76 @@ def _enumerate_windows_ipv4_adapters() -> list[dict[str, str]]:
     return rows
 
 
+def _windows_ipv4_assignable_for_bind(ip: str) -> bool:
+    """True if *ip* is a local IPv4 this process may bind (``iperf3 -B`` / TCP pre-connect)."""
+    s = str(ip or "").strip()
+    if not s or s in ("0.0.0.0", "127.0.0.1"):
+        return False
+    try:
+        ipaddress.IPv4Address(s)
+    except Exception:
+        return False
+    # UDP bind is enough to validate local assignment; avoids listener state from TCP.
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.bind((s, 0))
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+def _iter_mobile_bind_candidates_windows() -> list[tuple[str, str]]:
+    """(ipv4, source_label) in preference order for ``mobile_only`` iperf bind on Windows."""
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+
+    def add(ip: str, label: str) -> None:
+        s = str(ip or "").strip()
+        if not s or s in seen:
+            return
+        try:
+            ipaddress.IPv4Address(s)
+        except Exception:
+            return
+        if s in ("0.0.0.0", "127.0.0.1"):
+            return
+        seen.add(s)
+        out.append((s, str(label or "").strip() or "interface"))
+
+    try:
+        ds = getattr(kpi_runtime, "data_service", None) or {}
+        if isinstance(ds, dict):
+            cid_ip = ds.get("cid1_ip")
+            if cid_ip:
+                add(str(cid_ip), "modem cid1_ip (QIACT)")
+    except Exception:
+        pass
+
+    mobile_kw = ("mobile", "cellular", "wwan", "rndis", "quectel", "usb ethernet", "internet sharing")
+    for r in _enumerate_windows_ipv4_adapters():
+        ip = str(r.get("ipv4") or "").strip()
+        ad = str(r.get("adapter") or "").strip()
+        hay = f"{ad} {ip}".lower()
+        if any(k in hay for k in mobile_kw):
+            add(ip, ad)
+
+    tagged = [(0 if not ip.startswith("169.254.") else 1, i, ip, lab) for i, (ip, lab) in enumerate(out)]
+    tagged.sort()
+    return [(ip, lab) for _, _, ip, lab in tagged]
+
+
 def _detect_mobile_bind_ip_windows() -> tuple[str | None, str | None]:
+    """Pick first mobile-related IPv4 that actually binds locally (avoids WinError 10049 on ``-B``)."""
     if os.name != "nt":
         return None, None
-    blocks = _parse_ipconfig_windows_blocks()
-    if not blocks:
-        return None, None
-
-    keywords = (
-        "mobile",
-        "cellular",
-        "wwan",
-        "rndis",
-        "quectel",
-        "usb ethernet",
-        "internet sharing",
-    )
-    ip_re = re.compile(r"IPv4[^:]*:\s*([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)")
-    for b in blocks:
-        header = str(b.get("header", ""))
-        body = str(b.get("body", ""))
-        hay = f"{header}\n{body}".lower()
-        if not any(k in hay for k in keywords):
-            continue
-        m = ip_re.search(body)
-        if not m:
-            continue
-        ip = m.group(1)
-        try:
-            ipaddress.IPv4Address(ip)
-        except Exception:
-            continue
-        return ip, header
+    for ip, label in _iter_mobile_bind_candidates_windows():
+        if _windows_ipv4_assignable_for_bind(ip):
+            return ip, label
     return None, None
 
 
@@ -813,9 +859,10 @@ def _parse_clcc_lines(lines: list[str]) -> list[dict]:
             return None
 
     for raw in lines:
-        if not raw.startswith("+CLCC:"):
+        s = str(raw or "").strip().lstrip("\ufeff")
+        if not s.upper().startswith("+CLCC:"):
             continue
-        payload = raw.split(":", 1)[1].strip()
+        payload = s.split(":", 1)[1].strip()
         parts = [p.strip().strip('"') for p in payload.split(",")]
         if len(parts) < 5:
             continue
@@ -839,6 +886,12 @@ def _clcc_rows_voice_only(rows: list[dict]) -> list[dict]:
     Packet data often shows ``stat`` active (0) with ``mode`` data (1); that must not look like a voice call.
     """
     return [r for r in rows if r.get("mode") != 1]
+
+
+def _clcc_voice_active_or_held(rows: list[dict]) -> bool:
+    """True only for **voice** contexts in active (0) or held (1) state — excludes packet PDP rows in ``+CLCC``."""
+    v = _clcc_rows_voice_only(rows)
+    return any((r.get("stat") in (0, 1)) for r in v)
 
 
 def _clcc_stat_label(stat: int | None) -> str:
@@ -1024,12 +1077,18 @@ def _parse_ats0_rings(lines: list[str]) -> int | None:
 
 
 def _parse_ceer(lines: list[str]) -> str | None:
+    """Collect ``+CEER:`` / ``CEER:`` payloads from modem response lines (joined if multiple)."""
+    parts: list[str] = []
     for raw in lines:
-        if not raw.startswith("+CEER:"):
-            continue
-        payload = raw.split(":", 1)[1].strip()
-        return payload or None
-    return None
+        s = str(raw).strip()
+        ul = s.upper()
+        if ul.startswith("+CEER:") or ul.startswith("CEER:"):
+            payload = s.split(":", 1)[1].strip()
+            if payload:
+                parts.append(payload)
+    if not parts:
+        return None
+    return "; ".join(parts)
 
 
 def _parse_qnwinfo_line(lines: list[str]) -> dict:
@@ -1082,11 +1141,17 @@ def _parse_cops_scan_lines(lines: list[str]) -> list[dict]:
 
 
 def _parse_qnwprefcfg_value(lines: list[str], key: str) -> str | None:
+    """Parse ``+QNWPREFCFG: "<key>",<value...>`` from modem response lines (case-insensitive header)."""
     key_l = key.lower()
+    hdr = re.compile(r"^\s*\+QNWPREFCFG:\s*(.*)$", re.IGNORECASE)
     for raw in lines:
-        if not raw.startswith("+QNWPREFCFG:"):
+        line = ((raw or "").replace("\ufeff", "")).strip()
+        if not line:
             continue
-        payload = raw.split(":", 1)[1].strip()
+        m = hdr.match(line)
+        if not m:
+            continue
+        payload = m.group(1).strip()
         parts = [p.strip().strip('"') for p in payload.split(",")]
         if len(parts) < 2:
             continue
@@ -1094,6 +1159,43 @@ def _parse_qnwprefcfg_value(lines: list[str], key: str) -> str | None:
             continue
         return ",".join(parts[1:]).strip() or None
     return None
+
+
+def _lock_read_values_nonempty(values: Any) -> bool:
+    if not isinstance(values, dict):
+        return False
+    for v in values.values():
+        if v is None:
+            continue
+        if str(v).strip():
+            return True
+    return False
+
+
+async def _read_lock_status_for_run_csv(*, attempts: int = 4, pause_sec: float = 0.45) -> dict[str, Any]:
+    """Read QNWPREFCFG with retries; modem/serial can be busy right after iperf/ping/VoLTE."""
+    last: dict[str, Any] = {"values": {}, "raw": {}}
+    for attempt in range(int(attempts)):
+        try:
+            last = await _read_lock_status(timeout_per_key=12.0)
+            vals = last.get("values")
+            if _lock_read_values_nonempty(vals):
+                return last
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("test run: lock status read attempt %s failed: %s", attempt + 1, exc)
+        if attempt + 1 < int(attempts):
+            await asyncio.sleep(float(pause_sec))
+    if not _lock_read_values_nonempty(last.get("values")):
+        raw_hint = ""
+        try:
+            r0 = (last.get("raw") or {}).get("mode_pref") or {}
+            ln = r0.get("lines") if isinstance(r0, dict) else None
+            if isinstance(ln, list) and ln:
+                raw_hint = " mode_pref_lines=" + repr(ln[-4:])
+        except Exception:
+            pass
+        logger.warning("test run: lock status still empty after %s attempts.%s", attempts, raw_hint)
+    return last
 
 
 async def _read_lock_status(timeout_per_key: float = 8.0) -> dict:
@@ -1606,7 +1708,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="2.2.0",
+    version="2.2.5",
     lifespan=lifespan,
 )
 
@@ -1832,6 +1934,7 @@ async def home() -> HTMLResponse:
       <div class="row"><span class="label">PDP auth</span><span id="ds-pdp-auth-kpi">-</span></div>
       <div class="row" title="Whether +CGAUTH? / +QICSGP? included a non-empty password field (many firmwares hide password on read)."><span class="label">PDP pwd in AT read</span><span id="ds-pdp-pw-hint">-</span></div>
       <div class="row"><span class="label">PDP Contexts (active/total)</span><span id="ds-pdp">-</span></div>
+      <div class="row" title="From AT+CGCONTRDP (TS 27.007): CID / EPS bearer id : QCI when the modem reports them; space-separated if several bearers. Blank when searching/off-net or if the command is unsupported."><span class="label">EPS bearer QCI</span><span id="ds-qci">-</span></div>
       <div class="row"><span class="label">CID1</span><span id="ds-cid1">-</span></div>
       <div class="row"><span class="label">CID1 IP</span><span id="ds-ip">-</span></div>
       <div class="row"><span class="label">Packet Attach</span><span id="ds-attach">-</span></div>
@@ -3033,6 +3136,14 @@ async def home() -> HTMLResponse:
         !inService ||
         /\bSEARCH\b/i.test(String(srv.state || "")) ||
         ds.eps_registered === false;
+
+      const dsQci = el("ds-qci");
+      if (dsQci) {
+        if (suppressCid1IpKpi) dsQci.textContent = "-";
+        else if (ds.eps_qci_label != null && String(ds.eps_qci_label).trim().length)
+          dsQci.textContent = String(ds.eps_qci_label).trim();
+        else dsQci.textContent = "—";
+      }
 
       const cid1StateRaw = ds.cid1_active === true ? "UP" : ds.cid1_active === false ? "DOWN" : "-";
       el("ds-cid1").textContent = suppressCid1IpKpi ? "-" : cid1StateRaw;
@@ -7246,6 +7357,8 @@ async def home() -> HTMLResponse:
       const pdpPh = el("ds-pdp-pw-hint");
       if (pdpPh) pdpPh.textContent = "—";
       el("ds-pdp").textContent = "-";
+      const dsQciClr = el("ds-qci");
+      if (dsQciClr) dsQciClr.textContent = "-";
       el("ds-cid1").textContent = "-";
       el("ds-cid1").className = "";
       el("ds-ip").textContent = "-";
@@ -8395,6 +8508,13 @@ async def network_apn_set(body: ApnSetBody) -> dict:
             actions.append({"cmd": "AT+CGAUTH? (readback)", "res": cgauth_read_res})
             qicsgp_read_res = await engine.send_command("AT+QICSGP?", timeout_sec=4.0)
             actions.append({"cmd": "AT+QICSGP? (readback)", "res": qicsgp_read_res})
+            qicsgp_read_res = await _read_qicsgp_best_effort(
+                engine,
+                cid,
+                timeout_sec=4.0,
+                initial=qicsgp_read_res,
+                probe_append=actions,
+            )
             auth_rows = _parse_cgauth(cgauth_read_res.get("lines", []))
             qicsgp_rows = _parse_qicsgp(qicsgp_read_res.get("lines", []))
             ca_one = next((r for r in auth_rows if r.get("cid") == cid), None)
@@ -8692,7 +8812,13 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
         if not bind_ip:
             return {
                 "ok": False,
-                "error": "Mobile-only mode could not detect mobile interface IPv4. Set bind_ip manually.",
+                "error": (
+                    "Mobile-only mode could not find a usable mobile IPv4 on this Windows host "
+                    "(modem cid1_ip from KPI plus ipconfig adapters matching USB/cellular/WWAN; "
+                    "each candidate must pass a local bind test — avoids WinError 10049 when iperf -B uses "
+                    "an address that is not on an active NIC). Use *Refresh ifaces*, set Manual bind_ip, "
+                    "or turn off Mobile-only."
+                ),
                 "host": host,
                 "port": effective_port,
                 "port_range_requested": port_range_requested,
@@ -8705,6 +8831,28 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
                 "parallel_streams": parallel_streams,
                 "connect_timeout_sec": ct_sec,
             }
+    if bind_ip and os.name == "nt" and not _windows_ipv4_assignable_for_bind(bind_ip):
+        return {
+            "ok": False,
+            "error": (
+                f"bind_ip {bind_ip!r} is not assigned to an active local adapter on Windows "
+                "(local bind check failed — the same situation as iperf WinError 10049). "
+                "Choose an IPv4 from *Refresh ifaces* / ipconfig, ensure packet data is up, "
+                "or disable Mobile-only."
+            ),
+            "host": host,
+            "port": effective_port,
+            "port_range_requested": port_range_requested,
+            "duration_sec": int(body.duration_sec),
+            "direction": direction,
+            "protocol": protocol,
+            "mobile_only": bool(body.mobile_only),
+            "bind_ip": bind_ip,
+            "detected_mobile_adapter": detected_adapter,
+            "bitrate_limit_mbps": limit_mbps,
+            "parallel_streams": parallel_streams,
+            "connect_timeout_sec": ct_sec,
+        }
     binary = _discover_iperf_binary()
     if not binary:
         return {
@@ -9160,11 +9308,7 @@ async def tools_volte_test(body: VolteTestBody) -> dict:
     hang_attempts.append(hang_res)
     await asyncio.sleep(0.35)
 
-    def _has_active_or_held(rows: list[dict]) -> bool:
-        # stat 0/1 means active/held and should be treated as still connected.
-        return any((r.get("stat") in (0, 1)) for r in rows)
-
-    end_deadline = asyncio.get_running_loop().time() + 15.0
+    end_deadline = asyncio.get_running_loop().time() + 18.0
     clcc_after: list[dict] = []
     clcc_after_samples: list[dict] = []
     while asyncio.get_running_loop().time() < end_deadline:
@@ -9179,10 +9323,13 @@ async def tools_volte_test(body: VolteTestBody) -> dict:
         )
         if not clcc_after:
             break
-        # Retry hangup once if call still truly active/held after initial ATH.
-        if _has_active_or_held(clcc_after) and len(hang_attempts) < 2:
-            hang_attempts.append(await engine.send_command("ATH", timeout_sec=5.0))
-            await asyncio.sleep(0.4)
+        # Voice-only: packet contexts (mode 1) often stay stat active after ATH and must not fail the test.
+        if not _clcc_voice_active_or_held(clcc_after):
+            break
+        if len(hang_attempts) < 5:
+            nxt = "AT+CHUP" if len(hang_attempts) % 2 == 1 else "ATH"
+            hang_attempts.append(await engine.send_command(nxt, timeout_sec=5.0))
+            await asyncio.sleep(0.5)
             continue
         await asyncio.sleep(0.8)
 
@@ -9204,7 +9351,7 @@ async def tools_volte_test(body: VolteTestBody) -> dict:
     ]
 
     setup_time_ms = int((connect_ts - dial_started) * 1000) if connect_ts else None
-    active_after_hang = _has_active_or_held(clcc_after)
+    active_after_hang = _clcc_voice_active_or_held(clcc_after)
     ok = bool(dial_ok and call_connected and not active_after_hang)
     error = None
     if not ok:
@@ -9716,12 +9863,26 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
 
     tc_json = json.dumps(cfg, separators=(",", ":"))
     agg = tr.aggregate_snapshots(samples)
+    agg["lock_rat_mode"] = ""
+    agg["lock_lte_bands"] = ""
+    agg["lock_ca_policy"] = ""
+    agg["lock_nr_bands"] = ""
+    agg["lock_nrdc"] = ""
     try:
-        lock_st = await _read_lock_status()
+        lock_st = await _read_lock_status_for_run_csv()
         locks = lock_st.get("values") if isinstance(lock_st, dict) else None
-        agg["band_locked"] = tr.format_band_locked(locks)
-    except Exception:
-        pass
+        if isinstance(locks, dict):
+            agg["lock_rat_mode"] = str(locks.get("mode_pref") or "").strip()
+            lte_b = locks.get("lte_band")
+            agg["lock_lte_bands"] = str(lte_b or "").strip()
+            agg["lock_ca_policy"] = tr.format_ca_policy_from_lte_band(lte_b)
+            nr_b = str(locks.get("nr5g_band") or "").strip()
+            if not nr_b:
+                nr_b = str(locks.get("nsa_nr5g_band") or "").strip()
+            agg["lock_nr_bands"] = nr_b
+            agg["lock_nrdc"] = tr.format_nrdc_mode_csv(locks.get("nrdc_mode"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("test run: unexpected error reading lock status for CSV: %s", exc)
 
     agg_str = {k: str(v) for k, v in agg.items()}
     logs: list[dict[str, Any]] = list(iteration_log)

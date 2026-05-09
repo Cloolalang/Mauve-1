@@ -16,6 +16,7 @@ Most useful commands for VoLTE call test flows:
 - `AT+CEER` get release/error reason
 - `AT+QNWINFO` RAT/operator context during call
 - `AT+CEREG?` and `AT+CGATT?` EPS/packet registration prechecks
+- `AT+CGCONTRDP?` / `AT+CGCONTRDP=<cid>` — returned **QCI** per active EPS bearer when supported (KPI **Data Service**)
 - `$QCIMSSRV` IMS service state (vendor-specific)
 - `$QCCALLATTR` call attributes (vendor-specific)
 

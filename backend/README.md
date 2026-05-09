@@ -1,13 +1,38 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 2.2** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **2.2.0**).
+**Version 2.2.5** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **2.2.5**).
+
+Notes for **v2.2.5**:
+
+- **Test runner summary CSV**: VoLTE **`volte_ceer`**, **`volte_modem_call_messages`** columns; **`AT+CEER`** parse joins multiple **`CEER`** lines when present (root **Changes in v2.2.5**).
+- OpenAPI / page header: **v2.2.5**.
+
+Notes for **v2.2.4**:
+
+- **KPI / APN readback**: **`AT+QICSGP?`** fallback to **`AT+QICSGP=<cid>`**; relaxed **`+CGAUTH`/`+QICSGP`** line parsing (root **Changes in v2.2.4** / **Common issues**).
+- OpenAPI / page header: **v2.2.4**.
+
+Notes for **v2.2.3**:
+
+- **Test runner CSV lock columns**: **`AT+QNWPREFCFG`** reads retried / parser relaxed (root **Changes in v2.2.3**).
+- OpenAPI / page header was **v2.2.3** for that release line.
+
+Notes for **v2.2.2**:
+
+- **Windows iperf**: mobile-only bind probes **`cid1_ip`** + all mobile-like adapter IPv4s; rejects manual **`bind_ip`** that fails local bind (see root **Changes in v2.2.2** / **Common issues**).
+- OpenAPI / page header was **v2.2.2** for that release line.
+
+Notes for **v2.2.1**:
+
+- **Test runner CSV**: **`band_locked`** removed; **`lock_rat_mode`**, **`lock_lte_bands`**, **`lock_ca_policy`**, **`lock_nr_bands`**, **`lock_nrdc`** added (modem **`AT+QNWPREFCFG`** readback after each run). See root **Changes in v2.2.1**.
+- OpenAPI / page header was **v2.2.1** for that release line.
 
 Notes for **v2.2**:
 
 - **`POST /api/test/run`**: **`unlock_password`** required for **all** profile types; must match **Allow Data** / **`DATA_GATE_UNLOCK_PASSWORD`**.
 - **Dashboard** (**`GET /`**): **RF smoothing** defaults **on**.
 - **Summary CSV**: **`iperf_throughput_dl_mbps`** / **`iperf_throughput_ul_mbps`** replace **`iperf_throughput_mbps`** (see root **Changes in v2.2**).
-- OpenAPI / page header: **v2.2**.
+- OpenAPI / page header was **v2.2** for that release line.
 
 Notes for **v2.1**:
 

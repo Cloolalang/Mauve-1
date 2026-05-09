@@ -1,10 +1,12 @@
 # 5G ModemTestDriver
 
-**Version 2.2**
+**Version 2.2.5**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v2.2** is shown in the page header with a **Lord Kelvin** quotation on measurement).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v2.2.5** is shown in the page header with a **Lord Kelvin** quotation on measurement).
 
 License: [GNU General Public License v2.0](LICENSE).
+
+**Docs layout:** this file is the main product overview, quick start, API index, and changelog. **`AT_COMMAND_REFERENCE.md`** lists AT commands the app uses. **`backend/README.md`** mirrors **release-by-release** backend notes (same version as the page header / OpenAPI).
 
 ## Download (prebuilt Windows app)
 
@@ -39,11 +41,11 @@ Details: **`backend/run_desktop.py`**, **`backend/modemtestdriver.spec`**, **`ba
 ### Maintainers: publish a Release with binaries
 
 1. Commit and push source changes on **`main`** (no **`dist/`** in git).
-2. Create and push an annotated **version tag** matching **`v*`** (example **`v2.2.0`**):
+2. Create and push an annotated **version tag** matching **`v*`** (example **`v2.2.5`**):
 
    ```powershell
-   git tag -a v2.2.0 -m "v2.2.0"
-   git push origin v2.2.0
+   git tag -a v2.2.5 -m "v2.2.5"
+   git push origin v2.2.5
    ```
 
 3. GitHub Actions runs **[.github/workflows/release-windows.yml](.github/workflows/release-windows.yml)**, builds the zip, and attaches **`5GModemTestDriver-windows-amd64.zip`** to that Release.
@@ -129,6 +131,27 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v2.2.5**
+
+- **VoLTE test runner CSV**: **`volte_ceer`** — text from **`AT+CEER`** after hang-up (**`Regular deactivation`**, etc.; multiple **`+CEER:`** / **`CEER:`** lines are joined with **`; `**). **`volte_modem_call_messages`** — unsolicited lines captured during the test window (**`NO CARRIER`**, **`+CLCC`**, **`+CEER`**, **`BUSY`**, **`NO ANSWER`**, **`NO DIALTONE`**), **`; `-separated** when several appear. Unused on non‑VoLTE runs (blank columns).
+
+**Changes in v2.2.4**
+
+- **PDP profile AT reads**: Some firmware or AT bridges return **`ERROR`** to **`AT+QICSGP?`** (and often **`AT+CGAUTH?`**). The KPI **Data Service** refresh and **`POST /api/network/apn`** readback now **fall back** to per-context **`AT+QICSGP=<cid>`** (primary CID from **`AT+CGDCONT?`**, then **1**–**3**) when the bulk query fails or returns no **`+QICSGP:`** lines. **`+CGAUTH:`** / **`+QICSGP:`** parsing is **case-insensitive** and tolerates a leading **BOM**. **`AT+CGAUTH?`** remains best-effort when unsupported.
+- **EPS bearer QCI**: KPI **Data Service** refresh issues **`AT+CGCONTRDP?`** (TS 27.007) and falls back to **`AT+CGCONTRDP=<cid>`** when needed. **`GET /api/kpi/latest`** → **`sample.data_service`** includes **`eps_qci_rows`** (list of **`cid`**, **`bearer_id`**, **`qci`**), **`eps_qci_label`** (short string for the dashboard), and **`eps_qci_query_ok`**. The dashboard **EPS bearer QCI** row is suppressed when **CID1** / IP are hidden (search / not EPS-registered).
+
+**Changes in v2.2.3**
+
+- **Test runner CSV (`lock_*` columns)**: **`AT+QNWPREFCFG`** readback for **`lock_rat_mode`**, **`lock_lte_bands`**, **`lock_ca_policy`**, **`lock_nr_bands`**, **`lock_nrdc`** now uses **case-insensitive** parsing of **`+QNWPREFCFG:`** lines, **longer per-query timeouts**, and **several retries with short pauses** after the tool step (modem/serial is often busy right after iperf). If reads still fail, the server logs a warning with a short **`mode_pref`** line tail for diagnosis.
+
+**Changes in v2.2.2**
+
+- **Windows iperf bind**: **Mobile-only** auto-bind now tries **modem `cid1_ip`** (KPI **`data_service`**) and **every** IPv4 on mobile-like **ipconfig** adapters (not only the first line), and picks the first address that passes a **local UDP bind** probe — avoiding **`WinError 10049`** when **`iperf3 -B`** used a stale or non-local IPv4. Manual **`bind_ip`** is rejected up front on Windows if that probe fails (same failure mode as 10049).
+
+**Changes in v2.2.1**
+
+- **`run_<id>_summary.csv`**: removed **`band_locked`** (it did not match the dashboard notion of locks). Added modem **Read Locks** snapshot columns after **`primary_cell_id_most_common`**: **`lock_rat_mode`** (**`AT+QNWPREFCFG="mode_pref"`** readback), **`lock_lte_bands`**, **`lock_ca_policy`** (same **`ON (multi/all)`** / **`OFF (single band)`** rules as the dashboard, derived from **`lte_band`**), **`lock_nr_bands`** (**`nr5g_band`** or **`nsa_nr5g_band`**), **`lock_nrdc`** (**`0`** / **`1`**). Values are read once after the run completes; blank cells if the query fails.
 
 **Changes in v2.2**
 
@@ -497,7 +520,7 @@ The JSON includes `sample.carrier_reselection` with `window_sec` (60), `primary_
 - `POST /api/network/locks`
 - `POST /api/tools/modem-reset`
 - `GET /api/tools/bind-interfaces` (Windows IPv4 adapters for bind dropdowns)
-- `POST /api/tools/iperf-test` (TCP iperf3 client; optional **`port_range_max`** with **`port`** ≤ max picks one random server port per request; optional `parallel_streams`; **`connect_timeout_sec`** default **10** (1–120; iperf3 `--connect-timeout` in ms when supported, else TCP pre-connect); bind IP, bitrate limit; UI default **10** streams; dashboard **Port** default **`5300-5400`** or a single port such as **`5361`**)
+- `POST /api/tools/iperf-test` (TCP iperf3 client; optional **`port_range_max`** with **`port`** ≤ max picks one random server port per request; optional **`parallel_streams`**; **`connect_timeout_sec`** default **10** (1–120; iperf3 **`--connect-timeout`** in ms when supported, else TCP pre-connect with the same bind as **`-B`**); optional **`bind_ip`** (**`-B`**); **`mobile_only`** (default **true** in the API model) auto-picks a local IPv4 on **Windows** by probing **modem `cid1_ip`** (KPI) and mobile-like **ipconfig** addresses — see **Changes in v2.2.2** and **Common issues**; optional **`bitrate_limit_mbps`**; UI default **10** streams; dashboard **Port** default **`5300-5400`** or a single port such as **`5361`**)
 - `POST /api/tools/icmp-ping` (host OS ICMP ping sweep; optional Windows `-S` bind)
 - `GET /api/tools/auto-answer` / `POST /api/tools/auto-answer` — optional **modem `ATS0`** (legacy); not used by the dashboard VoLTE card
 - `GET /api/tools/host-auto-answer` / `POST /api/tools/host-auto-answer` — **auto-answer** used by the dashboard (**`ATA`** from PC; body **`enabled`**, **`rings`**, **`password`**)
@@ -513,6 +536,7 @@ The Data Service KPI panel is populated from periodic AT reads inside the KPI po
 - **`POST /api/network/apn`** (password `"kelvin"` or your configured unlock; same gate as Allow Data) updates **`AT+CGDCONT`**, mirrors the same APN into Quectel **`AT+QICSGP`** for the internal PDP path when the firmware supports it, and optionally reattaches with **`AT+QIACT`**. If the context is active, **`AT+QIDEACT=<cid>`** may run first so the APN can be changed (this can briefly disturb the USB WAN path). Set **`reactivate": false`** to skip **`CGATT`/`QIACT`** and reconnect later via **Allow Data**. APN must be letters/digits/`.`/`-`/`_` only. On **Robustel** gateways, use the router’s **modem mode** before changing APN, then select MNO—see the device web UI.
 
 - `AT+CGDCONT?` -> APN, PDP type, total PDP contexts
+- `AT+CGCONTRDP?` / `AT+CGCONTRDP=<cid>` -> EPS bearer **QCI** (and bearer id) when the firmware returns **`+CGCONTRDP:`** lines — see **`eps_qci_*`** in **`sample.data_service`**
 - `AT+QIACT?` -> active PDP contexts, CID1 state/IP
 - `AT+CGATT?` -> packet attach state
 - `AT+CEREG?` -> EPS registration status
@@ -620,6 +644,8 @@ The dashboard **VoLTE** card controls **auto-answer** via **`GET`/`POST /api/too
 
 Saved profile **overrides** live in **`backend/.state/test_profiles.json`** in development, or under **`%LOCALAPPDATA%\5GModemTestDriver\`** when using the frozen Windows build. **Bundled** profile JSON files and **per-run artifact folders** live under **`backend/automated_tests/`** (same relative layout under app state when frozen).
 
+**iperf profiles** use the same server path as **`POST /api/tools/iperf-test`**: fields such as **`host`**, **`port`**, optional **`port_range_max`**, **`duration_sec`**, **`parallel_streams`**, **`protocol`**, **`mobile_only`**, optional **`bitrate_limit_mbps`**, and optional **`connect_timeout_sec`** come from the profile’s **`test_config`**. Bundled smoke iperf examples set **`mobile_only`** **`false`** so traffic can use the OS default route without a manual **`-B`** address; set **`true`** when you need traffic pinned to the cellular/USB interface IPv4 (see **Common issues** if Windows bind fails).
+
 ### Profiles
 
 Bundled examples ship under **`backend/automated_tests/test_cases/`** (one `*.json` file per profile: **`smoke_ping`**, **`smoke_iperf_dl`**, **`smoke_iperf_ul`**, **`smoke_iperf_dlul`**, **`smoke_volte`**). The loader merges them with **`test_profiles.json`**: **saved names win** over bundled files with the same `name`. **`DELETE`** only removes entries from **`test_profiles.json`** (files under `test_cases/` are not deleted).
@@ -640,7 +666,7 @@ Bundled examples ship under **`backend/automated_tests/test_cases/`** (one `*.js
 
 ### CSV summary row
 
-**`run_<id>_summary.csv`** has a header row plus **one data row per tool iteration** in that run (same header; extra iterations are appended). Column order: lab fields (**`project_name`**, **`test_location`**, **`engineer`**, **`modem_antenna_config`**, **`note`**), **`run_started_utc`** / **`run_ended_utc`** (per iteration), profile **`test_type`**, **`run_success`** / **`run_error`** / **`run_duration_ms`** (that iteration), **`test_config_json`**, **`test_iteration_index`**, **`test_iterations_total`**, **`test_iteration_delay_sec`**, then **active tool columns** (ping, iperf, and VoLTE families are all present; unused families are blank), then **RF KPI aggregates** for the whole run (**`kpi_sample_count`** through NR5G columns—the same aggregate block is repeated on each row because sampling spans the full run). Type-specific tool headers include **`iperf_connect_timeout_sec`** (when set), **`iperf_direction`** (**`download_upload`** for **`iperf_download_upload`** profiles), **`iperf_throughput_dl_mbps`**, and **`iperf_throughput_ul_mbps`** (**`iperf_download`** fills DL only, **`iperf_upload`** UL only, **`iperf_download_upload`** both; numeric Mbps strings, blank when absent).
+**`run_<id>_summary.csv`** has a header row plus **one data row per tool iteration** in that run (same header; extra iterations are appended). Column order: lab fields (**`project_name`**, **`test_location`**, **`engineer`**, **`modem_antenna_config`**, **`note`**), **`run_started_utc`** / **`run_ended_utc`** (per iteration), profile **`test_type`**, **`run_success`** / **`run_error`** / **`run_duration_ms`** (that iteration), **`test_config_json`**, **`test_iteration_index`**, **`test_iterations_total`**, **`test_iteration_delay_sec`**, then **active tool columns** (ping, iperf, and VoLTE families are all present; unused families are blank), then **RF KPI aggregates** for the whole run (**`kpi_sample_count`** through **`primary_cell_id_most_common`**), then **modem lock readback** (**`lock_rat_mode`**, **`lock_lte_bands`**, **`lock_ca_policy`**, **`lock_nr_bands`**, **`lock_nrdc`** — from **`AT+QNWPREFCFG`** after the run (retried if the modem was busy; see **Changes in v2.2.3** / **Changes in v2.2.1**), then the remaining KPI aggregate columns through NR5G. Type-specific tool headers include **`iperf_connect_timeout_sec`** (when set), **`iperf_direction`** (**`download_upload`** for **`iperf_download_upload`** profiles), **`iperf_throughput_dl_mbps`**, and **`iperf_throughput_ul_mbps`** (**`iperf_download`** fills DL only, **`iperf_upload`** UL only, **`iperf_download_upload`** both; numeric Mbps strings, blank when absent). For **`volte_call_outbound`**, **`volte_ceer`** (**`AT+CEER`**) and **`volte_modem_call_messages`** (captures during the VoLTE API call — see **Changes in v2.2.5**).
 
 ### KPI vs dashboard charts
 
@@ -654,7 +680,11 @@ The JSONL file stores **raw server snapshots** only. Some dashboard chart traces
 
 - `WinError 10048` when starting server:
   - Port already in use. Switch to another port (for example `8012`) or stop the existing listener.
+- iperf **`WinError 10049`** (`TCP connect failed: … address is not valid in its context`):
+  - On Windows, **`-B` / bind** must use an IPv4 that is **currently assigned to a local adapter**. Stale **ipconfig** lines or a modem-only address that is not on the PC NIC cause this. Use **Refresh ifaces** and pick that IPv4 (or **Manual** bind), ensure **Allow Data** / PDP is up so the RNDIS/USB interface has an address, or turn off **Mobile-only** so iperf uses the default route. The server also tries **modem `cid1_ip`** (from KPI) and **all** IPv4s on mobile-like adapters until one passes a local bind test.
 - `{"detail":"Not Found"}`:
   - Usually means wrong URL path. Use `/`, `/docs`, or the `/api/...` routes.
 - Serial open fails / port busy:
   - Close other tools using the same COM port and restart backend.
+- **`AT+CGAUTH?`** / **`AT+QICSGP?`** return **`ERROR`** (or only echo the command):
+  - Common on **gateway AT bridges** or builds that omit the **read** form. The app still uses **`AT+CGDCONT?`**, **`AT+QIACT?`**, etc. **`AT+QICSGP=<cid>`** is tried automatically when **`AT+QICSGP?`** does not yield **`+QICSGP:`** lines. **PDP username / auth** in the **Data Service** card may stay **—** if neither **CGAUTH** nor **QICSGP** reads work.

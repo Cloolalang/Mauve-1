@@ -1067,6 +1067,7 @@ def _parse_cgdcont(lines: list[str]) -> list[dict[str, Any]]:
 
 _CGAUTH_LINE_RE = re.compile(
     r'^\+CGAUTH:\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*"([^"]*)"(?:\s*,\s*"([^"]*)")?)?',
+    re.IGNORECASE,
 )
 
 
@@ -1074,8 +1075,8 @@ def _parse_cgauth(lines: list[str]) -> list[dict[str, Any]]:
     """Parse ``+CGAUTH:`` (3GPP 27.007): cid, auth_prot[, userid[, password]]."""
     out: list[dict[str, Any]] = []
     for raw in lines:
-        s = str(raw or "").strip()
-        if not s.startswith("+CGAUTH:"):
+        s = str(raw or "").strip().lstrip("\ufeff")
+        if not s.upper().startswith("+CGAUTH:"):
             continue
         m = _CGAUTH_LINE_RE.match(s)
         if not m:
@@ -1096,19 +1097,51 @@ def _parse_cgauth(lines: list[str]) -> list[dict[str, Any]]:
 
 
 _QICSGP_FULL_RE = re.compile(
-    r'^\+QICSGP:\s*(\d+)\s*,\s*(\d+)\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*(\d+)\s*$'
+    r'^\+QICSGP:\s*(\d+)\s*,\s*(\d+)\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*(\d+)\s*$',
+    re.IGNORECASE,
 )
 _QICSGP_SHORT_RE = re.compile(
-    r'^\+QICSGP:\s*(\d+)\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*(\d+)\s*$'
+    r'^\+QICSGP:\s*(\d+)\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*(\d+)\s*$',
+    re.IGNORECASE,
 )
+
+
+async def _read_qicsgp_best_effort(
+    engine: SerialEngine,
+    primary_cid: int,
+    *,
+    timeout_sec: float = 2.0,
+    initial: dict[str, Any] | None = None,
+    probe_append: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Quectel PDP profile read: ``AT+QICSGP?`` or per-context ``AT+QICSGP=<cid>`` when ``?`` is empty/ERROR."""
+    qicsgp = (
+        initial
+        if initial is not None
+        else await engine.send_command("AT+QICSGP?", timeout_sec=timeout_sec)
+    )
+    lines = qicsgp.get("lines", []) or []
+    if qicsgp.get("ok") and _parse_qicsgp(lines):
+        return qicsgp
+    seen: set[int] = set()
+    for cid in (int(primary_cid), 1, 2, 3):
+        if cid < 1 or cid in seen:
+            continue
+        seen.add(cid)
+        q2 = await engine.send_command(f"AT+QICSGP={cid}", timeout_sec=timeout_sec)
+        if probe_append is not None:
+            probe_append.append({"cmd": f"AT+QICSGP={cid} (readback fallback)", "res": q2})
+        if q2.get("ok") and _parse_qicsgp(q2.get("lines", []) or []):
+            return q2
+    return qicsgp
 
 
 def _parse_qicsgp(lines: list[str]) -> list[dict[str, Any]]:
     """Parse ``+QICSGP:`` query lines (Quectel). Prefer context_type + apn + user + pass + auth."""
     out: list[dict[str, Any]] = []
     for raw in lines:
-        s = str(raw or "").strip()
-        if not s.startswith("+QICSGP:"):
+        s = str(raw or "").strip().lstrip("\ufeff")
+        if not s.upper().startswith("+QICSGP:"):
             continue
         m = _QICSGP_FULL_RE.match(s)
         if m:
@@ -1136,6 +1169,87 @@ def _parse_qicsgp(lines: list[str]) -> list[dict[str, Any]]:
                 }
             )
     return out
+
+
+def _parse_cgcontrdp(lines: list[str]) -> list[dict[str, Any]]:
+    """Parse ``+CGCONTRDP:`` (3GPP TS 27.007) — EPS bearer id and **QCI** when the modem includes them."""
+    out: list[dict[str, Any]] = []
+    for raw in lines:
+        s = str(raw or "").strip().lstrip("\ufeff")
+        if not s.upper().startswith("+CGCONTRDP:"):
+            continue
+        parts = _parse_csv_payload(s.split(":", 1)[1].strip())
+        if not parts:
+            continue
+        cid = _safe_int(parts[0])
+        if cid is None:
+            continue
+        bearer_id: int | None
+        qci: int | None
+        if len(parts) >= 3:
+            bearer_id = _safe_int(parts[1])
+            qci = _safe_int(parts[2])
+        elif len(parts) == 2:
+            v1 = _safe_int(parts[1])
+            if v1 is not None and 0 <= v1 <= 85:
+                bearer_id = None
+                qci = v1
+            else:
+                bearer_id = v1
+                qci = None
+        else:
+            bearer_id = None
+            qci = None
+        out.append({"cid": cid, "bearer_id": bearer_id, "qci": qci, "field_count": len(parts)})
+    return out
+
+
+def _format_eps_qci_label(rows: list[dict[str, Any]], primary_cid: int) -> str | None:
+    """Short dashboard string: prefer **primary** CID; ``CID/EBI:QCI`` tokens (EBI omitted when unknown)."""
+    if not rows:
+        return None
+    want = [r for r in rows if r.get("cid") == primary_cid] or list(rows)
+    bits: list[str] = []
+    for r in want:
+        qi = r.get("qci")
+        if qi is None:
+            continue
+        cid = r.get("cid")
+        bi = r.get("bearer_id")
+        if bi is not None:
+            bits.append(f"{cid}/{bi}:{qi}")
+        else:
+            bits.append(f"CID{cid}:{qi}")
+    if not bits:
+        return None
+    out: list[str] = []
+    for b in bits:
+        if b not in out:
+            out.append(b)
+    return " ".join(out[:8])
+
+
+async def _read_cgcontrdp_best_effort(
+    engine: SerialEngine,
+    primary_cid: int,
+    *,
+    timeout_sec: float = 2.5,
+) -> dict[str, Any]:
+    """``AT+CGCONTRDP?`` or ``AT+CGCONTRDP=<cid>`` when bulk read is empty or unsupported."""
+    r = await engine.send_command("AT+CGCONTRDP?", timeout_sec=timeout_sec)
+    if r.get("ok") and _parse_cgcontrdp(r.get("lines", []) or []):
+        return r
+    last: dict[str, Any] = r
+    seen: set[int] = set()
+    for cid in (int(primary_cid), 1, 2, 3):
+        if cid < 1 or cid in seen:
+            continue
+        seen.add(cid)
+        r2 = await engine.send_command(f"AT+CGCONTRDP={cid}", timeout_sec=timeout_sec)
+        last = r2
+        if r2.get("ok") and _parse_cgcontrdp(r2.get("lines", []) or []):
+            return r2
+    return last
 
 
 def _pdp_auth_type_label(auth_type: int | None) -> str:
@@ -1242,24 +1356,28 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                     cgatt = await engine.send_command("AT+CGATT?", timeout_sec=1.5)
                     cereg = await engine.send_command("AT+CEREG?", timeout_sec=1.5)
                     cgdcont = await engine.send_command("AT+CGDCONT?", timeout_sec=2.0)
+                    contexts = _parse_cgdcont(cgdcont.get("lines", []))
+                    primary_ctx_ds = next((c for c in contexts if c.get("cid") == 1), contexts[0] if contexts else {})
+                    primary_cid_ds = int(primary_ctx_ds.get("cid") or 1)
                     cgauth = await engine.send_command("AT+CGAUTH?", timeout_sec=2.0)
-                    qicsgp = await engine.send_command("AT+QICSGP?", timeout_sec=2.0)
+                    qicsgp = await _read_qicsgp_best_effort(engine, primary_cid_ds, timeout_sec=2.0)
                     qiact = await engine.send_command("AT+QIACT?", timeout_sec=2.0)
+                    cgcontrdp_res = await _read_cgcontrdp_best_effort(engine, primary_cid_ds, timeout_sec=2.5)
+                    cgcontrdp_rows = _parse_cgcontrdp(cgcontrdp_res.get("lines", []) or [])
                     qcfg_usbnet = await engine.send_command('AT+QCFG="usbnet"', timeout_sec=2.0)
                     qnetdev = await engine.send_command("AT+QNETDEVSTATUS?", timeout_sec=2.0)
 
                     cgatt_v = _parse_cgatt(cgatt.get("lines", []))
                     cereg_v = _parse_cereg(cereg.get("lines", [])) or {}
-                    contexts = _parse_cgdcont(cgdcont.get("lines", []))
                     auth_rows = _parse_cgauth(cgauth.get("lines", []))
                     qicsgp_rows = _parse_qicsgp(qicsgp.get("lines", []))
                     active = _parse_qiact(qiact.get("lines", []))
                     usbnet_mode = _parse_qcfg_usbnet(qcfg_usbnet.get("lines", []))
                     qnetdev_status = _parse_qnetdevstatus(qnetdev.get("lines", []))
                     active_by_cid = {x.get("cid"): x for x in active if isinstance(x.get("cid"), int)}
-                    primary_ctx = next((c for c in contexts if c.get("cid") == 1), contexts[0] if contexts else {})
+                    primary_ctx = primary_ctx_ds
                     cid1 = active_by_cid.get(1) or {}
-                    primary_cid = int(primary_ctx.get("cid") or 1)
+                    primary_cid = primary_cid_ds
                     ca_one = next((r for r in auth_rows if r.get("cid") == primary_cid), None)
                     qi_one = next((r for r in qicsgp_rows if r.get("cid") == primary_cid), None)
                     pdp_user = None
@@ -1280,6 +1398,11 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                             pdp_auth = qi_one.get("auth_type")
                         pwd_hint = pwd_hint or bool(qi_one.get("password_present_in_response"))
                     pdp_auth_label = _pdp_auth_type_label(int(pdp_auth) if pdp_auth is not None else None)
+                    eps_qci_rows = [
+                        {"cid": int(r["cid"]), "bearer_id": r.get("bearer_id"), "qci": r.get("qci")}
+                        for r in cgcontrdp_rows
+                    ]
+                    eps_qci_label = _format_eps_qci_label(cgcontrdp_rows, primary_cid_ds)
 
                     _creg_stat = cereg_v.get("stat")
                     # 3GPP TS 27.007 +CEREG stat: 1=home, 5=roaming (when registered on EPS).
@@ -1309,6 +1432,9 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                         "usbnet_mode": usbnet_mode,
                         "usbnet_mode_label": _usbnet_mode_label(usbnet_mode),
                         "qnetdev_status": qnetdev_status,
+                        "eps_qci_rows": eps_qci_rows,
+                        "eps_qci_label": eps_qci_label,
+                        "eps_qci_query_ok": bool(cgcontrdp_res.get("ok")),
                     }
                     runtime.data_service_at = now
 

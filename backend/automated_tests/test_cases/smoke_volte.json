@@ -8,9 +8,9 @@
   "modem_requirements": {},
   "test_type": "volte_call_outbound",
   "test_config": {
-    "phone_number": "03454900000",
-    "call_duration_sec": 10,
-    "answer_wait_sec": 120,
+    "phone_number": "1700",
+    "call_duration_sec": 30,
+    "answer_wait_sec": 20,
     "auto_hangup": true
   }
 }
