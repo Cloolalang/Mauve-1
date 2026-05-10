@@ -7047,6 +7047,18 @@
       const canvas = el("corrchart");
       if (!canvas || corrCurrentTab !== "correlator") return;
 
+      // Size the pixel buffer to the physical display pixels so there is no
+      // stretch-blur.  setTransform lets us keep all drawing coords in CSS px.
+      const dpr = window.devicePixelRatio || 1;
+      const cssW = canvas.clientWidth  || 900;
+      const cssH = canvas.clientHeight || 440;
+      const pxW  = Math.round(cssW * dpr);
+      const pxH  = Math.round(cssH * dpr);
+      if (canvas.width !== pxW || canvas.height !== pxH) {
+        canvas.width  = pxW;
+        canvas.height = pxH;
+      }
+
       const nowMs = Date.now();
       const cutoff = nowMs - corrChartWindowMs;
       const windowStartMs = nowMs - corrChartWindowMs;
@@ -7087,7 +7099,9 @@
       });
 
       const ctx = canvas.getContext("2d");
-      const w = canvas.width, h = canvas.height;
+      // Always re-apply the scale — canvas resize resets context state
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const w = cssW, h = cssH;   // draw in CSS px; buffer is in physical px
       ctx.clearRect(0, 0, w, h);
       ctx.fillStyle = "#101010";
       ctx.fillRect(0, 0, w, h);
