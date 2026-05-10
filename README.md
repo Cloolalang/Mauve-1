@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 3.7**
+**Version 3.8**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v3.7** is shown in the page header with a **Lord Kelvin** quotation on measurement).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v3.8** is shown in the page header with a **Lord Kelvin** quotation on measurement).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -131,6 +131,11 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v3.8**
+
+- **Auto-recover PDP on fail**: new opt-in checkboxes in the ping sweep and iperf sections. When enabled and a test fails with "Packet data is inhibited (no active PDP context)", the UI automatically calls `POST /api/network/data-gate` (with the Allow Data password from the Data Gate card) to send `AT+CGATT=1` + `AT+QIACT=1`, waits 2.5 s for the context to stabilise, then retries the test once. If recovery fails the failure is recorded as normal. Requires the Allow Data password to be set in the Roaming MNO + Data Gate card before enabling.
+- **OpenAPI / page header**: **v3.8**.
 
 **Changes in v3.7**
 

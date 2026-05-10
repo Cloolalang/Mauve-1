@@ -769,8 +769,13 @@
         <span id="iperf-sweep-stopwatch" style="display:none; font-family:Consolas,monospace; font-size:12px; color:#00e5ff; min-width:54px;">00:00</span>
         <span id="iperf-sweep-limit-note" style="display:none; font-size:10px; color:#888;">auto-stops at 5 min</span>
       </div>
-      <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
+      <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
         <button id="btn-iperf-test">Run Iperf3 Test</button>
+        <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6; cursor:pointer;"
+               title="When PDP context is lost, automatically attempt AT+CGATT=1 + AT+QIACT=1 using the Allow Data password, then retry the test once.">
+          <input id="iperf-auto-recover-pdp" type="checkbox" style="accent-color:#50fa7b;" />
+          Auto-recover PDP on fail
+        </label>
       </div>
       <div id="iperf-msg" class="label" style="margin-top:8px;">-</div>
       <pre id="iperf-trace" class="mono" style="max-height:160px; overflow:auto; margin-top:8px;">-</pre>
@@ -840,6 +845,13 @@
         <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
           <input id="ph-repeat-toggle" type="checkbox" />
           <span id="ph-repeat-state">OFF</span>
+        </label>
+      </div>
+      <div class="row" style="margin-top:6px;" title="When PDP context is lost, automatically attempt AT+CGATT=1 + AT+QIACT=1 using the Allow Data password before the next sweep. Requires Allow Data password to be set in the Data Gate card.">
+        <span class="label">Auto-recover PDP on fail</span>
+        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+          <input id="ph-auto-recover-pdp" type="checkbox" style="accent-color:#50fa7b;" />
+          <span id="ph-auto-recover-state" style="font-size:11px; color:#666;">OFF</span>
         </label>
       </div>
       <div id="ph-msg" class="label" style="margin-top:8px;">-</div>
@@ -2063,6 +2075,40 @@
       }
     }
 
+    let pingAutoRecoverPdp = false;
+    let iperfAutoRecoverPdp = false;
+
+    /**
+     * Attempt PDP context re-establishment (AT+CGATT=1 + AT+QIACT=1) using
+     * the Allow Data password from the Data Gate card.  Updates msgEl with
+     * status while running.  Returns true if the data gate reports active
+     * contexts after the call, false otherwise.
+     */
+    async function autoRecoverPdpContext(msgEl) {
+      const pw = String(el("data-gate-password")?.value || "");
+      if (msgEl) msgEl.textContent = "PDP context lost — attempting auto-recovery (AT+CGATT=1 + AT+QIACT=1)…";
+      try {
+        const r = await fetch("/api/network/data-gate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ inhibit: false, password: pw })
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "PDP recovery failed"));
+        applyDataGateState(j.after || {}, "");
+        const active = !!(j.after && !j.after.inhibited);
+        if (active) {
+          if (msgEl) msgEl.textContent = "PDP recovered — retrying…";
+          return true;
+        }
+        if (msgEl) msgEl.textContent = "PDP recovery sent but context still inactive.";
+        return false;
+      } catch (recoverErr) {
+        if (msgEl) msgEl.textContent = `PDP auto-recovery failed: ${recoverErr.message || recoverErr}`;
+        return false;
+      }
+    }
+
     async function applyDsApn() {
       const apn = String(el("ds-apn-set")?.value || "").trim();
       const pdp_type = String(el("ds-pdp-type")?.value || "IP");
@@ -3248,6 +3294,31 @@
         drawIperfChart();
       } catch (e) {
         const msg = String(e?.message || e || "Iperf test failed");
+        const isPdpError = msg.includes("no active PDP context") || msg.includes("Packet data is inhibited");
+        if (isPdpError && iperfAutoRecoverPdp) {
+          iperfBusy = false;
+          const recovered = await autoRecoverPdpContext(el("iperf-msg"));
+          if (recovered) {
+            // Wait 2.5 s for PDP to stabilise, then auto-retry once.
+            await new Promise(res => setTimeout(res, 2500));
+            runIperfTest();
+            return;
+          }
+          // Recovery failed — record the failure.
+          iperfEventHistory.push({ t: Date.now(), ok: false });
+          pruneHistoryByAge(iperfEventHistory);
+          if (corrZeroOnFail) {
+            const _ft = Date.now();
+            const _fc = (Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci))
+              ? `${currentServingEarfcn}/${currentServingPci}` : undefined;
+            const _fz = (arr) => { arr.push({ t: _ft, v: 0, ...(_fc ? { c: _fc } : {}) }); pruneHistoryByAge(arr, _ft); };
+            iperfHistory.push({ t: _ft, v: 0 });
+            if (direction === "download" || direction === "both") { _fz(iperfDlHistory); _fz(iperfDlSeHistory); }
+            if (direction === "upload"   || direction === "both") { _fz(iperfUlHistory); _fz(iperfUlSeHistory); }
+          }
+          drawIperfChart();
+          return;
+        }
         el("iperf-msg").textContent = `Iperf error: ${msg}`;
         el("iperf-trace").textContent = `Iperf error: ${msg}`;
         iperfEventHistory.push({ t: Date.now(), ok: false });
@@ -3410,6 +3481,27 @@
         el("ph-trace").textContent = [`Command: ${cmd}`, `Exit: ${j.exit_code}`, "", "stdout tail:", tail].join("\n");
       } catch (e) {
         const msg = String(e?.message || e || "ICMP ping sweep failed");
+        const isPdpError = msg.includes("no active PDP context") || msg.includes("Packet data is inhibited");
+        if (isPdpError && pingAutoRecoverPdp) {
+          pingSweepBusy = false;
+          const recovered = await autoRecoverPdpContext(el("ph-msg"));
+          if (recovered) {
+            // Wait 2.5 s for the PDP context to fully stabilise before retrying.
+            await new Promise(res => setTimeout(res, 2500));
+            runPingSweepTest();
+            return;
+          }
+          // Recovery failed — fall through to record the failure below.
+          phEventHistory.push({ t: Date.now(), ok: false });
+          pruneHistoryByAge(phEventHistory);
+          if (corrZeroOnFail) {
+            const _ft = Date.now();
+            phAvgHistory.push({ t: _ft, v: 0 }); pruneHistoryByAge(phAvgHistory, _ft);
+            phJitHistory.push({ t: _ft, v: 0 }); pruneHistoryByAge(phJitHistory, _ft);
+          }
+          drawPhSweepChart();
+          return;
+        }
         el("ph-msg").textContent = `ICMP sweep error: ${msg}`;
         el("ph-trace").textContent = `ICMP sweep error: ${msg}`;
         phEventHistory.push({ t: Date.now(), ok: false });
@@ -6937,6 +7029,16 @@
     if (btnTrCancel) btnTrCancel.addEventListener("click", () => cancelTestRunnerRun());
     const phRepeatToggle = el("ph-repeat-toggle");
     if (phRepeatToggle) phRepeatToggle.addEventListener("change", (ev) => setPhRepeatPing(!!ev.target.checked));
+    const phAutoRecoverEl = el("ph-auto-recover-pdp");
+    if (phAutoRecoverEl) phAutoRecoverEl.addEventListener("change", (ev) => {
+      pingAutoRecoverPdp = !!ev.target.checked;
+      const s = el("ph-auto-recover-state");
+      if (s) { s.textContent = pingAutoRecoverPdp ? "ON" : "OFF"; s.style.color = pingAutoRecoverPdp ? "#50fa7b" : "#666"; }
+    });
+    const iperfAutoRecoverEl = el("iperf-auto-recover-pdp");
+    if (iperfAutoRecoverEl) iperfAutoRecoverEl.addEventListener("change", (ev) => {
+      iperfAutoRecoverPdp = !!ev.target.checked;
+    });
     el("btn-clear-charts").addEventListener("click", () => clearAllCharts());
     const btnUiDefaults = el("btn-ui-defaults");
     if (btnUiDefaults) btnUiDefaults.addEventListener("click", () => applyUiDefaults());

@@ -1,6 +1,11 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 3.7** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.7**).
+**Version 3.8** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.8**).
+
+Notes for **v3.8**:
+
+- **Auto-recover PDP on fail** (`dashboard.html`): two new boolean state variables — `pingAutoRecoverPdp` (default `false`) and `iperfAutoRecoverPdp` (default `false`) — toggled by `#ph-auto-recover-pdp` and `#iperf-auto-recover-pdp` checkboxes. A shared async helper `autoRecoverPdpContext(msgEl)` reads the Allow Data password from `#data-gate-password`, POSTs to `/api/network/data-gate` with `{inhibit: false, password}`, and updates the caller's message element with status. In `runPingSweepTest()` and `runIperfTest()` catch blocks: when the error message contains `"no active PDP context"` or `"Packet data is inhibited"` and the respective auto-recover flag is set, `pingSweepBusy`/`iperfBusy` is cleared, `autoRecoverPdpContext` is awaited, a 2.5 s stabilisation delay is applied, then the test function calls itself recursively for one retry. If recovery fails the failure path (history zeroing, chart redraw) proceeds as normal. No backend changes.
+- OpenAPI / page header: **v3.8**.
 
 Notes for **v3.7**:
 
