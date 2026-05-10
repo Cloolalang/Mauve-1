@@ -1,6 +1,14 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 3.8** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.8**).
+**Version 3.9** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.9**).
+
+Notes for **v3.9**:
+
+- **Correlator scale modes** (`dashboard.html`): new `corrScaleMode` state variable (default `"stacked"`). `CORR_KPI_CATALOG` entries gain `rangeMin`/`rangeMax` fields for all 24 KPIs. In `drawCorrChart()`: `traceData` map now computes `yMin`/`yMax` from `corrScaleMode` — `"fixed"` uses catalog `rangeMin`/`rangeMax`; `"normalize"` uses window auto-range with 8 % padding; `"stacked"` uses auto-range but draws each trace in its own horizontal band (`bandH = floor((y0−y1−(N−1)×2)/N)`). The shared Y-axis grid (0–100 %) is suppressed in stacked mode; per-band separator lines, KPI labels, and actual min/max tick values are drawn inside the loop. The top-left legend is skipped in stacked mode. `#corr-scale-mode` `<select>` HTML element defaults to `"stacked"`.
+- **Correlator threshold lines** (`dashboard.html`): after `yFor` is defined per-trace, a dashed horizontal line is drawn at `kpiDef.threshold` if the value falls within the band/chart boundary. Rendered at 45 % opacity in the trace colour, with a small text label on the right edge. Applies to all three scale modes.
+- **Per-trace Y overrides** (`dashboard.html`): `corrTraceYMin[6]` and `corrTraceYMax[6]` arrays (default all `null`). `buildCorrTraceSelects()` appends ↓/↑ `<input type="number" placeholder="auto">` fields to each trace row. Override values are applied after auto/fixed range calculation in `traceData` map — `null` means auto. `#corr-scale-mode` HTML updated to select `"stacked"` by default.
+- **Record 9999 on fail**: changed all `v: 0` failure pushes to `v: 9999` so failed tests spike visibly rather than dropping to zero.
+- OpenAPI / page header: **v3.9**.
 
 Notes for **v3.8**:
 

@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 3.8**
+**Version 3.9**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v3.8** is shown in the page header with a **Lord Kelvin** quotation on measurement).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v3.9** is shown in the page header with a **Lord Kelvin** quotation on measurement).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -131,6 +131,14 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v3.9**
+
+- **Correlator chart — Scale modes**: new "Scale" dropdown in the correlator controls bar with three options: **Auto-normalize** (each trace auto-scales to its visible window range, 0–100 %), **Fixed range** (each trace scaled to catalog-defined absolute min/max — e.g. RSRP −140 to −44 dBm — so position reflects real-world level), and **Stacked** (chart height divided evenly into per-trace bands; each band shows its KPI label and actual min/max on the left axis; top-left legend is replaced by per-band labels). **Stacked is now the default.**
+- **Correlator chart — Threshold lines**: each active trace now draws a dashed horizontal line at the KPI's catalog threshold value (e.g. RSRP −126 dBm, SINR 0 dB, Cell Dominance +6 dB). The line is drawn in the trace colour at 45 % opacity, with a small labelled value on the right edge. Only drawn when the threshold falls within the visible range. Works in all three scale modes.
+- **Correlator chart — Per-trace Y-axis overrides**: each trace row now has two small number inputs (↓ min, ↑ max). Entering a value pins that axis bound regardless of scale mode or auto-range. Clearing the field returns to auto. Overrides take priority over both Auto-normalize window range and Fixed catalog range.
+- **Correlator chart — Record 9999 on test fail**: changed from recording `0` to recording `9999` on ping/iperf failure when the option is enabled, so failed tests spike visibly upward (or downward for inverted traces) rather than dropping to zero.
+- **OpenAPI / page header**: **v3.9**.
 
 **Changes in v3.8**
 
