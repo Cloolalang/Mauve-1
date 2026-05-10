@@ -970,6 +970,15 @@
             <option value="3600">60 m</option>
           </select>
         </label>
+        <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6;"
+               title="Auto-normalize: each trace fills 0–100% of its own visible range. Fixed range: traces scaled to catalog-defined absolute min/max. Stacked: each trace in its own horizontal band.">
+          Scale
+          <select id="corr-scale-mode" style="background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:3px 6px;">
+            <option value="normalize" selected>Auto-normalize</option>
+            <option value="fixed">Fixed range</option>
+            <option value="stacked">Stacked</option>
+          </select>
+        </label>
       </div>
       <div id="corr-kpi-info" class="label" style="font-size:11px; margin-bottom:8px; min-height:14px;">-</div>
       <canvas id="corrchart" width="900" height="440"
@@ -7093,6 +7102,7 @@
     let corrTraceSmooth       = [false, false, false, false, false, false];
     let corrTraceSmoothWindow = [10, 10, 10, 10, 10, 10];
     let corrZeroOnFail        = false;  // push v:9999 to iperf/ping histories on test failure
+    let corrScaleMode         = "normalize"; // "normalize" | "fixed" | "stacked"
 
     applyChartWindowSec(Number(el("chart-window-select")?.value || 600));
     updateChartGapButton();
@@ -7108,30 +7118,30 @@
     // ============================================================
 
     const CORR_KPI_CATALOG = [
-      { key: "lte_rsrp",        label: "LTE RSRP",              unit: "dBm",    color: "#4da3ff", threshold: -126, getHistory: () => rfHistory.rsrp },
-      { key: "lte_rsrq",        label: "LTE RSRQ",              unit: "dB",     color: "#4da3ff", threshold: -15,  getHistory: () => rfHistory.rsrq },
-      { key: "lte_sinr",        label: "LTE SINR",              unit: "dB",     color: "#4da3ff", threshold: 0,    getHistory: () => rfHistory.sinr },
-      { key: "lte_rssi",        label: "LTE RSSI",              unit: "dBm",    color: "#4da3ff", threshold: -95,  getHistory: () => rfHistory.rssi },
-      { key: "lte_dominance",   label: "LTE Cell Dominance",    unit: "dB",     color: "#50fa7b", threshold: 6,    getHistory: () => rfHistory.dominance },
-      { key: "congestion_proxy",label: "Congestion Proxy",      unit: "dB",     color: "#ffb86c", threshold: 0,    getHistory: () => congestionProxyHistory },
-      { key: "lte_dl_bw",       label: "LTE DL Bandwidth",      unit: "MHz",    color: "#b8ffc8", threshold: null, getHistory: () => bwHistory },
-      { key: "ca_agg_bw",       label: "CA Aggregated DL BW",   unit: "MHz",    color: "#b8ffc8", threshold: null, getHistory: () => caAggBwHistory },
-      { key: "nr_rsrp",         label: "NR5G RSRP",             unit: "dBm",    color: "#ff79c6", threshold: -126, getHistory: () => nrRfHistory.rsrp },
-      { key: "nr_rsrq",         label: "NR5G RSRQ",             unit: "dB",     color: "#ff79c6", threshold: -15,  getHistory: () => nrRfHistory.rsrq },
-      { key: "nr_sinr",         label: "NR5G SINR",             unit: "dB",     color: "#ff79c6", threshold: 0,    getHistory: () => nrRfHistory.sinr },
-      { key: "nr_dominance",    label: "NR5G Cell Dominance",   unit: "dB",     color: "#bd93f9", threshold: 6,    getHistory: () => nrRfHistory.dominance },
-      { key: "nr_dl_bw",        label: "NR5G DL Bandwidth",     unit: "MHz",    color: "#ff79c6", threshold: null, getHistory: () => nrBwHistory },
-      { key: "nbr_intra_rsrp",  label: "Intra Nbr RSRP",        unit: "dBm",    color: "#aaaaaa", threshold: -126, getHistory: () => rfNeighborOverlap.rsrp },
-      { key: "nbr_inter_rsrp",  label: "Inter Nbr RSRP",        unit: "dBm",    color: "#aaaaaa", threshold: -126, getHistory: () => nbrInterRsrpHistory },
-      { key: "nbr_inter_rsrq",  label: "Inter Nbr RSRQ",        unit: "dB",     color: "#aaaaaa", threshold: -15,  getHistory: () => nbrInterRsrqHistory },
-      { key: "nbr_intra_count", label: "Intra Nbr Count",       unit: "",       color: "#bd93f9", threshold: null, getHistory: () => nbrIntraCountHistory },
-      { key: "nbr_inter_count", label: "Inter Nbr Count",       unit: "",       color: "#8be9fd", threshold: null, getHistory: () => nbrInterCountHistory },
-      { key: "iperf_dl",        label: "Iperf DL Throughput",   unit: "Mbps",   color: "#00e5ff", threshold: null, getHistory: () => iperfDlHistory },
-      { key: "iperf_ul",        label: "Iperf UL Throughput",   unit: "Mbps",   color: "#ffb86c", threshold: null, getHistory: () => iperfUlHistory },
-      { key: "iperf_dl_se",     label: "Iperf DL Spectral Eff.",unit: "bps/Hz", color: "#7cffb2", threshold: null, getHistory: () => iperfDlSeHistory },
-      { key: "iperf_ul_se",     label: "Iperf UL Spectral Eff.",unit: "bps/Hz", color: "#ffe066", threshold: null, getHistory: () => iperfUlSeHistory },
-      { key: "ping_rtt",        label: "Ping Avg RTT",          unit: "ms",     color: "#50fa7b", threshold: null, invertY: true, getHistory: () => phAvgHistory },
-      { key: "ping_jitter",     label: "Ping Jitter",           unit: "ms",     color: "#ffb86c", threshold: null, invertY: true, getHistory: () => phJitHistory },
+      { key: "lte_rsrp",        label: "LTE RSRP",              unit: "dBm",    color: "#4da3ff", threshold: -126, rangeMin: -140, rangeMax: -44,  getHistory: () => rfHistory.rsrp },
+      { key: "lte_rsrq",        label: "LTE RSRQ",              unit: "dB",     color: "#4da3ff", threshold: -15,  rangeMin: -20,  rangeMax: -3,   getHistory: () => rfHistory.rsrq },
+      { key: "lte_sinr",        label: "LTE SINR",              unit: "dB",     color: "#4da3ff", threshold: 0,    rangeMin: -20,  rangeMax: 40,   getHistory: () => rfHistory.sinr },
+      { key: "lte_rssi",        label: "LTE RSSI",              unit: "dBm",    color: "#4da3ff", threshold: -95,  rangeMin: -120, rangeMax: -40,  getHistory: () => rfHistory.rssi },
+      { key: "lte_dominance",   label: "LTE Cell Dominance",    unit: "dB",     color: "#50fa7b", threshold: 6,    rangeMin: -20,  rangeMax: 30,   getHistory: () => rfHistory.dominance },
+      { key: "congestion_proxy",label: "Congestion Proxy",      unit: "dB",     color: "#ffb86c", threshold: 0,    rangeMin: -30,  rangeMax: 30,   getHistory: () => congestionProxyHistory },
+      { key: "lte_dl_bw",       label: "LTE DL Bandwidth",      unit: "MHz",    color: "#b8ffc8", threshold: null, rangeMin: 0,    rangeMax: 20,   getHistory: () => bwHistory },
+      { key: "ca_agg_bw",       label: "CA Aggregated DL BW",   unit: "MHz",    color: "#b8ffc8", threshold: null, rangeMin: 0,    rangeMax: 100,  getHistory: () => caAggBwHistory },
+      { key: "nr_rsrp",         label: "NR5G RSRP",             unit: "dBm",    color: "#ff79c6", threshold: -126, rangeMin: -160, rangeMax: -44,  getHistory: () => nrRfHistory.rsrp },
+      { key: "nr_rsrq",         label: "NR5G RSRQ",             unit: "dB",     color: "#ff79c6", threshold: -15,  rangeMin: -20,  rangeMax: -3,   getHistory: () => nrRfHistory.rsrq },
+      { key: "nr_sinr",         label: "NR5G SINR",             unit: "dB",     color: "#ff79c6", threshold: 0,    rangeMin: -20,  rangeMax: 40,   getHistory: () => nrRfHistory.sinr },
+      { key: "nr_dominance",    label: "NR5G Cell Dominance",   unit: "dB",     color: "#bd93f9", threshold: 6,    rangeMin: -20,  rangeMax: 30,   getHistory: () => nrRfHistory.dominance },
+      { key: "nr_dl_bw",        label: "NR5G DL Bandwidth",     unit: "MHz",    color: "#ff79c6", threshold: null, rangeMin: 0,    rangeMax: 400,  getHistory: () => nrBwHistory },
+      { key: "nbr_intra_rsrp",  label: "Intra Nbr RSRP",        unit: "dBm",    color: "#aaaaaa", threshold: -126, rangeMin: -140, rangeMax: -44,  getHistory: () => rfNeighborOverlap.rsrp },
+      { key: "nbr_inter_rsrp",  label: "Inter Nbr RSRP",        unit: "dBm",    color: "#aaaaaa", threshold: -126, rangeMin: -140, rangeMax: -44,  getHistory: () => nbrInterRsrpHistory },
+      { key: "nbr_inter_rsrq",  label: "Inter Nbr RSRQ",        unit: "dB",     color: "#aaaaaa", threshold: -15,  rangeMin: -20,  rangeMax: -3,   getHistory: () => nbrInterRsrqHistory },
+      { key: "nbr_intra_count", label: "Intra Nbr Count",       unit: "",       color: "#bd93f9", threshold: null, rangeMin: 0,    rangeMax: 20,   getHistory: () => nbrIntraCountHistory },
+      { key: "nbr_inter_count", label: "Inter Nbr Count",       unit: "",       color: "#8be9fd", threshold: null, rangeMin: 0,    rangeMax: 20,   getHistory: () => nbrInterCountHistory },
+      { key: "iperf_dl",        label: "Iperf DL Throughput",   unit: "Mbps",   color: "#00e5ff", threshold: null, rangeMin: 0,    rangeMax: 300,  getHistory: () => iperfDlHistory },
+      { key: "iperf_ul",        label: "Iperf UL Throughput",   unit: "Mbps",   color: "#ffb86c", threshold: null, rangeMin: 0,    rangeMax: 150,  getHistory: () => iperfUlHistory },
+      { key: "iperf_dl_se",     label: "Iperf DL Spectral Eff.",unit: "bps/Hz", color: "#7cffb2", threshold: null, rangeMin: 0,    rangeMax: 15,   getHistory: () => iperfDlSeHistory },
+      { key: "iperf_ul_se",     label: "Iperf UL Spectral Eff.",unit: "bps/Hz", color: "#ffe066", threshold: null, rangeMin: 0,    rangeMax: 8,    getHistory: () => iperfUlSeHistory },
+      { key: "ping_rtt",        label: "Ping Avg RTT",          unit: "ms",     color: "#50fa7b", threshold: null, rangeMin: 0,    rangeMax: 500,  invertY: true, getHistory: () => phAvgHistory },
+      { key: "ping_jitter",     label: "Ping Jitter",           unit: "ms",     color: "#ffb86c", threshold: null, rangeMin: 0,    rangeMax: 200,  invertY: true, getHistory: () => phJitHistory },
     ];
 
     function switchTab(tabName) {
@@ -7191,8 +7201,13 @@
         const values = samples.map((p) => Number(p.v)).filter((x) => Number.isFinite(x));
         const minV = values.length ? Math.min(...values) : 0;
         const maxV = values.length ? Math.max(...values) : 1;
-        const pad = Math.max(Math.abs(maxV - minV) * 0.08, 0.5);
-        const yMin = minV - pad, yMax = maxV + pad;
+        let yMin, yMax;
+        if (corrScaleMode === "fixed" && kpiDef.rangeMin != null && kpiDef.rangeMax != null) {
+          yMin = kpiDef.rangeMin; yMax = kpiDef.rangeMax;
+        } else {
+          const pad = Math.max(Math.abs(maxV - minV) * 0.08, 0.5);
+          yMin = minV - pad; yMax = maxV + pad;
+        }
         const span = Math.max(0.001, yMax - yMin);
         // Use the same EARFCN/PCI cell-key colour as the main RF charts.
         // colorForCellKey falls back to kpiDef.color when sample has no .c field
@@ -7242,19 +7257,27 @@
 
       const x0 = 58, x1 = w - 16, y0 = h - 26, y1 = 16;
 
-      // Grid + Y axis (normalised 0–100 %)
-      ctx.lineWidth = 1;
-      for (let i = 0; i <= 5; i++) {
-        const y = y1 + (i * (y0 - y1)) / 5;
-        const pct = 100 - i * 20;
-        ctx.strokeStyle = i === 0 || i === 5 ? "#282828" : "#1e1e1e";
-        ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
-        ctx.fillStyle = "#555"; ctx.font = "10px Arial"; ctx.textAlign = "right";
-        ctx.fillText(`${pct}%`, x0 - 3, y + 3);
+      // Compute stacked band height before drawing grid
+      const N = traceData.length;
+      const bandH = corrScaleMode === "stacked"
+        ? Math.floor((y0 - y1 - Math.max(0, N - 1) * 2) / Math.max(1, N))
+        : (y0 - y1);
+
+      // Grid + Y axis (shared for normalize/fixed; per-band for stacked)
+      if (corrScaleMode !== "stacked") {
+        ctx.lineWidth = 1;
+        for (let i = 0; i <= 5; i++) {
+          const y = y1 + (i * (y0 - y1)) / 5;
+          const pct = 100 - i * 20;
+          ctx.strokeStyle = i === 0 || i === 5 ? "#282828" : "#1e1e1e";
+          ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
+          ctx.fillStyle = "#555"; ctx.font = "10px Arial"; ctx.textAlign = "right";
+          ctx.fillText(`${pct}%`, x0 - 3, y + 3);
+        }
+        ctx.textAlign = "left";
+        ctx.fillStyle = "#444"; ctx.font = "10px Arial";
+        ctx.fillText(corrScaleMode === "fixed" ? "fixed" : "norm.", x0, y1 - 4);
       }
-      ctx.textAlign = "left";
-      ctx.fillStyle = "#444"; ctx.font = "10px Arial";
-      ctx.fillText("norm.", x0, y1 - 4);
 
       // X axis time ticks
       for (let i = 0; i <= 6; i++) {
@@ -7268,10 +7291,33 @@
       }
       ctx.textAlign = "left";
 
-      // Draw each trace (normalised to its own range)
-      traceData.forEach((td) => {
-        const { kpiDef, samples, yMin, span, color, invertY } = td;
+      // Draw each trace
+      traceData.forEach((td, traceIdx) => {
+        const { kpiDef, samples, yMin, yMax, span, color, invertY } = td;
         if (!samples.length) return;
+
+        // Per-band boundaries for stacked mode; full chart otherwise
+        const y1t = corrScaleMode === "stacked" ? y1 + traceIdx * (bandH + 2) : y1;
+        const y0t = corrScaleMode === "stacked" ? y1t + bandH : y0;
+
+        // Stacked mode: draw band separator + per-band axis labels
+        if (corrScaleMode === "stacked") {
+          if (traceIdx > 0) {
+            ctx.strokeStyle = "#2a2a2a"; ctx.lineWidth = 1; ctx.setLineDash([]);
+            ctx.beginPath(); ctx.moveTo(0, y1t); ctx.lineTo(x1, y1t); ctx.stroke();
+          }
+          // KPI label inside band (top-left)
+          ctx.fillStyle = color; ctx.font = "bold 9px Arial"; ctx.textAlign = "left";
+          ctx.fillText(kpiDef.label, x0 + 4, y1t + 11);
+          // Min/max tick values on left margin
+          ctx.fillStyle = "#555"; ctx.font = "9px Arial"; ctx.textAlign = "right";
+          const topVal = invertY ? Number(yMin).toFixed(0) : Number(yMax).toFixed(0);
+          const botVal = invertY ? Number(yMax).toFixed(0) : Number(yMin).toFixed(0);
+          ctx.fillText(topVal, x0 - 3, y1t + 9);
+          ctx.fillText(botVal, x0 - 3, y0t - 3);
+          ctx.textAlign = "left";
+        }
+
         const n = samples.length;
         const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
         const xFor = (p, i) => {
@@ -7282,8 +7328,8 @@
         };
         // invertY: high value = bottom of chart (e.g. ping RTT — worse = lower, matching RF KPIs)
         const yFor = invertY
-          ? (v) => y1 + ((Number(v) - yMin) / span) * (y0 - y1)
-          : (v) => y0 - ((Number(v) - yMin) / span) * (y0 - y1);
+          ? (v) => y1t + ((Number(v) - yMin) / span) * (y0t - y1t)
+          : (v) => y0t - ((Number(v) - yMin) / span) * (y0t - y1t);
         // Draw per-segment so each segment is coloured by the cell active at p1.
         // This makes handovers visible as a colour change mid-trace.
         ctx.lineWidth = 2;
@@ -7305,11 +7351,11 @@
           ctx.fillStyle = colorForCellKey(p?.c, kpiDef.color);
           ctx.beginPath(); ctx.arc(xFor(p, i), yFor(p.v), 2.5, 0, Math.PI * 2); ctx.fill();
         });
-        // Latest value callout — clamp inside chart boundary
+        // Latest value callout — clamp inside band (or full chart in normalize/fixed)
         const last = samples[samples.length - 1];
         if (last && Number.isFinite(last.v)) {
           const lx = xFor(last, samples.length - 1);
-          const ly = Math.max(y1 + 8, Math.min(y0 - 6, yFor(last.v)));
+          const ly = Math.max(y1t + 8, Math.min(y0t - 6, yFor(last.v)));
           const txt = `${Number(last.v).toFixed(2)} ${kpiDef.unit}`;
           ctx.font = "bold 11px Arial";
           const tw = ctx.measureText(txt).width;
@@ -7323,21 +7369,23 @@
         }
       });
 
-      // Legend (top-left, inside chart)
-      ctx.font = "bold 11px Arial";
-      let ly = y1 + 14;
-      traceData.forEach((td) => {
-        const { kpiDef, color, invertY } = td;
-        const label = `${kpiDef.label}${kpiDef.unit ? ` (${kpiDef.unit})` : ""}${invertY ? "  ↓ inv." : ""}`;
-        const tw = ctx.measureText(label).width;
-        ctx.fillStyle = "rgba(16,16,16,0.7)";
-        ctx.fillRect(x0 + 4, ly - 11, tw + 20, 15);
-        ctx.fillStyle = color;
-        ctx.fillRect(x0 + 6, ly - 8, 10, 10);
-        ctx.fillStyle = color;
-        ctx.fillText(label, x0 + 20, ly);
-        ly += 17;
-      });
+      // Legend (top-left, inside chart) — omitted in stacked mode (labels drawn per band)
+      if (corrScaleMode !== "stacked") {
+        ctx.font = "bold 11px Arial";
+        let ly = y1 + 14;
+        traceData.forEach((td) => {
+          const { kpiDef, color, invertY } = td;
+          const label = `${kpiDef.label}${kpiDef.unit ? ` (${kpiDef.unit})` : ""}${invertY ? "  ↓ inv." : ""}`;
+          const tw = ctx.measureText(label).width;
+          ctx.fillStyle = "rgba(16,16,16,0.7)";
+          ctx.fillRect(x0 + 4, ly - 11, tw + 20, 15);
+          ctx.fillStyle = color;
+          ctx.fillRect(x0 + 6, ly - 8, 10, 10);
+          ctx.fillStyle = color;
+          ctx.fillText(label, x0 + 20, ly);
+          ly += 17;
+        });
+      }
 
       // Hover crosshair
       if (_corrHoverState) {
@@ -7498,6 +7546,7 @@
     el("btn-corr-gap-mode").addEventListener("click", () => { corrGapModeEnabled = !corrGapModeEnabled; updateCorrGapButton(); updateCorrAxisLabel(); drawCorrChart(); });
     el("corr-zero-on-fail").addEventListener("change", (e) => { corrZeroOnFail = e.target.checked; });
     el("corr-chart-window-select").addEventListener("change", (e) => { corrChartWindowMs = Number(e.target.value) * 1000; updateCorrAxisLabel(); drawCorrChart(); });
+    el("corr-scale-mode").addEventListener("change", (e) => { corrScaleMode = e.target.value; drawCorrChart(); });
     installCorrChartHoverListeners();
     updateCorrGapButton();
     updateCorrAxisLabel();
