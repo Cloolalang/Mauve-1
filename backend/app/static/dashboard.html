@@ -7028,8 +7028,8 @@
       { key: "iperf_ul",        label: "Iperf UL Throughput",   unit: "Mbps",   color: "#ffb86c", threshold: null, getHistory: () => iperfUlHistory },
       { key: "iperf_dl_se",     label: "Iperf DL Spectral Eff.",unit: "bps/Hz", color: "#7cffb2", threshold: null, getHistory: () => iperfDlSeHistory },
       { key: "iperf_ul_se",     label: "Iperf UL Spectral Eff.",unit: "bps/Hz", color: "#ffe066", threshold: null, getHistory: () => iperfUlSeHistory },
-      { key: "ping_rtt",        label: "Ping Avg RTT",          unit: "ms",     color: "#50fa7b", threshold: null, getHistory: () => phAvgHistory },
-      { key: "ping_jitter",     label: "Ping Jitter",           unit: "ms",     color: "#ffb86c", threshold: null, getHistory: () => phJitHistory },
+      { key: "ping_rtt",        label: "Ping Avg RTT",          unit: "ms",     color: "#50fa7b", threshold: null, invertY: true, getHistory: () => phAvgHistory },
+      { key: "ping_jitter",     label: "Ping Jitter",           unit: "ms",     color: "#ffb86c", threshold: null, invertY: true, getHistory: () => phJitHistory },
     ];
 
     function switchTab(tabName) {
@@ -7097,7 +7097,8 @@
         // (e.g. iperf/ping traces), keeping those in their catalog colours.
         const latestSample = samples.length ? samples[samples.length - 1] : null;
         const color = colorForCellKey(latestSample?.c, kpiDef.color);
-        return { kpiDef, samples, windowedRaw, yMin, yMax, span, color, smoothed: corrTraceSmooth[idx], smoothWindow: corrTraceSmoothWindow[idx] };
+        const invertY = !!kpiDef.invertY;
+        return { kpiDef, samples, windowedRaw, yMin, yMax, span, color, invertY, smoothed: corrTraceSmooth[idx], smoothWindow: corrTraceSmoothWindow[idx] };
       }).filter(Boolean);
 
       // Sync dot colors in the selector rows to the live cell-key colors
@@ -7167,7 +7168,7 @@
 
       // Draw each trace (normalised to its own range)
       traceData.forEach((td) => {
-        const { kpiDef, samples, yMin, span, color } = td;
+        const { kpiDef, samples, yMin, span, color, invertY } = td;
         if (!samples.length) return;
         const n = samples.length;
         const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
@@ -7177,7 +7178,10 @@
           if (!Number.isFinite(t)) return x0 + i * xStep;
           return x0 + Math.max(0, Math.min(1, (t - windowStartMs) / corrChartWindowMs)) * (x1 - x0);
         };
-        const yFor = (v) => y0 - ((Number(v) - yMin) / span) * (y0 - y1);
+        // invertY: high value = bottom of chart (e.g. ping RTT — worse = lower, matching RF KPIs)
+        const yFor = invertY
+          ? (v) => y1 + ((Number(v) - yMin) / span) * (y0 - y1)
+          : (v) => y0 - ((Number(v) - yMin) / span) * (y0 - y1);
         // Draw per-segment so each segment is coloured by the cell active at p1.
         // This makes handovers visible as a colour change mid-trace.
         ctx.lineWidth = 2;
@@ -7221,8 +7225,8 @@
       ctx.font = "bold 11px Arial";
       let ly = y1 + 14;
       traceData.forEach((td) => {
-        const { kpiDef, color } = td;
-        const label = `${kpiDef.label}${kpiDef.unit ? ` (${kpiDef.unit})` : ""}`;
+        const { kpiDef, color, invertY } = td;
+        const label = `${kpiDef.label}${kpiDef.unit ? ` (${kpiDef.unit})` : ""}${invertY ? "  ↓ inv." : ""}`;
         const tw = ctx.measureText(label).width;
         ctx.fillStyle = "rgba(16,16,16,0.7)";
         ctx.fillRect(x0 + 4, ly - 11, tw + 20, 15);
