@@ -701,8 +701,14 @@
           <input id="iperf-duration" type="number" min="1" max="300" value="1" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
         </div>
         <div>
-          <div class="label">Parallel streams (-P):</div>
-          <input id="iperf-parallel" type="number" min="1" max="64" value="1" title="iperf3 -P: number of parallel client streams" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+          <div id="iperf-parallel-ul-row">
+            <div class="label" id="iperf-parallel-ul-label">UL Parallel streams (-P):</div>
+            <input id="iperf-parallel-ul" type="number" min="1" max="64" value="1" title="iperf3 -P upload: number of parallel upload streams" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+          </div>
+          <div id="iperf-parallel-dl-row" style="margin-top:6px;">
+            <div class="label" id="iperf-parallel-dl-label">DL Parallel streams (-P):</div>
+            <input id="iperf-parallel-dl" type="number" min="1" max="64" value="1" title="iperf3 -P download: number of parallel download streams" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+          </div>
           <div id="iperf-parallel-note" class="label" style="margin-top:4px; color:#888; font-size:10px;"></div>
         </div>
       </div>
@@ -997,13 +1003,16 @@
     const iperfHistory = [];
     const iperfDlHistory = [];
     const iperfUlHistory = [];
+    const iperfEventHistory = []; // { t, ok } — test-complete markers drawn on chart
     let lastIperfDlMbps = null;
     let lastIperfUlMbps = null;
     let pingSweepBusy = false;
+    let volteBusy = false;
     let phRepeatTimer = null;
     const PH_REPEAT_INTERVAL_MS = 15000;
     const phAvgHistory = [];
     const phJitHistory = [];
+    const phEventHistory = []; // { t, ok } — test-complete markers drawn on chart
     let lastPhAvgMs = null;
     let lastPhJitMs = null;
     const rfHistory = { rsrp: [], rsrq: [], sinr: [], rssi: [], dominance: [] };
@@ -1171,8 +1180,10 @@
       pruneHistoryByAge(iperfHistory, nowMs);
       pruneHistoryByAge(iperfDlHistory, nowMs);
       pruneHistoryByAge(iperfUlHistory, nowMs);
+      pruneHistoryByAge(iperfEventHistory, nowMs);
       pruneHistoryByAge(phAvgHistory, nowMs);
       pruneHistoryByAge(phJitHistory, nowMs);
+      pruneHistoryByAge(phEventHistory, nowMs);
       Object.values(rfHistory).forEach((h) => pruneHistoryByAge(h, nowMs));
       Object.values(rfNeighborOverlap).forEach((h) => pruneHistoryByAge(h, nowMs));
       pruneHistoryByAge(nbrInterRsrpHistory, nowMs);
@@ -2512,6 +2523,8 @@
     }
 
     async function runVolteTest() {
+      if (volteBusy) return;
+      volteBusy = true;
       const number = String(el("volte-number")?.value || "").trim();
       const password = String(el("volte-password")?.value || "");
       let holdSec = Math.round(Number(el("volte-hold-sec")?.value ?? 10));
@@ -2572,6 +2585,7 @@
         el("volte-msg").textContent = `VoLTE error: ${msg}`;
         el("volte-trace").textContent = `VoLTE error: ${msg}`;
       } finally {
+        volteBusy = false;
         await fetch("/api/kpi/poll/start", { method: "POST" });
       }
     }
@@ -2960,7 +2974,8 @@
       const host = String(el("iperf-host")?.value || "").trim();
       const portParsed = parseIperfPortField(el("iperf-port")?.value);
       const durationSec = Number(el("iperf-duration")?.value || 1);
-      const parallelStreams = Number(el("iperf-parallel")?.value || 10);
+      const parallelStreamsUl = Number(el("iperf-parallel-ul")?.value || 1);
+      const parallelStreamsDl = Number(el("iperf-parallel-dl")?.value || 1);
       const direction = String(el("iperf-direction")?.value || "both").trim().toLowerCase();
       const protocol = String(el("iperf-protocol")?.value || "tcp").trim().toLowerCase();
       const bindIp = resolveIperfBindIp();
@@ -2981,8 +2996,13 @@
         iperfBusy = false;
         return;
       }
-      if (!Number.isFinite(parallelStreams) || parallelStreams < 1 || parallelStreams > 64 || parallelStreams !== Math.trunc(parallelStreams)) {
-        el("iperf-msg").textContent = "Parallel streams must be an integer 1..64.";
+      if (!Number.isFinite(parallelStreamsUl) || parallelStreamsUl < 1 || parallelStreamsUl > 64 || parallelStreamsUl !== Math.trunc(parallelStreamsUl)) {
+        el("iperf-msg").textContent = "UL parallel streams must be an integer 1..64.";
+        iperfBusy = false;
+        return;
+      }
+      if (!Number.isFinite(parallelStreamsDl) || parallelStreamsDl < 1 || parallelStreamsDl > 64 || parallelStreamsDl !== Math.trunc(parallelStreamsDl)) {
+        el("iperf-msg").textContent = "DL parallel streams must be an integer 1..64.";
         iperfBusy = false;
         return;
       }
@@ -3008,6 +3028,7 @@
         el("iperf-msg").textContent = `Running iperf ${direction} test...`;
         el("iperf-trace").textContent = "Running...";
         const runOne = async (dir) => {
+          const streams = dir === "download" ? parallelStreamsDl : parallelStreamsUl;
           const body = {
             host,
             port: portParsed.port,
@@ -3015,7 +3036,7 @@
             direction: dir,
             protocol,
             mobile_only: true,
-            parallel_streams: Math.trunc(parallelStreams)
+            parallel_streams: Math.trunc(streams)
           };
           if (portParsed.port_range_max != null) body.port_range_max = portParsed.port_range_max;
           if (bindIp) body.bind_ip = bindIp;
@@ -3108,10 +3129,16 @@
         }
         while (lines.length && !String(lines[lines.length - 1]).trim()) lines.pop();
         el("iperf-trace").textContent = lines.join("\n");
+        iperfEventHistory.push({ t: Date.now(), ok: true });
+        pruneHistoryByAge(iperfEventHistory);
+        drawIperfChart();
       } catch (e) {
         const msg = String(e?.message || e || "Iperf test failed");
         el("iperf-msg").textContent = `Iperf error: ${msg}`;
         el("iperf-trace").textContent = `Iperf error: ${msg}`;
+        iperfEventHistory.push({ t: Date.now(), ok: false });
+        pruneHistoryByAge(iperfEventHistory);
+        drawIperfChart();
       } finally {
         iperfBusy = false;
       }
@@ -3249,6 +3276,9 @@
         } else {
           drawPhGauges();
         }
+        phEventHistory.push({ t: Date.now(), ok: true });
+        pruneHistoryByAge(phEventHistory);
+        drawPhSweepChart();
         const rcv = j.received != null ? j.received : "-";
         el("ph-msg").textContent = `ICMP sweep OK: ${host}, ${j.count} probes, ${rcv} replies, avg ${lastPhAvgMs != null ? `${lastPhAvgMs.toFixed(2)} ms` : "-"}, jitter ${lastPhJitMs != null ? `${lastPhJitMs.toFixed(2)} ms` : "-"}`;
         const cmd = Array.isArray(j.command) ? j.command.join(" ") : "-";
@@ -3258,6 +3288,9 @@
         const msg = String(e?.message || e || "ICMP ping sweep failed");
         el("ph-msg").textContent = `ICMP sweep error: ${msg}`;
         el("ph-trace").textContent = `ICMP sweep error: ${msg}`;
+        phEventHistory.push({ t: Date.now(), ok: false });
+        pruneHistoryByAge(phEventHistory);
+        drawPhSweepChart();
       } finally {
         pingSweepBusy = false;
       }
@@ -3644,7 +3677,7 @@
       ctx.fillRect(0, 0, w, h);
 
       const all = [...iperfDlHistory, ...iperfUlHistory];
-      if (!all.length) {
+      if (!all.length && !iperfEventHistory.length) {
         ctx.fillStyle = "#777";
         ctx.font = "12px Arial";
         ctx.fillText("No iperf samples yet", 12, 24);
@@ -3652,8 +3685,10 @@
       }
 
       const values = all.map((p) => Number(p?.v)).filter((x) => Number.isFinite(x));
-      const minV = Math.min(...values);
-      const maxV = Math.max(...values);
+      const minV = values.length ? Math.min(...values) : 0;
+      const maxV = values.length ? Math.max(...values) : 0;
+      // no-data label (events exist but no throughput samples yet) — drawn after axes are set up
+      const _showNoSamplesLabel = !all.length;
       const pad = Math.max(1, (maxV - minV) * 0.15);
       const yMin = 0;
       const yMax = Math.max(maxV + pad, 1);
@@ -3715,8 +3750,33 @@
         });
       };
 
+      if (_showNoSamplesLabel) {
+        ctx.fillStyle = "#555";
+        ctx.font = "12px Arial";
+        ctx.textAlign = "left";
+        ctx.fillText("No iperf samples yet", 12, 24);
+      }
+
       drawSeries(iperfDlHistory, "#00e5ff", "#8cf7ff");
       drawSeries(iperfUlHistory, "#ffb86c", "#ffd7ad");
+
+      // Pass/fail status strip along the bottom of the chart
+      if (iperfEventHistory.length) {
+        const evSorted = [...iperfEventHistory].sort((a, b) => a.t - b.t);
+        ctx.lineWidth = 3;
+        ctx.setLineDash([]);
+        for (let i = 0; i < evSorted.length; i++) {
+          const ev = evSorted[i];
+          const hx = Math.max(x0, xFor(ev));
+          const hxEnd = i + 1 < evSorted.length ? Math.min(x1, xFor(evSorted[i + 1])) : x1;
+          if (hx > x1 || hxEnd < x0) continue;
+          ctx.strokeStyle = ev.ok ? "#00e676" : "#ff5252";
+          ctx.beginPath();
+          ctx.moveTo(hx, y0);
+          ctx.lineTo(hxEnd, y0);
+          ctx.stroke();
+        }
+      }
 
       // Legend
       ctx.font = "11px Arial";
@@ -3913,6 +3973,24 @@
 
       drawSeries(phAvgHistory, "#7cffd4", "#c6fff0");
       drawSeries(phJitHistory, "#ff9edb", "#ffd6ef");
+
+      // Pass/fail status strip along the bottom of the chart
+      if (phEventHistory.length) {
+        const evSorted = [...phEventHistory].sort((a, b) => a.t - b.t);
+        ctx.lineWidth = 3;
+        ctx.setLineDash([]);
+        for (let i = 0; i < evSorted.length; i++) {
+          const ev = evSorted[i];
+          const hx = Math.max(x0, xFor(ev));
+          const hxEnd = i + 1 < evSorted.length ? Math.min(x1, xFor(evSorted[i + 1])) : x1;
+          if (hx > x1 || hxEnd < x0) continue;
+          ctx.strokeStyle = ev.ok ? "#00e676" : "#ff5252";
+          ctx.beginPath();
+          ctx.moveTo(hx, y0);
+          ctx.lineTo(hxEnd, y0);
+          ctx.stroke();
+        }
+      }
 
       ctx.font = "11px Arial";
       ctx.fillStyle = "#7cffd4";
@@ -6195,10 +6273,12 @@
       iperfHistory.length = 0;
       iperfDlHistory.length = 0;
       iperfUlHistory.length = 0;
+      iperfEventHistory.length = 0;
       lastIperfDlMbps = null;
       lastIperfUlMbps = null;
       phAvgHistory.length = 0;
       phJitHistory.length = 0;
+      phEventHistory.length = 0;
       lastPhAvgMs = null;
       lastPhJitMs = null;
       rfHistory.rsrp.length = 0;
@@ -6351,7 +6431,8 @@
           host: _trVal("iperf-host"),
           port: _trVal("iperf-port"),
           duration: _trVal("iperf-duration"),
-          parallel: _trVal("iperf-parallel"),
+          parallel_ul: _trVal("iperf-parallel-ul"),
+          parallel_dl: _trVal("iperf-parallel-dl"),
           connect_timeout_sec: _trVal("iperf-connect-timeout"),
           direction: _trVal("iperf-direction"),
           protocol: _trVal("iperf-protocol"),
@@ -6478,6 +6559,17 @@
       const unlockRun = String(el("test-runner-unlock")?.value || "").trim();
       if (!unlockRun) {
         if (msg) msg.textContent = "Enter unlock password (same as Allow Data) before running a test.";
+        return;
+      }
+      // Pre-flight: block if any manual tool is currently active
+      const activeTools = [];
+      if (iperfBusy)        activeTools.push("iperf test");
+      if (iperfSweepActive) activeTools.push("iperf continuous sweep");
+      if (pingSweepBusy)    activeTools.push("ping sweep");
+      if (phRepeatTimer)    activeTools.push("ping auto-repeat");
+      if (volteBusy)        activeTools.push("VoLTE call test");
+      if (activeTools.length) {
+        if (msg) msg.textContent = `Cannot start — please wait for these to finish first: ${activeTools.join(", ")}.`;
         return;
       }
       if (msg) msg.textContent = "Running…";
@@ -6713,6 +6805,31 @@
         if (pNote) pNote.textContent = proto.value === "udp" ? "Recommend 1 stream for UDP — multiple flows cause self-interference on mobile links." : "";
       });
       update();
+
+      // Show/hide DL stream row and relabel UL row based on direction
+      (function () {
+        const dirSel = el("iperf-direction");
+        const ulRow  = el("iperf-parallel-ul-row");
+        const dlRow  = el("iperf-parallel-dl-row");
+        const ulLbl  = el("iperf-parallel-ul-label");
+        function syncParallelRows() {
+          const dir = dirSel?.value || "both";
+          if (dir === "both") {
+            if (ulLbl) ulLbl.textContent = "UL Parallel streams (-P):";
+            if (ulRow) ulRow.style.display = "";
+            if (dlRow) dlRow.style.display = "";
+          } else if (dir === "download") {
+            if (ulRow) ulRow.style.display = "none";
+            if (dlRow) dlRow.style.display = "";
+          } else {
+            if (ulLbl) ulLbl.textContent = "Parallel streams (-P):";
+            if (ulRow) ulRow.style.display = "";
+            if (dlRow) dlRow.style.display = "none";
+          }
+        }
+        if (dirSel) dirSel.addEventListener("change", syncParallelRows);
+        syncParallelRows();
+      })();
     })();
   </script>
 </body>

@@ -61,7 +61,7 @@ from app.state import engine, kpi_runtime
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "3.2"
+APP_VERSION = "3.4"
 
 
 _kpi_task: asyncio.Task[None] | None = None
@@ -3316,7 +3316,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                         mobile_only=bool(cfg["mobile_only"]),
                         bind_ip=None,
                         bitrate_limit_mbps=lim_f,
-                        parallel_streams=int(cfg["parallel_streams"]),
+                        parallel_streams=int(cfg.get("parallel_streams_dl") or cfg["parallel_streams"]),
                         connect_timeout_sec=_iperf_connect_timeout_for_profile(cfg),
                     )
                 )
@@ -3338,7 +3338,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                         mobile_only=bool(cfg["mobile_only"]),
                         bind_ip=None,
                         bitrate_limit_mbps=lim_f,
-                        parallel_streams=int(cfg["parallel_streams"]),
+                        parallel_streams=int(cfg.get("parallel_streams_ul") or cfg["parallel_streams"]),
                         connect_timeout_sec=_iperf_connect_timeout_for_profile(cfg),
                     )
                 )
@@ -3350,6 +3350,8 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                 prm_raw = cfg.get("port_range_max")
                 prm_i = None if prm_raw is None or prm_raw == "" else int(prm_raw)
                 conn_to = _iperf_connect_timeout_for_profile(cfg)
+                ps_dl = int(cfg.get("parallel_streams_dl") or cfg["parallel_streams"])
+                ps_ul = int(cfg.get("parallel_streams_ul") or cfg["parallel_streams"])
                 j_dl = await tools_iperf_test(
                     IperfTestBody(
                         host=str(cfg["host"]),
@@ -3361,7 +3363,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                         mobile_only=bool(cfg["mobile_only"]),
                         bind_ip=None,
                         bitrate_limit_mbps=lim_f,
-                        parallel_streams=int(cfg["parallel_streams"]),
+                        parallel_streams=ps_dl,
                         connect_timeout_sec=conn_to,
                     )
                 )
@@ -3375,7 +3377,8 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                         "host": str(j_dl.get("host") or cfg.get("host") or ""),
                         "port": int(j_dl.get("port") or cfg.get("port") or 0),
                         "duration_sec": int(cfg["duration_sec"]),
-                        "parallel_streams": int(cfg["parallel_streams"]),
+                        "parallel_streams_dl": ps_dl,
+                        "parallel_streams_ul": ps_ul,
                         "protocol": str(cfg.get("protocol") or "tcp").lower(),
                         "mobile_only": bool(cfg["mobile_only"]),
                         "connect_timeout_sec": conn_to,
@@ -3397,7 +3400,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                             mobile_only=bool(cfg["mobile_only"]),
                             bind_ip=None,
                             bitrate_limit_mbps=lim_f,
-                            parallel_streams=int(cfg["parallel_streams"]),
+                            parallel_streams=ps_ul,
                             connect_timeout_sec=conn_to,
                         )
                     )
@@ -3411,7 +3414,8 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                         "port": used_port,
                         "port_range_requested": j_dl.get("port_range_requested"),
                         "duration_sec": int(cfg["duration_sec"]),
-                        "parallel_streams": int(cfg["parallel_streams"]),
+                        "parallel_streams_dl": ps_dl,
+                        "parallel_streams_ul": ps_ul,
                         "protocol": str(cfg.get("protocol") or "tcp").lower(),
                         "mobile_only": bool(cfg["mobile_only"]),
                         "connect_timeout_sec": conn_to,

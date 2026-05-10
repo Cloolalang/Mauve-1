@@ -710,7 +710,8 @@ def _empty_iperf_tool_cols() -> dict[str, str]:
             "iperf_host",
             "iperf_port",
             "iperf_duration_sec",
-            "iperf_parallel_streams",
+            "iperf_parallel_streams_ul",
+            "iperf_parallel_streams_dl",
             "iperf_connect_timeout_sec",
             "iperf_protocol",
             "iperf_bitrate_limit_mbps",
@@ -776,18 +777,26 @@ def iperf_tool_csv_columns(cfg: dict[str, Any], tool_result: dict[str, Any], tes
         direction = "download_upload"
         dl_mbps = _fmt_mbps_str(tool_result.get("throughput_mbps_dl"))
         ul_mbps = _fmt_mbps_str(tool_result.get("throughput_mbps_ul"))
+        ps_ul = str(tool_result.get("parallel_streams_ul") or "")
+        ps_dl = str(tool_result.get("parallel_streams_dl") or "")
     elif test_type == "iperf_download":
         direction = str(tool_result.get("direction") or "download")
         dl_mbps = _fmt_mbps_str(tool_result.get("throughput_mbps"))
         ul_mbps = ""
+        ps_ul = ""
+        ps_dl = str(tool_result.get("parallel_streams") or "")
     elif test_type == "iperf_upload":
         direction = str(tool_result.get("direction") or "upload")
         dl_mbps = ""
         ul_mbps = _fmt_mbps_str(tool_result.get("throughput_mbps"))
+        ps_ul = str(tool_result.get("parallel_streams") or "")
+        ps_dl = ""
     else:
         direction = str(tool_result.get("direction") or test_type.replace("iperf_", ""))
         dl_mbps = ""
         ul_mbps = _fmt_mbps_str(tool_result.get("throughput_mbps"))
+        ps_ul = str(tool_result.get("parallel_streams") or "")
+        ps_dl = ""
     ct = tool_result.get("connect_timeout_sec")
     ct_s = ""
     if ct is not None and str(ct).strip() != "":
@@ -800,7 +809,8 @@ def iperf_tool_csv_columns(cfg: dict[str, Any], tool_result: dict[str, Any], tes
         "iperf_host": str(tool_result.get("host") or ""),
         "iperf_port": str(tool_result.get("port") or ""),
         "iperf_duration_sec": str(tool_result.get("duration_sec") or ""),
-        "iperf_parallel_streams": str(tool_result.get("parallel_streams") or ""),
+        "iperf_parallel_streams_ul": ps_ul,
+        "iperf_parallel_streams_dl": ps_dl,
         "iperf_connect_timeout_sec": ct_s,
         "iperf_protocol": str(tool_result.get("protocol") or ""),
         "iperf_bitrate_limit_mbps": "" if cfg.get("bitrate_limit_mbps") is None else str(cfg.get("bitrate_limit_mbps")),
@@ -893,7 +903,8 @@ def build_csv_row(
         iperf_cols.get("iperf_host", ""),
         iperf_cols.get("iperf_port", ""),
         iperf_cols.get("iperf_duration_sec", ""),
-        iperf_cols.get("iperf_parallel_streams", ""),
+        iperf_cols.get("iperf_parallel_streams_ul", ""),
+        iperf_cols.get("iperf_parallel_streams_dl", ""),
         iperf_cols.get("iperf_connect_timeout_sec", ""),
         iperf_cols.get("iperf_protocol", ""),
         iperf_cols.get("iperf_bitrate_limit_mbps", ""),
@@ -966,7 +977,8 @@ CSV_HEADER = [
     "iperf_host",
     "iperf_port",
     "iperf_duration_sec",
-    "iperf_parallel_streams",
+    "iperf_parallel_streams_ul",
+    "iperf_parallel_streams_dl",
     "iperf_connect_timeout_sec",
     "iperf_protocol",
     "iperf_bitrate_limit_mbps",

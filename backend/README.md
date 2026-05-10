@@ -1,6 +1,19 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 3.2** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.2**).
+**Version 3.4** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.4**).
+
+Notes for **v3.4**:
+
+- **Separate UL / DL parallel streams**: `iperf_download_upload` runner now resolves `parallel_streams_dl` and `parallel_streams_ul` from the profile independently (falls back to `parallel_streams`). Combined result dict stores both. CSV columns split into `iperf_parallel_streams_ul` and `iperf_parallel_streams_dl`.
+- **Ookla-equivalent profiles**: `ookla_equiv_dl`, `ookla_equiv_ul`, `ookla_equiv_dlul` — 10 s duration, TCP, 3 streams DL / 1 stream UL.
+- **Test runner pre-flight check**: `runTestRunnerProfile()` now blocks and reports if iperf, iperf sweep, ping sweep, ping auto-repeat, or VoLTE test is active at run start.
+- **Pass/fail status strip on charts**: coloured 3 px baseline strip (green/red) on iperf and ping trend charts replaces the earlier dashed vertical markers; clears with "Clear All Charts".
+- OpenAPI / page header: **v3.4**.
+
+Notes for **v3.3**:
+
+- **Test-complete / fail markers on iperf & ping charts**: after every iperf test and every ICMP ping sweep, a coloured status strip is drawn along the bottom of the respective trend chart — green on success, red on error. Renders from the very first result even before any throughput samples exist. Markers age out with the chart's rolling time window.
+- OpenAPI / page header: **v3.3**.
 
 Notes for **v3.2**:
 

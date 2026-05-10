@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "name": "smoke_iperf_dl",
+  "name": "ookla_equiv_dl",
   "project_name": "Example",
   "test_location": "",
   "engineer": "",
@@ -11,10 +11,10 @@
     "host": "iperf.as42831.net",
     "port": 5300,
     "port_range_max": 5400,
-    "duration_sec": 5,
+    "duration_sec": 10,
     "protocol": "tcp",
-    "parallel_streams": 10,
-    "parallel_streams_dl": 10,
+    "parallel_streams": 3,
+    "parallel_streams_dl": 3,
     "connect_timeout_sec": 10,
     "bitrate_limit_mbps": 0,
     "mobile_only": false

@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 3.2**
+**Version 3.4**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v3.2** is shown in the page header with a **Lord Kelvin** quotation on measurement).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v3.4** is shown in the page header with a **Lord Kelvin** quotation on measurement).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -132,6 +132,17 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
 
+**Changes in v3.4**
+
+- **Separate UL / DL parallel streams**: iperf manual test UI now has independent stream-count fields for upload and download (previously a single shared value). The automated test runner and CSV output (`iperf_parallel_streams_ul`, `iperf_parallel_streams_dl`) also track each direction independently. All bundled smoke iperf profiles updated with explicit `parallel_streams_ul` / `parallel_streams_dl` fields.
+- **Ookla-equivalent test profiles**: three new bundled profiles — `ookla_equiv_dl` (3 streams DL, 10 s), `ookla_equiv_ul` (1 stream UL, 10 s), `ookla_equiv_dlul` (3 DL / 1 UL, 10 s) — configured to produce results more comparable to consumer speed tests.
+- **Test runner pre-flight conflict check**: starting an automated run is now blocked if any manual tool is active (iperf test, iperf continuous sweep, ping sweep, ping auto-repeat, or VoLTE call test), with a clear message listing what needs to finish first.
+- **Pass/fail status strip on iperf & ping charts**: replaced the dashed vertical line markers with a 3 px coloured line along the chart baseline — green after a passing result, red after a failure, updating in real time and clearing with "Clear All Charts".
+
+**Changes in v3.3**
+
+- **Test-complete / fail chart markers**: iperf throughput and ICMP ping trend charts now draw a coloured status strip along the bottom — green on pass, red on fail — visible from the very first test result (including failure-only sessions before any throughput data exists).
+
 **Changes in v3.2**
 
 - **iperf3 binary upgraded**: bundled Windows binary replaced from 3.1.1 (2015, Cygwin 32-bit) to **3.21** (Cygwin 64-bit). Fixes TCP bitrate pacing on iperf3 ≥ 3.2 servers and enables `--connect-timeout`.
@@ -234,6 +245,47 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
   - **Bottom**: **aggregated DL BW (MHz)** over time: **striped** while CA (SCC) is active; **solid** primary colour when the modem returns to **PCC-only** after CA release so the trace **drops** to single-carrier bandwidth instead of freezing on the last CA value.
   - Hover tooltips on both panes (same RF-style tooltips as other metric charts).
 - **iperf3**: dashboard default **parallel streams** (**`-P`**) is **10** (range 1–64).
+
+**iperf throughput vs consumer speed tests (e.g. Ookla Speedtest)**
+
+iperf3 with multiple parallel streams will typically report significantly higher throughput than a consumer speed test such as Ookla. This is expected — they measure different things:
+
+| Factor | iperf3 (10 streams) | Ookla Speedtest |
+|---|---|---|
+| **Server location** | Fixed UK test server (your choice) | Auto-selected nearest server |
+| **Parallel streams** | 10 aggressive TCP flows | Fewer streams with congestion-aware back-off |
+| **Protocol overhead** | Raw TCP, minimal overhead | HTTPS + TLS encryption |
+| **Congestion control** | None — fills the pipe as fast as possible | Actively managed for a "fair" user result |
+| **What it measures** | Maximum achievable raw capacity | Realistic end-user throughput |
+
+Key reasons iperf reads higher on a mobile connection:
+
+- **10 TCP streams overwhelm per-flow shaping** — mobile networks often police individual flows, not the aggregate. Ten simultaneous streams circumvent this and collectively saturate the uplink scheduler.
+- **Ookla measures user-experience speed** — connection setup time, TLS handshake, and deliberate back-off logic are included, making the result more representative of a real download.
+- **LTE/5G uplink scheduling** — the base station assigns uplink grants per UE; multiple TCP flows compete for grants differently from a single measured stream.
+
+To get a result closer to Ookla, use **1 parallel stream** (`-P 1`). The iperf figure will drop substantially and be much more comparable. The 10-stream default is useful for stressing raw capacity and diagnosing network ceiling, not for like-for-like comparison with consumer tools.
+
+**Effect of Windows background traffic on throughput tests**
+
+All traffic from the PC — iperf3 and background apps — flows through the same modem radio bearer. Background activity doesn't just add noise; it directly competes for the same uplink/downlink scheduler grants, so it can meaningfully skew results.
+
+| Background activity | Typical impact |
+|---|---|
+| Idle Windows processes, DNS, telemetry | Negligible (< 0.1 Mbps) |
+| Antivirus signature checks | Occasional short bursts, rarely sustained |
+| Windows Update downloading | 5–50+ Mbps — significant competition for scheduler grants |
+| OneDrive / cloud sync | 1–20 Mbps in bursts depending on pending uploads |
+| Concurrent download, video stream, or speed test | Will corrupt results |
+
+Upload tests are most sensitive because cellular uplink capacity (typically 5–30 Mbps on LTE/NSA) means background traffic is a proportionally larger share.
+
+**Recommended steps before a test session:**
+
+1. **Pause OneDrive sync** — right-click the system tray icon → *Pause syncing*
+2. **Disable Windows Update background delivery** — Settings → Windows Update → Advanced options → Delivery Optimisation → off
+3. Run the same test back-to-back twice; if results vary > 10%, something is competing
+4. Use the **speed limit** field to run at a controlled fraction of line speed — any background bleed becomes immediately obvious (e.g. cap to 5 Mbps and observe reported throughput exceeding it)
 
 **Changes in v1.17**
 
