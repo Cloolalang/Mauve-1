@@ -7330,6 +7330,35 @@
         const yFor = invertY
           ? (v) => y1t + ((Number(v) - yMin) / span) * (y0t - y1t)
           : (v) => y0t - ((Number(v) - yMin) / span) * (y0t - y1t);
+
+        // Threshold line — drawn in stacked and fixed modes; also in normalize if within range
+        if (kpiDef.threshold != null && Number.isFinite(kpiDef.threshold)) {
+          const yTh = yFor(kpiDef.threshold);
+          // Only draw if the line falls inside the band/chart area
+          if (yTh >= y1t - 1 && yTh <= y0t + 1) {
+            const yThCl = Math.max(y1t, Math.min(y0t, yTh));
+            ctx.save();
+            ctx.strokeStyle = color;
+            ctx.globalAlpha = 0.45;
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath(); ctx.moveTo(x0, yThCl); ctx.lineTo(x1, yThCl); ctx.stroke();
+            ctx.restore();
+            // Small label on right edge showing threshold value + unit
+            const thLabel = `${kpiDef.threshold}${kpiDef.unit ? " " + kpiDef.unit : ""}`;
+            ctx.font = "9px Arial";
+            ctx.textAlign = "right";
+            const thLabelY = Math.max(y1t + 8, Math.min(y0t - 2, yThCl - 2));
+            ctx.fillStyle = "rgba(16,16,16,0.7)";
+            ctx.fillRect(x1 - ctx.measureText(thLabel).width - 5, thLabelY - 8, ctx.measureText(thLabel).width + 4, 11);
+            ctx.fillStyle = color;
+            ctx.globalAlpha = 0.7;
+            ctx.fillText(thLabel, x1 - 3, thLabelY);
+            ctx.globalAlpha = 1;
+            ctx.textAlign = "left";
+          }
+        }
+
         // Draw per-segment so each segment is coloured by the cell active at p1.
         // This makes handovers visible as a colour change mid-trace.
         ctx.lineWidth = 2;
