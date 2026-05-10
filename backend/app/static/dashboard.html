@@ -954,9 +954,9 @@
       <div id="corr-trace-selects" style="display:grid; grid-template-columns:repeat(3,1fr); gap:6px 16px; margin-bottom:10px;"></div>
       <div class="corr-controls">
         <button id="btn-corr-gap-mode" style="white-space:nowrap;">Time-roll gaps: OFF</button>
-        <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6; cursor:pointer;" title="When a test fails, push v=0 into the iperf/ping history so the correlator trace drops to zero instead of showing a gap">
+        <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6; cursor:pointer;" title="When a test fails, push v=9999 into the iperf/ping history so the correlator trace spikes high instead of showing a gap">
           <input id="corr-zero-on-fail" type="checkbox" style="accent-color:#ff79c6;" />
-          Record 0 on test fail
+          Record 9999 on test fail
         </label>
         <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6;">
           Window
@@ -3311,8 +3311,8 @@
             const _ft = Date.now();
             const _fc = (Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci))
               ? `${currentServingEarfcn}/${currentServingPci}` : undefined;
-            const _fz = (arr) => { arr.push({ t: _ft, v: 0, ...(_fc ? { c: _fc } : {}) }); pruneHistoryByAge(arr, _ft); };
-            iperfHistory.push({ t: _ft, v: 0 });
+            const _fz = (arr) => { arr.push({ t: _ft, v: 9999, ...(_fc ? { c: _fc } : {}) }); pruneHistoryByAge(arr, _ft); };
+            iperfHistory.push({ t: _ft, v: 9999 });
             if (direction === "download" || direction === "both") { _fz(iperfDlHistory); _fz(iperfDlSeHistory); }
             if (direction === "upload"   || direction === "both") { _fz(iperfUlHistory); _fz(iperfUlSeHistory); }
           }
@@ -3323,13 +3323,13 @@
         el("iperf-trace").textContent = `Iperf error: ${msg}`;
         iperfEventHistory.push({ t: Date.now(), ok: false });
         pruneHistoryByAge(iperfEventHistory);
-        // Optionally push v:0 so correlator traces drop to zero on failure
+        // Optionally push v:9999 so correlator traces spike high on failure
         if (corrZeroOnFail) {
           const _ft = Date.now();
           const _fc = (Number.isFinite(currentServingEarfcn) && Number.isFinite(currentServingPci))
             ? `${currentServingEarfcn}/${currentServingPci}` : undefined;
-          const _fz = (arr) => { arr.push({ t: _ft, v: 0, ...(_fc ? { c: _fc } : {}) }); pruneHistoryByAge(arr, _ft); };
-          iperfHistory.push({ t: _ft, v: 0 });
+          const _fz = (arr) => { arr.push({ t: _ft, v: 9999, ...(_fc ? { c: _fc } : {}) }); pruneHistoryByAge(arr, _ft); };
+          iperfHistory.push({ t: _ft, v: 9999 });
           if (direction === "download" || direction === "both") { _fz(iperfDlHistory); _fz(iperfDlSeHistory); }
           if (direction === "upload"   || direction === "both") { _fz(iperfUlHistory); _fz(iperfUlSeHistory); }
         }
@@ -3496,8 +3496,8 @@
           pruneHistoryByAge(phEventHistory);
           if (corrZeroOnFail) {
             const _ft = Date.now();
-            phAvgHistory.push({ t: _ft, v: 0 }); pruneHistoryByAge(phAvgHistory, _ft);
-            phJitHistory.push({ t: _ft, v: 0 }); pruneHistoryByAge(phJitHistory, _ft);
+            phAvgHistory.push({ t: _ft, v: 9999 }); pruneHistoryByAge(phAvgHistory, _ft);
+            phJitHistory.push({ t: _ft, v: 9999 }); pruneHistoryByAge(phJitHistory, _ft);
           }
           drawPhSweepChart();
           return;
@@ -3506,11 +3506,11 @@
         el("ph-trace").textContent = `ICMP sweep error: ${msg}`;
         phEventHistory.push({ t: Date.now(), ok: false });
         pruneHistoryByAge(phEventHistory);
-        // Optionally push v:0 so correlator traces drop to zero on failure
+        // Optionally push v:9999 so correlator traces spike high on failure
         if (corrZeroOnFail) {
           const _ft = Date.now();
-          phAvgHistory.push({ t: _ft, v: 0 }); pruneHistoryByAge(phAvgHistory, _ft);
-          phJitHistory.push({ t: _ft, v: 0 }); pruneHistoryByAge(phJitHistory, _ft);
+          phAvgHistory.push({ t: _ft, v: 9999 }); pruneHistoryByAge(phAvgHistory, _ft);
+          phJitHistory.push({ t: _ft, v: 9999 }); pruneHistoryByAge(phJitHistory, _ft);
         }
         drawPhSweepChart();
       } finally {
@@ -7092,7 +7092,7 @@
     let corrChartWindowMs = 600 * 1000;
     let corrTraceSmooth       = [false, false, false, false, false, false];
     let corrTraceSmoothWindow = [10, 10, 10, 10, 10, 10];
-    let corrZeroOnFail        = false;  // push v:0 to iperf/ping histories on test failure
+    let corrZeroOnFail        = false;  // push v:9999 to iperf/ping histories on test failure
 
     applyChartWindowSec(Number(el("chart-window-select")?.value || 600));
     updateChartGapButton();
