@@ -566,6 +566,8 @@ def aggregate_snapshots(samples: list[dict[str, Any]]) -> dict[str, Any]:
     nr_arfcn_keys: list[str] = []
     nr_pci_keys: list[str] = []
     nr_dl_bw_vals: list[float] = []
+    lte_dl_bw_vals: list[float] = []
+    lte_ul_bw_vals: list[float] = []
     registration_state_lines: list[str] = []
 
     for s in samples:
@@ -586,6 +588,12 @@ def aggregate_snapshots(samples: list[dict[str, Any]]) -> dict[str, Any]:
             rsrq_vals.append(q)
         if si is not None:
             sinr_vals.append(si)
+        lte_dl_bw = _finite_num(lte.get("dl_bw"))
+        lte_ul_bw = _finite_num(lte.get("ul_bw"))
+        if lte_dl_bw is not None and lte_dl_bw > 0:
+            lte_dl_bw_vals.append(lte_dl_bw)
+        if lte_ul_bw is not None and lte_ul_bw > 0:
+            lte_ul_bw_vals.append(lte_ul_bw)
 
         qca = s.get("qcainfo") if isinstance(s.get("qcainfo"), dict) else {}
         ca_m = _finite_num(qca.get("dl_bw_aggregate_mhz"))
@@ -696,6 +704,8 @@ def aggregate_snapshots(samples: list[dict[str, Any]]) -> dict[str, Any]:
         "nr5g_primary_arfcn_most_common": _most_common_nonempty_str(nr_arfcn_keys),
         "nr5g_primary_pci_most_common": _most_common_nonempty_str(nr_pci_keys),
         "nr5g_primary_dl_bw_mhz_avg": avg(nr_dl_bw_vals),
+        "lte_pcell_dl_bw_mhz_avg": avg(lte_dl_bw_vals),
+        "lte_pcell_ul_bw_mhz_avg": avg(lte_ul_bw_vals),
     }
 
 
@@ -769,6 +779,18 @@ def ping_tool_csv_columns(cfg: dict[str, Any], tool_result: dict[str, Any]) -> d
 def _fmt_mbps_str(mbps: Any) -> str:
     if isinstance(mbps, (int, float)) and float(mbps) == float(mbps):
         return str(round(float(mbps), 3)).rstrip("0").rstrip(".")
+    return ""
+
+
+def _fmt_se_bps_hz(mbps_str: str, bw_mhz_str: str) -> str:
+    """Spectral efficiency in bps/Hz: Mbps / MHz (units cancel to bps/Hz)."""
+    try:
+        mbps = float(mbps_str)
+        bw_mhz = float(bw_mhz_str)
+        if bw_mhz > 0 and mbps >= 0:
+            return str(round(mbps / bw_mhz, 4))
+    except (TypeError, ValueError):
+        pass
     return ""
 
 
@@ -876,6 +898,11 @@ def build_csv_row(
     agg: dict[str, str],
 ) -> list[str]:
     """Column order: lab metadata, iteration settings, active tool results, then RF KPI aggregates."""
+    # Spectral efficiency: prefer CA aggregate BW for DL, LTE PCELL UL BW for UL
+    _dl_bw = agg.get("ca_aggregated_dl_bw_mhz_avg", "") or agg.get("lte_pcell_dl_bw_mhz_avg", "")
+    _ul_bw = agg.get("lte_pcell_ul_bw_mhz_avg", "") or agg.get("lte_pcell_dl_bw_mhz_avg", "") or _dl_bw
+    _se_dl = _fmt_se_bps_hz(iperf_cols.get("iperf_throughput_dl_mbps", ""), _dl_bw)
+    _se_ul = _fmt_se_bps_hz(iperf_cols.get("iperf_throughput_ul_mbps", ""), _ul_bw)
     return [
         project_name or "",
         test_location or "",
@@ -912,6 +939,8 @@ def build_csv_row(
         iperf_cols.get("iperf_direction", ""),
         iperf_cols.get("iperf_throughput_dl_mbps", ""),
         iperf_cols.get("iperf_throughput_ul_mbps", ""),
+        _se_dl,
+        _se_ul,
         volte_cols.get("volte_number", ""),
         volte_cols.get("volte_connected", ""),
         volte_cols.get("volte_answer_delay_sec", ""),
@@ -986,6 +1015,8 @@ CSV_HEADER = [
     "iperf_direction",
     "iperf_throughput_dl_mbps",
     "iperf_throughput_ul_mbps",
+    "iperf_spectral_efficiency_dl_bps_hz",
+    "iperf_spectral_efficiency_ul_bps_hz",
     "volte_number",
     "volte_connected",
     "volte_answer_delay_sec",

@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 3.4**
+**Version 3.5**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v3.4** is shown in the page header with a **Lord Kelvin** quotation on measurement).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v3.5** is shown in the page header with a **Lord Kelvin** quotation on measurement).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -131,6 +131,14 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v3.5**
+
+- **Spectral efficiency KPI for iperf tests**: after each iperf run the dashboard now computes and displays **DL and UL spectral efficiency** (SE = throughput Mbps ÷ aggregated bandwidth MHz, result in **bps/Hz**). Bandwidth source priority: CA aggregated DL BW (`AT+QCAINFO`) → LTE serving-cell DL BW → NR primary DL BW for DL; LTE serving-cell UL BW for UL.
+- **SE gauges**: two new semi-circular gauges (**DL SE** in green, **UL SE** in yellow) appear in the *Iperf Latest Gauges* card, styled to match the existing throughput gauges. Scale auto-ranges from the session's peak SE value rounded to the nearest 0.5 bps/Hz.
+- **SE trend on the iperf chart**: the *Iperf Throughput Trend* chart now plots SE as **dashed series** on a **right Y-axis** (bps/Hz) alongside the solid throughput series (Mbps, left Y-axis). Chart title updated; hover tooltip includes SE values; legend shows all four series.
+- **SE in automated test CSV**: two new columns — `iperf_spectral_efficiency_dl_bps_hz` and `iperf_spectral_efficiency_ul_bps_hz` — added immediately after `iperf_throughput_ul_mbps` in every test runner result file.
+- **OpenAPI / page header**: **v3.5**.
 
 **Changes in v3.4**
 

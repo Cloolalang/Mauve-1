@@ -1,6 +1,14 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 3.4** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.4**).
+**Version 3.5** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.5**).
+
+Notes for **v3.5**:
+
+- **Spectral efficiency KPI** (`dashboard.html`, `test_runner.py`): SE computed as throughput (Mbps) ÷ aggregated bandwidth (MHz) = bps/Hz for DL and UL after every iperf run. Bandwidth resolved from `qcainfo.dl_bw_aggregate_mhz` (CA aggregate), falling back to `servingcell.lte.dl_bw` / `ul_bw`, then `nr_rf.primary.dl_bw`.
+- **SE gauges**: `drawSingleSeGauge()` — semi-circular canvas gauges for DL SE (green `#7cffb2`) and UL SE (yellow `#ffe066`) in the *Iperf Latest Gauges* card.
+- **SE trend chart** (dual Y-axis): `drawIperfChart()` extended with a right-axis bps/Hz scale; SE plotted as dashed series; `iperfDlSeHistory` / `iperfUlSeHistory` arrays track history and are pruned/reset with other iperf histories.
+- **CSV columns**: `iperf_spectral_efficiency_dl_bps_hz`, `iperf_spectral_efficiency_ul_bps_hz` added after `iperf_throughput_ul_mbps` in `CSV_HEADER` and `build_csv_row()`. `_fmt_se_bps_hz()` helper in `test_runner.py`. `summarize_kpi_samples` now also tracks `lte_pcell_dl_bw_mhz_avg` / `lte_pcell_ul_bw_mhz_avg` as internal fallback bandwidth sources.
+- OpenAPI / page header: **v3.5**.
 
 Notes for **v3.4**:
 

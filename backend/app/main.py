@@ -61,7 +61,7 @@ from app.state import engine, kpi_runtime
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "3.4"
+APP_VERSION = "3.5"
 
 
 _kpi_task: asyncio.Task[None] | None = None
@@ -1490,7 +1490,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="3.1",
+    version="3.5",
     lifespan=lifespan,
 )
 app.include_router(serial_routes.router)
