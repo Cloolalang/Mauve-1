@@ -974,9 +974,9 @@
                title="Auto-normalize: each trace fills 0–100% of its own visible range. Fixed range: traces scaled to catalog-defined absolute min/max. Stacked: each trace in its own horizontal band.">
           Scale
           <select id="corr-scale-mode" style="background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:3px 6px;">
-            <option value="normalize" selected>Auto-normalize</option>
+            <option value="normalize">Auto-normalize</option>
             <option value="fixed">Fixed range</option>
-            <option value="stacked">Stacked</option>
+            <option value="stacked" selected>Stacked</option>
           </select>
         </label>
       </div>
@@ -7102,7 +7102,9 @@
     let corrTraceSmooth       = [false, false, false, false, false, false];
     let corrTraceSmoothWindow = [10, 10, 10, 10, 10, 10];
     let corrZeroOnFail        = false;  // push v:9999 to iperf/ping histories on test failure
-    let corrScaleMode         = "normalize"; // "normalize" | "fixed" | "stacked"
+    let corrScaleMode         = "stacked";   // "normalize" | "fixed" | "stacked"
+    let corrTraceYMin         = [null, null, null, null, null, null]; // per-trace Y-axis min override (null = auto)
+    let corrTraceYMax         = [null, null, null, null, null, null]; // per-trace Y-axis max override (null = auto)
 
     applyChartWindowSec(Number(el("chart-window-select")?.value || 600));
     updateChartGapButton();
@@ -7208,6 +7210,9 @@
           const pad = Math.max(Math.abs(maxV - minV) * 0.08, 0.5);
           yMin = minV - pad; yMax = maxV + pad;
         }
+        // Per-trace Y overrides take priority over auto/fixed
+        if (corrTraceYMin[idx] !== null) yMin = corrTraceYMin[idx];
+        if (corrTraceYMax[idx] !== null) yMax = corrTraceYMax[idx];
         const span = Math.max(0.001, yMax - yMin);
         // Use the same EARFCN/PCI cell-key colour as the main RF charts.
         // colorForCellKey falls back to kpiDef.color when sample has no .c field
@@ -7555,6 +7560,39 @@
           if (corrTraceSmooth[i]) drawCorrChart();
         });
 
+        // Y-axis min/max override inputs
+        const yMinLbl = document.createElement("span");
+        yMinLbl.textContent = "↓";
+        yMinLbl.title = "Y-axis minimum (leave blank for auto)";
+        yMinLbl.style.cssText = "font-size:11px; color:#666; flex-shrink:0; cursor:default;";
+
+        const yMinIn = document.createElement("input");
+        yMinIn.type = "number"; yMinIn.placeholder = "auto";
+        yMinIn.title = "Y-axis minimum (leave blank for auto)";
+        yMinIn.style.cssText = "width:3.8em; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:5px; padding:2px 4px; font-size:11px; flex-shrink:0;";
+        if (corrTraceYMin[i] !== null) yMinIn.value = corrTraceYMin[i];
+        yMinIn.addEventListener("input", () => {
+          const v = parseFloat(yMinIn.value);
+          corrTraceYMin[i] = (yMinIn.value.trim() === "" || !Number.isFinite(v)) ? null : v;
+          drawCorrChart();
+        });
+
+        const yMaxLbl = document.createElement("span");
+        yMaxLbl.textContent = "↑";
+        yMaxLbl.title = "Y-axis maximum (leave blank for auto)";
+        yMaxLbl.style.cssText = "font-size:11px; color:#666; flex-shrink:0; cursor:default;";
+
+        const yMaxIn = document.createElement("input");
+        yMaxIn.type = "number"; yMaxIn.placeholder = "auto";
+        yMaxIn.title = "Y-axis maximum (leave blank for auto)";
+        yMaxIn.style.cssText = "width:3.8em; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:5px; padding:2px 4px; font-size:11px; flex-shrink:0;";
+        if (corrTraceYMax[i] !== null) yMaxIn.value = corrTraceYMax[i];
+        yMaxIn.addEventListener("input", () => {
+          const v = parseFloat(yMaxIn.value);
+          corrTraceYMax[i] = (yMaxIn.value.trim() === "" || !Number.isFinite(v)) ? null : v;
+          drawCorrChart();
+        });
+
         // Register dot so drawCorrChart() can push live cell colors to it
         corrTraceDotEls[i] = dot;
         // Set initial dot color from catalog
@@ -7566,6 +7604,10 @@
         wrap.appendChild(smoothCb);
         wrap.appendChild(smoothLbl);
         wrap.appendChild(smoothWin);
+        wrap.appendChild(yMinLbl);
+        wrap.appendChild(yMinIn);
+        wrap.appendChild(yMaxLbl);
+        wrap.appendChild(yMaxIn);
         container.appendChild(wrap);
       }
     })();
