@@ -61,7 +61,7 @@ from app.state import engine, kpi_runtime
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "3.5"
+APP_VERSION = "3.6"
 
 
 _kpi_task: asyncio.Task[None] | None = None

@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 3.5**
+**Version 3.6**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v3.5** is shown in the page header with a **Lord Kelvin** quotation on measurement).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v3.6** is shown in the page header with a **Lord Kelvin** quotation on measurement).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -131,6 +131,17 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v3.6**
+
+- **KPI Correlator chart** (new tab): a second browser tab — **Correlator** — hosts a full-width chart for analysing the relationship between any combination of KPIs over time. Key features:
+  - **6 simultaneous traces**, each with its own KPI dropdown (LTE, NR5G, Neighbours, Iperf, Ping). Traces default to `— none —` and can be set independently.
+  - **Per-trace smoothing**: each row has its own checkbox (≈) and rolling-average window size so individual traces can be smoothed without affecting others.
+  - **EARFCN/PCI cell-key colouring**: RF traces (RSRP, RSRQ, SINR…) use the same palette colours as the main dashboard charts, changing colour mid-trace at every handover so cell changes are immediately visible.
+  - **Normalised Y-axis** (0–100 % of each trace's own range): allows mixed-unit KPIs to be overlaid on the same plot for correlation analysis.
+  - **Time-roll gap mode**, chart window selector (60 s–60 m), hover crosshair with multi-trace tooltip showing actual values and timestamps for all active traces.
+  - **Sharp canvas rendering** via `devicePixelRatio`-aware buffer sizing — no stretch blur on wide screens or high-DPI displays.
+- **OpenAPI / page header**: **v3.6**.
 
 **Changes in v3.5**
 

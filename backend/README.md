@@ -1,6 +1,17 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 3.5** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.5**).
+**Version 3.6** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.6**).
+
+Notes for **v3.6**:
+
+- **KPI Correlator tab** (`dashboard.html`): new second browser tab with a full-width chart for multi-KPI correlation analysis.
+  - State: `corrKpiKeys[6]`, `corrTraceDotEls[6]`, `corrTraceSmooth[6]`, `corrTraceSmoothWindow[6]`, `corrCurrentTab`, `corrGapModeEnabled`, `corrChartWindowMs`.
+  - `CORR_KPI_CATALOG`: 24 KPI definitions mapping keys to history getters, catalog colours, units, and thresholds.
+  - `drawCorrChart()`: collects up to 6 active traces, normalises each to 0–100 % of its own windowed range, draws per-segment with `colorForCellKey(p1.c, kpiDef.color)` so handovers show as colour changes. Canvas buffer sized to `clientWidth × devicePixelRatio` with `ctx.setTransform(dpr,0,0,dpr,0,0)` for sharp rendering. Live value callouts clamp inside the chart boundary (flip left when near right edge).
+  - `buildCorrTraceSelects()`: dynamically creates 6 trace rows from the catalog — each row has a coloured dot (updated live to reflect current cell colour), KPI dropdown, smoothing checkbox (≈), and window-size input.
+  - Hoisting/TDZ fix: all six `let corr*` state variables are declared **before** `redrawAllCharts()` is called so `drawCorrChart()` (a hoisted function) never hits the Temporal Dead Zone.
+  - Scoping fix: entire correlator block is at the **top-level script scope** (not inside any nested IIFE) so `redrawAllCharts()` and `drawRfCharts()` can call `drawCorrChart()`.
+- OpenAPI / page header: **v3.6**.
 
 Notes for **v3.5**:
 
