@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 3.6**
+**Version 3.7**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v3.6** is shown in the page header with a **Lord Kelvin** quotation on measurement).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v3.7** is shown in the page header with a **Lord Kelvin** quotation on measurement).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -131,6 +131,11 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v3.7**
+
+- **Correlator "Record 0 on test fail" option**: new checkbox in the Correlator controls bar. When ticked, a failed iperf run pushes `v = 0` into `iperfDlHistory`, `iperfUlHistory`, `iperfDlSeHistory`, and/or `iperfUlSeHistory` (respecting the configured direction); a failed ping sweep pushes `v = 0` into `phAvgHistory` and `phJitHistory`. The correlator trace drops sharply to zero at the failure timestamp, making the RF-to-test-result correlation immediately visible. Off by default — no change to existing behaviour. Main iperf/ping charts are unaffected (they use the separate `iperfEventHistory`/`phEventHistory` flag arrays for their status strips).
+- **OpenAPI / page header**: **v3.7**.
 
 **Changes in v3.6**
 

@@ -1,6 +1,11 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 3.6** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.6**).
+**Version 3.7** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.7**).
+
+Notes for **v3.7**:
+
+- **Correlator "Record 0 on test fail"** (`dashboard.html`): `corrZeroOnFail` boolean (default `false`) gated by `#corr-zero-on-fail` checkbox in the correlator controls. In `runIperfTest()` catch block: when enabled, computes the current cell key from `currentServingEarfcn`/`currentServingPci` and pushes `{t, v:0, c?}` to the appropriate DL/UL/SE history arrays based on the `direction` variable captured at function entry. In the ping sweep catch block: pushes `{t, v:0}` to `phAvgHistory` and `phJitHistory`. All zero samples are immediately pruned by `pruneHistoryByAge`. Main chart consumers (`iperfEventHistory`, `phEventHistory`) are unchanged.
+- OpenAPI / page header: **v3.7**.
 
 Notes for **v3.6**:
 
