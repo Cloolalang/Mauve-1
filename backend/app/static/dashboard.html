@@ -938,46 +938,9 @@
         <span style="font-size:14px; font-weight:600; color:#e6e6e6;">KPI Correlator Chart</span>
         <span class="label" style="font-size:11px;">Select any KPI to plot as a large trend chart — use as a correlator alongside the main dashboard.</span>
       </div>
+      <!-- 6 trace selects — populated by JS from CORR_KPI_CATALOG -->
+      <div id="corr-trace-selects" style="display:grid; grid-template-columns:repeat(3,1fr); gap:6px 16px; margin-bottom:10px;"></div>
       <div class="corr-controls">
-        <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6;">
-          KPI to plot
-          <select id="corr-kpi-select" style="background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:4px 8px; font-size:12px; min-width:200px;">
-            <optgroup label="LTE Primary Cell">
-              <option value="lte_rsrp" selected>LTE RSRP (dBm)</option>
-              <option value="lte_rsrq">LTE RSRQ (dB)</option>
-              <option value="lte_sinr">LTE SINR (dB)</option>
-              <option value="lte_rssi">LTE RSSI (dBm)</option>
-              <option value="lte_dominance">LTE Cell Dominance (dB)</option>
-              <option value="congestion_proxy">Congestion Proxy (dB)</option>
-              <option value="lte_dl_bw">LTE DL Bandwidth (MHz)</option>
-              <option value="ca_agg_bw">CA Aggregated DL BW (MHz)</option>
-            </optgroup>
-            <optgroup label="NR5G">
-              <option value="nr_rsrp">NR5G RSRP (dBm)</option>
-              <option value="nr_rsrq">NR5G RSRQ (dB)</option>
-              <option value="nr_sinr">NR5G SINR (dB)</option>
-              <option value="nr_dominance">NR5G Cell Dominance (dB)</option>
-              <option value="nr_dl_bw">NR5G DL Bandwidth (MHz)</option>
-            </optgroup>
-            <optgroup label="Neighbour Cells">
-              <option value="nbr_intra_rsrp">Intra Nbr RSRP (dBm)</option>
-              <option value="nbr_inter_rsrp">Inter Nbr RSRP (dBm)</option>
-              <option value="nbr_inter_rsrq">Inter Nbr RSRQ (dB)</option>
-              <option value="nbr_intra_count">Intra Nbr Count</option>
-              <option value="nbr_inter_count">Inter Nbr Count</option>
-            </optgroup>
-            <optgroup label="Iperf">
-              <option value="iperf_dl">Iperf DL Throughput (Mbps)</option>
-              <option value="iperf_ul">Iperf UL Throughput (Mbps)</option>
-              <option value="iperf_dl_se">Iperf DL Spectral Eff. (bps/Hz)</option>
-              <option value="iperf_ul_se">Iperf UL Spectral Eff. (bps/Hz)</option>
-            </optgroup>
-            <optgroup label="Ping">
-              <option value="ping_rtt">Ping Avg RTT (ms)</option>
-              <option value="ping_jitter">Ping Jitter (ms)</option>
-            </optgroup>
-          </select>
-        </label>
         <button id="btn-corr-gap-mode" style="white-space:nowrap;">Time-roll gaps: OFF</button>
         <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6;">
           Window
@@ -7010,7 +6973,7 @@
     // Correlator state — must be declared before redrawAllCharts() so
     // drawCorrChart() (hoisted function) doesn't hit the TDZ.
     let corrCurrentTab = "dashboard";
-    let corrKpiKey = "lte_rsrp";
+    let corrKpiKeys = ["lte_rsrp", "none", "none", "none", "none", "none"];
     let corrGapModeEnabled = false;
     let corrChartWindowMs = 600 * 1000;
     let corrSmoothingEnabled = false;
@@ -7082,106 +7045,152 @@
     function drawCorrChart() {
       const canvas = el("corrchart");
       if (!canvas || corrCurrentTab !== "correlator") return;
-      const kpiDef = CORR_KPI_CATALOG.find((k) => k.key === corrKpiKey) || CORR_KPI_CATALOG[0];
-      const rawHistory = kpiDef.getHistory();
+
       const nowMs = Date.now();
       const cutoff = nowMs - corrChartWindowMs;
-      const windowedRaw = rawHistory.filter((p) => Number(p?.t) >= cutoff);
-      const samples = (corrSmoothingEnabled && windowedRaw.length > 0)
-        ? smoothSeries(windowedRaw, corrSmoothWindow) : windowedRaw;
+      const windowStartMs = nowMs - corrChartWindowMs;
+      const expectedStepMs = Math.max(50, 1000 / Math.max(1, Number(currentPollHz) || 2));
+      const gapBreakMs = expectedStepMs * 1.8;
+
+      // Collect active traces with per-trace normalisation
+      const traceData = corrKpiKeys.map((key) => {
+        if (key === "none") return null;
+        const kpiDef = CORR_KPI_CATALOG.find((k) => k.key === key);
+        if (!kpiDef) return null;
+        const rawHistory = kpiDef.getHistory();
+        const windowedRaw = rawHistory.filter((p) => Number(p?.t) >= cutoff);
+        const samples = (corrSmoothingEnabled && windowedRaw.length > 0)
+          ? smoothSeries(windowedRaw, corrSmoothWindow) : windowedRaw;
+        const values = samples.map((p) => Number(p.v)).filter((x) => Number.isFinite(x));
+        const minV = values.length ? Math.min(...values) : 0;
+        const maxV = values.length ? Math.max(...values) : 1;
+        const pad = Math.max(Math.abs(maxV - minV) * 0.08, 0.5);
+        const yMin = minV - pad, yMax = maxV + pad;
+        const span = Math.max(0.001, yMax - yMin);
+        return { kpiDef, samples, windowedRaw, yMin, yMax, span };
+      }).filter(Boolean);
+
       const ctx = canvas.getContext("2d");
       const w = canvas.width, h = canvas.height;
       ctx.clearRect(0, 0, w, h);
       ctx.fillStyle = "#101010";
       ctx.fillRect(0, 0, w, h);
+
+      // Info bar
       const infoEl = el("corr-kpi-info");
       if (infoEl) {
-        const cnt = windowedRaw.length;
-        const smoothTxt = corrSmoothingEnabled ? `, smoothed (window: ${corrSmoothWindow})` : "";
-        infoEl.textContent = `${kpiDef.label}${kpiDef.unit ? ` · ${kpiDef.unit}` : ""}${smoothTxt}  ·  ${cnt} sample${cnt !== 1 ? "s" : ""} in window  ·  ${rawHistory.length} total in buffer`;
+        if (!traceData.length) {
+          infoEl.textContent = "Select at least one trace above.";
+        } else {
+          const smoothTxt = corrSmoothingEnabled ? `  · smoothed(${corrSmoothWindow})` : "";
+          infoEl.textContent = traceData.map((t) => `${t.kpiDef.label}: ${t.windowedRaw.length} pts`).join("  ·  ") + smoothTxt;
+        }
       }
-      if (!samples.length) {
-        ctx.fillStyle = "#666"; ctx.font = "13px Arial";
-        ctx.fillText(`No ${kpiDef.label} samples in the current window`, 20, 40);
+
+      if (!traceData.length) {
+        ctx.fillStyle = "#555"; ctx.font = "13px Arial";
+        ctx.fillText("Select at least one KPI trace above", 20, 40);
         return;
       }
-      const values = samples.map((p) => Number(p.v)).filter((x) => Number.isFinite(x));
-      if (!values.length) return;
-      const minV = Math.min(...values), maxV = Math.max(...values);
-      const pad = Math.max(0.5, (maxV - minV) * 0.12);
-      let yMin = minV - pad, yMax = maxV + pad;
-      const thresh = kpiDef.threshold;
-      if (Number.isFinite(thresh)) { yMin = Math.min(yMin, thresh - 0.5); yMax = Math.max(yMax, thresh + 0.5); }
-      const span = Math.max(0.001, yMax - yMin);
+
       const x0 = 58, x1 = w - 16, y0 = h - 26, y1 = 16;
+
+      // Grid + Y axis (normalised 0–100 %)
       ctx.lineWidth = 1;
-      for (let i = 0; i <= 7; i++) {
-        const y = y1 + (i * (y0 - y1)) / 7;
-        const v = yMax - (i / 7) * span;
-        ctx.strokeStyle = (i === 0 || i === 7) ? "#282828" : "#1e1e1e";
+      for (let i = 0; i <= 5; i++) {
+        const y = y1 + (i * (y0 - y1)) / 5;
+        const pct = 100 - i * 20;
+        ctx.strokeStyle = i === 0 || i === 5 ? "#282828" : "#1e1e1e";
         ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
-        ctx.fillStyle = "#666"; ctx.font = "10px Arial"; ctx.textAlign = "right";
-        ctx.fillText(`${v.toFixed(1)}`, x0 - 3, y + 3);
+        ctx.fillStyle = "#555"; ctx.font = "10px Arial"; ctx.textAlign = "right";
+        ctx.fillText(`${pct}%`, x0 - 3, y + 3);
       }
       ctx.textAlign = "left";
-      ctx.fillStyle = "#555"; ctx.font = "10px Arial";
-      ctx.fillText(kpiDef.unit || "", x0, y1 - 4);
-      const windowStartMs = nowMs - corrChartWindowMs;
+      ctx.fillStyle = "#444"; ctx.font = "10px Arial";
+      ctx.fillText("norm.", x0, y1 - 4);
+
+      // X axis time ticks
       for (let i = 0; i <= 6; i++) {
         const frac = i / 6;
         const xTick = x0 + frac * (x1 - x0);
         const secAgo = Math.round((1 - frac) * corrChartWindowMs / 1000);
         const label = secAgo === 0 ? "now" : `-${secAgo >= 60 ? Math.round(secAgo / 60) + "m" : secAgo + "s"}`;
+        ctx.fillStyle = "#555"; ctx.font = "10px Arial";
         ctx.textAlign = i === 6 ? "right" : i === 0 ? "left" : "center";
         ctx.fillText(label, xTick, y0 + 16);
       }
       ctx.textAlign = "left";
-      const n = samples.length;
-      const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
-      const expectedStepMs = Math.max(50, 1000 / Math.max(1, Number(currentPollHz) || 2));
-      const gapBreakMs = expectedStepMs * 1.8;
-      const xFor = (p, i) => {
-        if (!corrGapModeEnabled) return x0 + i * xStep;
-        const t = Number(p?.t);
-        if (!Number.isFinite(t)) return x0 + i * xStep;
-        return x0 + Math.max(0, Math.min(1, (t - windowStartMs) / corrChartWindowMs)) * (x1 - x0);
-      };
-      const yFor = (v) => y0 - ((v - yMin) / span) * (y0 - y1);
-      if (Number.isFinite(thresh)) {
-        const yt = yFor(thresh);
-        ctx.strokeStyle = "#ff4d4f"; ctx.lineWidth = 1; ctx.setLineDash([6, 4]);
-        ctx.beginPath(); ctx.moveTo(x0, yt); ctx.lineTo(x1, yt); ctx.stroke();
+
+      // Draw each trace (normalised to its own range)
+      traceData.forEach((td) => {
+        const { kpiDef, samples, yMin, span } = td;
+        if (!samples.length) return;
+        const n = samples.length;
+        const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
+        const xFor = (p, i) => {
+          if (!corrGapModeEnabled) return x0 + i * xStep;
+          const t = Number(p?.t);
+          if (!Number.isFinite(t)) return x0 + i * xStep;
+          return x0 + Math.max(0, Math.min(1, (t - windowStartMs) / corrChartWindowMs)) * (x1 - x0);
+        };
+        const yFor = (v) => y0 - ((Number(v) - yMin) / span) * (y0 - y1);
+        ctx.lineWidth = 2; ctx.strokeStyle = kpiDef.color;
         ctx.setLineDash([]);
-        ctx.fillStyle = "#ff6b6b"; ctx.font = "10px Arial"; ctx.textAlign = "right";
-        ctx.fillText(`${thresh} ${kpiDef.unit}`, x1 - 4, yt - 3); ctx.textAlign = "left";
-      }
-      ctx.setLineDash([]);
-      const lineColor = kpiDef.color;
-      ctx.lineWidth = 2.5; ctx.strokeStyle = lineColor;
-      for (let i = 1; i < samples.length; i++) {
-        const p0 = samples[i - 1], p1 = samples[i];
-        if (corrGapModeEnabled) {
-          const t0 = Number(p0?.t), t1 = Number(p1?.t);
-          if (Number.isFinite(t0) && Number.isFinite(t1) && t1 - t0 > gapBreakMs) continue;
+        for (let i = 1; i < samples.length; i++) {
+          const p0 = samples[i - 1], p1 = samples[i];
+          if (corrGapModeEnabled) {
+            const t0 = Number(p0?.t), t1 = Number(p1?.t);
+            if (Number.isFinite(t0) && Number.isFinite(t1) && t1 - t0 > gapBreakMs) continue;
+          }
+          ctx.beginPath();
+          ctx.moveTo(xFor(p0, i - 1), yFor(p0.v));
+          ctx.lineTo(xFor(p1, i), yFor(p1.v));
+          ctx.stroke();
         }
-        ctx.beginPath(); ctx.moveTo(xFor(p0, i - 1), yFor(p0.v)); ctx.lineTo(xFor(p1, i), yFor(p1.v)); ctx.stroke();
-      }
-      ctx.fillStyle = lineColor;
-      samples.forEach((p, i) => { ctx.beginPath(); ctx.arc(xFor(p, i), yFor(p.v), 2.8, 0, Math.PI * 2); ctx.fill(); });
-      const last = samples[samples.length - 1];
-      if (last && Number.isFinite(last.v)) {
-        const txt = `${Number(last.v).toFixed(2)} ${kpiDef.unit}`;
-        ctx.font = "bold 14px Arial";
-        const tw = ctx.measureText(txt).width;
-        ctx.fillStyle = "rgba(0,0,0,0.65)"; ctx.fillRect(x1 - tw - 16, y1, tw + 14, 22);
-        ctx.fillStyle = lineColor; ctx.fillText(txt, x1 - tw - 9, y1 + 15);
-      }
+        ctx.fillStyle = kpiDef.color;
+        samples.forEach((p, i) => {
+          ctx.beginPath(); ctx.arc(xFor(p, i), yFor(p.v), 2.5, 0, Math.PI * 2); ctx.fill();
+        });
+        // Latest value callout on the right
+        const last = samples[samples.length - 1];
+        if (last && Number.isFinite(last.v)) {
+          const lx = xFor(last, samples.length - 1);
+          const ly = yFor(last.v);
+          const txt = `${Number(last.v).toFixed(2)} ${kpiDef.unit}`;
+          ctx.font = "11px Arial";
+          const tw = ctx.measureText(txt).width;
+          ctx.fillStyle = "rgba(16,16,16,0.75)";
+          ctx.fillRect(lx + 5, ly - 9, tw + 6, 14);
+          ctx.fillStyle = kpiDef.color;
+          ctx.fillText(txt, lx + 8, ly + 2);
+        }
+      });
+
+      // Legend (top-left, inside chart)
+      ctx.font = "bold 11px Arial";
+      let ly = y1 + 14;
+      traceData.forEach((td) => {
+        const { kpiDef } = td;
+        const label = `${kpiDef.label}${kpiDef.unit ? ` (${kpiDef.unit})` : ""}`;
+        const tw = ctx.measureText(label).width;
+        ctx.fillStyle = "rgba(16,16,16,0.7)";
+        ctx.fillRect(x0 + 4, ly - 11, tw + 20, 15);
+        ctx.fillStyle = kpiDef.color;
+        ctx.fillRect(x0 + 6, ly - 8, 10, 10);
+        ctx.fillText(label, x0 + 20, ly);
+        ly += 17;
+      });
+
+      // Hover crosshair
       if (_corrHoverState) {
         const hx = Math.max(x0, Math.min(x1, _corrHoverState.mx));
-        ctx.save(); ctx.strokeStyle = "rgba(255,255,255,0.18)"; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
-        ctx.beginPath(); ctx.moveTo(hx, y1); ctx.lineTo(hx, y0); ctx.stroke(); ctx.restore();
+        ctx.save(); ctx.strokeStyle = "rgba(255,255,255,0.2)"; ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath(); ctx.moveTo(hx, y1); ctx.lineTo(hx, y0); ctx.stroke();
+        ctx.restore();
       }
-      canvas._corrHover = { samples, kpiDef, x0, x1, y0, y1, yMin, yMax, span, xFor, yFor, xStep, gapBreakMs, nowMs, windowMs: corrChartWindowMs, gapMode: corrGapModeEnabled, n };
+
+      canvas._corrHover = { traceData, x0, x1, y0, y1, windowStartMs, gapBreakMs, nowMs, windowMs: corrChartWindowMs, gapMode: corrGapModeEnabled };
     }
 
     let _corrHoverState = null;
@@ -7195,21 +7204,31 @@
         _corrHoverState = { mx, clientX: e.clientX, clientY: e.clientY };
         drawCorrChart();
         const hover = canvas._corrHover;
-        if (!hover) return;
-        const { samples, kpiDef, x0, x1, xFor, xStep, gapBreakMs, nowMs, windowMs, gapMode, n } = hover;
+        if (!hover || !hover.traceData.length) return;
+        const { traceData, x0, x1, windowStartMs, gapBreakMs, nowMs, windowMs, gapMode } = hover;
         const hx = Math.max(x0, Math.min(x1, mx));
-        let nearest = null;
-        if (gapMode) {
-          const tAtX = (nowMs - windowMs) + ((hx - x0) / (x1 - x0)) * windowMs;
-          let minDt = Infinity;
-          samples.forEach((p) => { const d = Math.abs(Number(p.t) - tAtX); if (d < minDt) { minDt = d; nearest = p; } });
-        } else {
-          nearest = samples[Math.max(0, Math.min(n - 1, Math.round((hx - x0) / Math.max(1, xStep))))];
-        }
-        if (nearest) {
+        const lines = [];
+        traceData.forEach((td) => {
+          const { kpiDef, samples } = td;
+          if (!samples.length) return;
+          const n = samples.length;
+          const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
+          let nearest = null;
+          if (gapMode) {
+            const tAtX = windowStartMs + ((hx - x0) / (x1 - x0)) * windowMs;
+            let minDt = Infinity;
+            samples.forEach((p) => { const d = Math.abs(Number(p.t) - tAtX); if (d < minDt) { minDt = d; nearest = p; } });
+          } else {
+            nearest = samples[Math.max(0, Math.min(n - 1, Math.round((hx - x0) / Math.max(1, xStep))))];
+          }
+          if (nearest) {
+            const ts = new Date(Number(nearest.t)).toLocaleTimeString();
+            lines.push(`${kpiDef.label}: ${Number(nearest.v).toFixed(3)} ${kpiDef.unit}  @${ts}`);
+          }
+        });
+        if (lines.length) {
           const tip = ensureRfChartTooltipEl();
-          const ts = new Date(Number(nearest.t)).toLocaleTimeString();
-          tip.textContent = `${kpiDef.label}\n${Number(nearest.v).toFixed(3)} ${kpiDef.unit}\n${ts}`;
+          tip.textContent = lines.join("\n");
           tip.style.display = "block";
           let left = e.clientX + 14, top = e.clientY + 14;
           if (left + tip.offsetWidth > window.innerWidth - 8) left = window.innerWidth - tip.offsetWidth - 8;
@@ -7225,10 +7244,67 @@
       });
     }
 
+    // Build 6 trace-select dropdowns dynamically from CORR_KPI_CATALOG
+    (function buildCorrTraceSelects() {
+      const container = el("corr-trace-selects");
+      if (!container) return;
+      const GROUPS = [
+        { label: "LTE Primary Cell", keys: ["lte_rsrp","lte_rsrq","lte_sinr","lte_rssi","lte_dominance","congestion_proxy","lte_dl_bw","ca_agg_bw"] },
+        { label: "NR5G",             keys: ["nr_rsrp","nr_rsrq","nr_sinr","nr_dominance","nr_dl_bw"] },
+        { label: "Neighbours",       keys: ["nbr_intra_rsrp","nbr_inter_rsrp","nbr_inter_rsrq","nbr_intra_count","nbr_inter_count"] },
+        { label: "Iperf",            keys: ["iperf_dl","iperf_ul","iperf_dl_se","iperf_ul_se"] },
+        { label: "Ping",             keys: ["ping_rtt","ping_jitter"] },
+      ];
+      const TRACE_COLORS = ["#4da3ff","#ff79c6","#50fa7b","#ffb86c","#bd93f9","#8be9fd"];
+      for (let i = 0; i < 6; i++) {
+        const wrap = document.createElement("label");
+        wrap.style.cssText = "display:flex; align-items:center; gap:5px; font-size:12px; color:#9aa0a6;";
+        const dot = document.createElement("span");
+        dot.style.cssText = `display:inline-block; width:9px; height:9px; border-radius:50%; background:${TRACE_COLORS[i]}; flex-shrink:0;`;
+        const lbl = document.createElement("span");
+        lbl.style.cssText = "white-space:nowrap; flex-shrink:0;";
+        lbl.textContent = `Trace ${i + 1}`;
+        const sel = document.createElement("select");
+        sel.id = `corr-kpi-select-${i}`;
+        sel.style.cssText = "background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:3px 6px; font-size:12px; flex:1; min-width:0;";
+        const noneOpt = document.createElement("option");
+        noneOpt.value = "none"; noneOpt.textContent = "— none —";
+        if (corrKpiKeys[i] === "none") noneOpt.selected = true;
+        sel.appendChild(noneOpt);
+        GROUPS.forEach((g) => {
+          const og = document.createElement("optgroup");
+          og.label = g.label;
+          g.keys.forEach((key) => {
+            const kDef = CORR_KPI_CATALOG.find((k) => k.key === key);
+            if (!kDef) return;
+            const opt = document.createElement("option");
+            opt.value = key;
+            opt.textContent = `${kDef.label}${kDef.unit ? ` (${kDef.unit})` : ""}`;
+            if (key === corrKpiKeys[i]) opt.selected = true;
+            og.appendChild(opt);
+          });
+          sel.appendChild(og);
+        });
+        sel.addEventListener("change", (e) => {
+          corrKpiKeys[i] = e.target.value;
+          // Sync the color dot to the catalog color or the default trace color
+          const kDef = CORR_KPI_CATALOG.find((k) => k.key === corrKpiKeys[i]);
+          dot.style.background = kDef ? kDef.color : TRACE_COLORS[i];
+          drawCorrChart();
+        });
+        // Set initial dot color from catalog
+        const initDef = CORR_KPI_CATALOG.find((k) => k.key === corrKpiKeys[i]);
+        if (initDef) dot.style.background = initDef.color;
+        wrap.appendChild(dot);
+        wrap.appendChild(lbl);
+        wrap.appendChild(sel);
+        container.appendChild(wrap);
+      }
+    })();
+
     el("tab-btn-dashboard").addEventListener("click", () => switchTab("dashboard"));
     el("tab-btn-correlator").addEventListener("click", () => switchTab("correlator"));
     el("btn-corr-gap-mode").addEventListener("click", () => { corrGapModeEnabled = !corrGapModeEnabled; updateCorrGapButton(); updateCorrAxisLabel(); drawCorrChart(); });
-    el("corr-kpi-select").addEventListener("change", (e) => { corrKpiKey = e.target.value; drawCorrChart(); });
     el("corr-chart-window-select").addEventListener("change", (e) => { corrChartWindowMs = Number(e.target.value) * 1000; updateCorrAxisLabel(); drawCorrChart(); });
     el("corr-smooth-toggle").addEventListener("change", (e) => { corrSmoothingEnabled = e.target.checked; drawCorrChart(); });
     el("corr-smooth-window").addEventListener("input", (e) => { const v = parseInt(e.target.value, 10); if (Number.isFinite(v) && v >= 2) corrSmoothWindow = v; if (corrSmoothingEnabled) drawCorrChart(); });
