@@ -129,13 +129,17 @@ class IperfTestBody(BaseModel):
     )
     duration_sec: int = Field(default=1, ge=1, le=300)
     direction: str = Field(default="download", description="download=server->client, upload=client->server")
-    protocol: str = Field(default="tcp", description="Traffic mode. Currently only tcp is supported.")
+    protocol: str = Field(default="tcp", description="Traffic mode: 'tcp' or 'udp'.")
     mobile_only: bool = Field(default=True, description="Bind iperf to mobile data interface/IP only.")
     bind_ip: str | None = Field(default=None, description="Optional local IPv4 to bind using iperf -B.")
     bitrate_limit_mbps: float | None = Field(
         default=None,
         ge=0,
-        description="Optional TCP bitrate limit for iperf -b (Mbit/s); 0 or None = unlimited.",
+        description=(
+            "Target bitrate for iperf -b (Mbit/s). "
+            "TCP: pacing hint only (Linux-effective); UDP: hard cap, defaults to iperf3's 1 Mbit/s if unset. "
+            "0 or None = use iperf3 default."
+        ),
     )
     parallel_streams: int = Field(
         default=10,

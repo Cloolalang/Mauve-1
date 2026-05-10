@@ -61,7 +61,7 @@ from app.state import engine, kpi_runtime
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "3.1"
+APP_VERSION = "3.2"
 
 
 _kpi_task: asyncio.Task[None] | None = None
@@ -2407,8 +2407,8 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
     if direction not in ("download", "upload"):
         raise HTTPException(status_code=400, detail="direction must be 'download' or 'upload'.")
     protocol = str(body.protocol or "tcp").strip().lower()
-    if protocol != "tcp":
-        raise HTTPException(status_code=400, detail="Only protocol='tcp' is currently supported.")
+    if protocol not in ("tcp", "udp"):
+        raise HTTPException(status_code=400, detail="protocol must be 'tcp' or 'udp'.")
     reverse = direction == "download"
     parallel_streams = int(body.parallel_streams)
     ct_sec = max(1.0, min(120.0, float(body.connect_timeout_sec)))
@@ -2498,10 +2498,21 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
     ]
     if reverse:
         cmd.append("-R")
+    if protocol == "udp":
+        cmd.append("-u")
     if bind_ip:
         cmd.extend(["-B", bind_ip])
     if limit_mbps is not None and float(limit_mbps) > 0:
-        cmd.extend(["-b", f"{float(limit_mbps):g}M"])
+        # iperf3 -b is per-stream; divide total limit across parallel streams so the
+        # aggregate bandwidth matches what the user entered.
+        # For UDP this is a hard application-level cap; for TCP it is a pacing hint
+        # (effective on Linux only — Windows/Cygwin ignores it for TCP).
+        per_stream_mbps = float(limit_mbps) / max(1, parallel_streams)
+        cmd.extend(["-b", f"{per_stream_mbps:g}M"])
+    elif protocol == "udp":
+        # iperf3 UDP defaults to 1 Mbit/s which is far too low for a throughput test.
+        # Send at wire speed and let the network be the bottleneck.
+        cmd.extend(["-b", "0"])
     cmd.extend(["-P", str(parallel_streams)])
     supports_ct = _iperf_supports_connect_timeout(binary)
     if supports_ct:
@@ -2509,7 +2520,8 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
         cmd.extend(["--connect-timeout", str(ms)])
     else:
         # Bundled iperf 3.1.x: no --connect-timeout; OS TCP can stall far longer than ct_sec.
-        probe_err = await asyncio.to_thread(
+        # Skip TCP preflight for UDP — the preflight opens a TCP socket which is irrelevant.
+        probe_err = None if protocol == "udp" else await asyncio.to_thread(
             _iperf_preflight_tcp_ipv4,
             host,
             int(effective_port),

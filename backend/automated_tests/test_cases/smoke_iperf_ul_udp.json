@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "name": "smoke_iperf_ul_udp",
+  "project_name": "Example",
+  "test_location": "",
+  "engineer": "",
+  "modem_antenna_config": "SISO",
+  "modem_requirements": {},
+  "test_type": "iperf_upload",
+  "test_config": {
+    "host": "lon.speedtest.clouvider.net",
+    "port": 5200,
+    "port_range_max": 5209,
+    "duration_sec": 5,
+    "protocol": "udp",
+    "parallel_streams": 1,
+    "connect_timeout_sec": 10,
+    "bitrate_limit_mbps": 0,
+    "mobile_only": false
+  }
+}

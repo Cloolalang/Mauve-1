@@ -1,0 +1,22 @@
+[
+  {
+    "label": "AAISP — Maidenhead (UK)",
+    "host": "iperf.as42831.net",
+    "port": "5300-5400"
+  },
+  {
+    "label": "AA.net.uk — London (UK)",
+    "host": "speedtest.aa.net.uk",
+    "port": "5200-5209"
+  },
+  {
+    "label": "Clouvider — London (UK)",
+    "host": "lon.speedtest.clouvider.net",
+    "port": "5200-5209"
+  },
+  {
+    "label": "Jisc — Slough 10G (UK Academic)",
+    "host": "iperf-slough-10g.perf.ja.net",
+    "port": "5200-5209"
+  }
+]

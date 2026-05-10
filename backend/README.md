@@ -1,6 +1,18 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 3.1** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.1**).
+**Version 3.2** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.2**).
+
+Notes for **v3.2**:
+
+- **iperf3 binary upgraded**: bundled binary replaced from 3.1.1 (2015, Cygwin 32-bit) → **3.21** (Cygwin 64-bit). Enables TCP bitrate pacing on servers running iperf3 ≥ 3.2; fixes `--connect-timeout` support detection.
+- **UDP protocol support** (`POST /api/tools/iperf-test`): `protocol: "udp"` now accepted; adds `-u` flag; when no bitrate limit is set, passes `-b 0` (wire speed) instead of iperf3's 1 Mbit/s UDP default. Dashboard protocol selector includes **UDP** option.
+- **Speed limit fix**: `-b` value divided by `parallel_streams` so the **total** aggregate bandwidth matches the user-entered limit (was per-stream before, causing the cap to be exceeded by a factor of N streams).
+- **Iperf server presets dropdown**: four UK presets built into the dashboard (AAISP Maidenhead, AA.net.uk London, Clouvider London, Jisc Slough 10G); selecting a preset fills host + port instantly.
+- **Continuous iperf sweep mode**: checkbox repeats the configured iperf test every 5 seconds; auto-stops at **5 minutes** to protect data usage; live MM:SS stopwatch displayed while active.
+- **Iperf & ping chart hover tooltips**: crosshair + floating value tooltip on the iperf throughput trend and ICMP ping trend canvases (matches existing RF chart tooltip style).
+- **UDP smoke test profiles**: three new bundled profiles — `smoke_iperf_dl_udp`, `smoke_iperf_ul_udp`, `smoke_iperf_dlul_udp` — targeting Clouvider London with UDP and 1 parallel stream.
+- **UI notes**: parallel-streams hint (recommends 1 for UDP); speed-limit note explains TCP vs UDP enforcement; server preset pre-selects AAISP on load.
+- OpenAPI / page header: **v3.2**.
 
 Notes for **v3.1**:
 

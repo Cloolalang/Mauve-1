@@ -682,6 +682,12 @@
     <div class="card">
       <div class="label">Iperf3 Test</div>
       <div style="margin-top:8px;">
+        <div class="label">Server preset:</div>
+        <select id="iperf-server-preset" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;">
+          <option value="">— Custom / manual —</option>
+        </select>
+      </div>
+      <div style="margin-top:8px;">
         <div class="label">Endpoint host:</div>
         <input id="iperf-host" value="iperf.as42831.net" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
       </div>
@@ -696,7 +702,8 @@
         </div>
         <div>
           <div class="label">Parallel streams (-P):</div>
-          <input id="iperf-parallel" type="number" min="1" max="64" value="10" title="iperf3 -P: number of parallel client streams" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+          <input id="iperf-parallel" type="number" min="1" max="64" value="1" title="iperf3 -P: number of parallel client streams" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+          <div id="iperf-parallel-note" class="label" style="margin-top:4px; color:#888; font-size:10px;"></div>
         </div>
       </div>
       <div style="margin-top:8px;">
@@ -715,7 +722,8 @@
         <div>
           <div class="label">Protocol:</div>
           <select id="iperf-protocol" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;">
-            <option value="tcp" selected>TCP</option>
+            <option value="tcp">TCP</option>
+            <option value="udp" selected>UDP</option>
           </select>
         </div>
       </div>
@@ -732,9 +740,18 @@
       </div>
       <div style="margin-top:8px;">
         <div class="label">Speed limit (Mbit/s, optional — maps to iperf -b):</div>
-        <input id="iperf-speed-limit" type="number" min="0" step="0.1" placeholder="Unlimited" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+        <input id="iperf-speed-limit" type="number" min="0" step="0.1" placeholder="Unlimited" value="10" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+        <div id="iperf-speed-limit-note" class="label" style="margin-top:4px; color:#888; font-size:10px;">TCP: pacing hint only — not enforced on Windows. UDP: hard cap (recommended). Leave blank for UDP to run at full speed.</div>
       </div>
-      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+      <div style="margin-top:10px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; user-select:none;">
+          <input type="checkbox" id="iperf-sweep-enable" style="width:15px; height:15px; accent-color:#00e5ff;" />
+          <span class="label" style="margin:0;">Continuous sweep</span>
+        </label>
+        <span id="iperf-sweep-stopwatch" style="display:none; font-family:Consolas,monospace; font-size:12px; color:#00e5ff; min-width:54px;">00:00</span>
+        <span id="iperf-sweep-limit-note" style="display:none; font-size:10px; color:#888;">auto-stops at 5 min</span>
+      </div>
+      <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap;">
         <button id="btn-iperf-test">Run Iperf3 Test</button>
       </div>
       <div id="iperf-msg" class="label" style="margin-top:8px;">-</div>
@@ -964,6 +981,12 @@
       return c;
     };
     let iperfBusy = false;
+    let iperfSweepActive = false;
+    let iperfSweepTimer = null;
+    let iperfSweepStopwatch = null;
+    let iperfSweepElapsedMs = 0;
+    const IPERF_SWEEP_INTERVAL_MS = 5000;
+    const IPERF_SWEEP_MAX_MS = 5 * 60 * 1000; // 5 minutes data-cap
     let serialBaud = 115200;
     let serialPorts = [];
     let currentServingEarfcn = null;
@@ -1024,6 +1047,8 @@
     let nrCellDataAvailable = false;
     let lastTrendSampleTs = null;
     let rfChartTooltipEl = null;
+    let _iperfHoverState = null;
+    let _phHoverState = null;
     const RF_HOVER_CANVAS_IDS = [
       "rsrpchart",
       "rsrqchart",
@@ -3025,7 +3050,7 @@
           }
           el("iperf-msg").textContent = `Running iperf ${dir} test...`;
           const j = await runOne(dir);
-          const mbps = Number(j.throughput_mbps);
+          const mbps = j.throughput_mbps != null ? Number(j.throughput_mbps) : NaN;
           if (Number.isFinite(mbps) && mbps >= 0) {
             addIperfSample(mbps, dir);
             if (dir === "download") lastIperfDlMbps = mbps;
@@ -3058,6 +3083,16 @@
             `Direction: ${j.direction || "-"}`,
             `Protocol: ${j.protocol || protocol}`,
             `Parallel streams: ${j.parallel_streams != null ? j.parallel_streams : parallelStreams}`,
+            (() => {
+              const lim = j.bitrate_limit_mbps != null ? Number(j.bitrate_limit_mbps) : (speedLimit != null ? speedLimit : null);
+              if (lim == null || !Number.isFinite(lim) || lim <= 0) return "Speed limit: Unlimited";
+              const dir = j.direction || "";
+              const streams = j.parallel_streams != null ? Number(j.parallel_streams) : parallelStreams;
+              const perStream = lim / Math.max(1, streams);
+              return streams > 1
+                ? `Speed limit: ${lim} Mbps total (${perStream.toFixed(2)} Mbps/stream × ${streams} streams)`
+                : `Speed limit: ${lim} Mbps`;
+            })(),
             `Bound IP: ${j.bind_ip || "-"}`,
             `Mobile adapter: ${j.detected_mobile_adapter || "-"}`,
             `Measured throughput: ${shownMbps}`,
@@ -3080,6 +3115,55 @@
       } finally {
         iperfBusy = false;
       }
+    }
+
+    function _iperfSweepUpdateStopwatch() {
+      const el_sw = el("iperf-sweep-stopwatch");
+      if (!el_sw) return;
+      const totalSec = Math.floor(iperfSweepElapsedMs / 1000);
+      const mm = String(Math.floor(totalSec / 60)).padStart(2, "0");
+      const ss = String(totalSec % 60).padStart(2, "0");
+      el_sw.textContent = `${mm}:${ss}`;
+    }
+
+    function stopIperfSweep(reason) {
+      iperfSweepActive = false;
+      clearTimeout(iperfSweepTimer);
+      clearInterval(iperfSweepStopwatch);
+      iperfSweepTimer = null;
+      iperfSweepStopwatch = null;
+      const cb = el("iperf-sweep-enable");
+      if (cb) cb.checked = false;
+      el("iperf-sweep-stopwatch").style.display = "none";
+      el("iperf-sweep-limit-note").style.display = "none";
+      if (reason) el("iperf-msg").textContent = reason;
+    }
+
+    async function _iperfSweepTick() {
+      if (!iperfSweepActive) return;
+      if (iperfSweepElapsedMs >= IPERF_SWEEP_MAX_MS) {
+        stopIperfSweep("Continuous sweep stopped — 5-minute data cap reached.");
+        return;
+      }
+      await runIperfTest();
+      if (!iperfSweepActive) return;
+      iperfSweepTimer = setTimeout(_iperfSweepTick, IPERF_SWEEP_INTERVAL_MS);
+    }
+
+    function startIperfSweep() {
+      iperfSweepActive = true;
+      iperfSweepElapsedMs = 0;
+      _iperfSweepUpdateStopwatch();
+      el("iperf-sweep-stopwatch").style.display = "";
+      el("iperf-sweep-limit-note").style.display = "";
+      iperfSweepStopwatch = setInterval(() => {
+        iperfSweepElapsedMs += 1000;
+        _iperfSweepUpdateStopwatch();
+        if (iperfSweepElapsedMs >= IPERF_SWEEP_MAX_MS) {
+          stopIperfSweep("Continuous sweep stopped — 5-minute data cap reached.");
+        }
+      }, 1000);
+      _iperfSweepTick();
     }
 
     function addPhSweepSample(avgMs, jitMs) {
@@ -3644,6 +3728,44 @@
       ctx.fillRect(w - 70, 10, 10, 3);
       ctx.fillStyle = "#ffe2c3";
       ctx.fillText("UL", w - 56, 15);
+
+      // Hover crosshair + tooltip
+      if (_iperfHoverState) {
+        const { mx, clientX, clientY } = _iperfHoverState;
+        const hx = Math.max(x0, Math.min(x1, mx));
+        ctx.save();
+        ctx.strokeStyle = "rgba(255,255,255,0.22)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(hx, y1);
+        ctx.lineTo(hx, y0);
+        ctx.stroke();
+        ctx.restore();
+        const tAtX = windowStartMs + ((hx - x0) / (x1 - x0)) * chartWindowMs;
+        const findNearest = (samples) => {
+          if (!samples.length) return null;
+          return samples.reduce((best, p) =>
+            Math.abs(Number(p.t) - tAtX) < Math.abs(Number(best.t) - tAtX) ? p : best
+          );
+        };
+        const dlPt = findNearest(iperfDlHistory);
+        const ulPt = findNearest(iperfUlHistory);
+        const lines = [];
+        if (dlPt) lines.push(`\u25cf DL: ${Number(dlPt.v).toFixed(2)} Mbps`);
+        if (ulPt) lines.push(`\u25cf UL: ${Number(ulPt.v).toFixed(2)} Mbps`);
+        if (lines.length) {
+          const tip = ensureRfChartTooltipEl();
+          tip.textContent = `Iperf Throughput\n${lines.join("\n")}`;
+          tip.style.display = "block";
+          let left = clientX + 14;
+          let top = clientY + 14;
+          if (left + tip.offsetWidth > window.innerWidth - 8) left = window.innerWidth - tip.offsetWidth - 8;
+          if (top + tip.offsetHeight > window.innerHeight - 8) top = window.innerHeight - tip.offsetHeight - 8;
+          tip.style.left = `${Math.max(8, left)}px`;
+          tip.style.top = `${Math.max(8, top)}px`;
+        }
+      }
     }
 
     function drawSingleGauge(canvasId, valueMbps, color, label) {
@@ -3801,6 +3923,44 @@
       ctx.fillRect(w - 62, 10, 10, 3);
       ctx.fillStyle = "#ffeaf7";
       ctx.fillText("Jitter", w - 46, 15);
+
+      // Hover crosshair + tooltip
+      if (_phHoverState) {
+        const { mx, clientX, clientY } = _phHoverState;
+        const hx = Math.max(x0, Math.min(x1, mx));
+        ctx.save();
+        ctx.strokeStyle = "rgba(255,255,255,0.22)";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(hx, y1);
+        ctx.lineTo(hx, y0);
+        ctx.stroke();
+        ctx.restore();
+        const tAtX = windowStartMs + ((hx - x0) / (x1 - x0)) * chartWindowMs;
+        const findNearest = (samples) => {
+          if (!samples.length) return null;
+          return samples.reduce((best, p) =>
+            Math.abs(Number(p.t) - tAtX) < Math.abs(Number(best.t) - tAtX) ? p : best
+          );
+        };
+        const avgPt = findNearest(phAvgHistory);
+        const jitPt = findNearest(phJitHistory);
+        const lines = [];
+        if (avgPt) lines.push(`\u25cf Avg RTT: ${Number(avgPt.v).toFixed(1)} ms`);
+        if (jitPt) lines.push(`\u25cf Jitter: ${Number(jitPt.v).toFixed(1)} ms`);
+        if (lines.length) {
+          const tip = ensureRfChartTooltipEl();
+          tip.textContent = `ICMP Ping\n${lines.join("\n")}`;
+          tip.style.display = "block";
+          let left = clientX + 14;
+          let top = clientY + 14;
+          if (left + tip.offsetWidth > window.innerWidth - 8) left = window.innerWidth - tip.offsetWidth - 8;
+          if (top + tip.offsetHeight > window.innerHeight - 8) top = window.innerHeight - tip.offsetHeight - 8;
+          tip.style.left = `${Math.max(8, left)}px`;
+          tip.style.top = `${Math.max(8, top)}px`;
+        }
+      }
     }
 
     function drawLatencyGauge(canvasId, valueMs, color, label, scaleHistory) {
@@ -4809,6 +4969,39 @@
         canvas._rfHoverInstalled = true;
         canvas.addEventListener("mousemove", handleRfMetricChartHoverMove);
         canvas.addEventListener("mouseleave", handleRfMetricChartHoverLeave);
+      }
+    }
+
+    function installIperfPhHoverListeners() {
+      const iperfCanvas = el("iperfchart");
+      if (iperfCanvas && !iperfCanvas._iperfHoverInstalled) {
+        iperfCanvas._iperfHoverInstalled = true;
+        iperfCanvas.addEventListener("mousemove", (ev) => {
+          const rect = iperfCanvas.getBoundingClientRect();
+          const scaleX = iperfCanvas.width / rect.width;
+          _iperfHoverState = { mx: (ev.clientX - rect.left) * scaleX, clientX: ev.clientX, clientY: ev.clientY };
+          drawIperfChart();
+        });
+        iperfCanvas.addEventListener("mouseleave", () => {
+          _iperfHoverState = null;
+          hideRfChartTooltip();
+          drawIperfChart();
+        });
+      }
+      const phCanvas = el("ph-sweep-chart");
+      if (phCanvas && !phCanvas._phHoverInstalled) {
+        phCanvas._phHoverInstalled = true;
+        phCanvas.addEventListener("mousemove", (ev) => {
+          const rect = phCanvas.getBoundingClientRect();
+          const scaleX = phCanvas.width / rect.width;
+          _phHoverState = { mx: (ev.clientX - rect.left) * scaleX, clientX: ev.clientX, clientY: ev.clientY };
+          drawPhSweepChart();
+        });
+        phCanvas.addEventListener("mouseleave", () => {
+          _phHoverState = null;
+          hideRfChartTooltip();
+          drawPhSweepChart();
+        });
       }
     }
 
@@ -6464,6 +6657,63 @@
     loadBindInterfaces();
     refreshTestRunnerProfiles();
     installRfChartHoverListeners();
+    installIperfPhHoverListeners();
+    (function() {
+      const cb = el("iperf-sweep-enable");
+      if (!cb) return;
+      cb.addEventListener("change", () => {
+        if (cb.checked) {
+          startIperfSweep();
+        } else {
+          stopIperfSweep("Continuous sweep stopped.");
+        }
+      });
+    })();
+    (function loadIperfServerPresets() {
+      const IPERF_SERVERS = [
+        { label: "AAISP — Maidenhead (UK)",          host: "iperf.as42831.net",                port: "5300-5400" },
+        { label: "AA.net.uk — London (UK)",          host: "speedtest.aa.net.uk",              port: "5200-5209" },
+        { label: "Clouvider — London (UK)",           host: "lon.speedtest.clouvider.net",      port: "5200-5209" },
+        { label: "Jisc — Slough 10G (UK Academic)",  host: "iperf-slough-10g.perf.ja.net",     port: "5200-5209" }
+      ];
+      const sel = el("iperf-server-preset");
+      if (!sel) return;
+      IPERF_SERVERS.forEach((s) => {
+        const opt = document.createElement("option");
+        opt.value = JSON.stringify({ host: s.host, port: s.port });
+        opt.textContent = s.label;
+        if (s.host === "iperf.as42831.net") opt.selected = true;
+        sel.appendChild(opt);
+      });
+      sel.addEventListener("change", () => {
+        if (!sel.value) return;
+        try {
+          const { host, port } = JSON.parse(sel.value);
+          const hostEl = el("iperf-host");
+          const portEl = el("iperf-port");
+          if (hostEl && host) hostEl.value = host;
+          if (portEl && port) portEl.value = port;
+        } catch {}
+      });
+    })();
+    (function() {
+      const proto = el("iperf-protocol");
+      const note = el("iperf-speed-limit-note");
+      if (!proto || !note) return;
+      const update = () => {
+        if (proto.value === "udp") {
+          note.textContent = "UDP: hard cap enforced by iperf3 application layer — works on Windows. Leave blank to run at full speed (sends at 0 limit = wire rate).";
+        } else {
+          note.textContent = "TCP: pacing hint only — not enforced on Windows/Cygwin. UDP is recommended if you need a reliable speed cap.";
+        }
+      };
+      proto.addEventListener("change", update);
+      proto.addEventListener("change", () => {
+        const pNote = el("iperf-parallel-note");
+        if (pNote) pNote.textContent = proto.value === "udp" ? "Recommend 1 stream for UDP — multiple flows cause self-interference on mobile links." : "";
+      });
+      update();
+    })();
   </script>
 </body>
 </html>

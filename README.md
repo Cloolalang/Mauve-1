@@ -1,8 +1,8 @@
 # 5G ModemTestDriver
 
-**Version 3.1**
+**Version 3.2**
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v3.1** is shown in the page header with a **Lord Kelvin** quotation on measurement).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v3.2** is shown in the page header with a **Lord Kelvin** quotation on measurement).
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -131,6 +131,16 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v3.2**
+
+- **iperf3 binary upgraded**: bundled Windows binary replaced from 3.1.1 (2015, Cygwin 32-bit) to **3.21** (Cygwin 64-bit). Fixes TCP bitrate pacing on iperf3 ≥ 3.2 servers and enables `--connect-timeout`.
+- **UDP iperf support**: dashboard protocol selector now includes **UDP**; backend passes `-u` to iperf3; UDP bitrate cap is hard-enforced application-side (works on Windows). When no speed limit is set, sends at wire speed (`-b 0`) rather than iperf3's 1 Mbit/s UDP default.
+- **Speed limit fix**: `-b` divided by `parallel_streams` so the aggregate throughput matches the entered limit (previously the limit applied per-stream, multiplying the cap by N).
+- **Iperf server presets**: dropdown with four UK servers pre-loaded (AAISP Maidenhead, AA.net.uk London, Clouvider London, Jisc Slough 10G); selecting a preset fills host and port fields instantly.
+- **Continuous iperf sweep**: checkbox repeats the iperf test every 5 seconds with a live stopwatch; auto-stops at 5 minutes to limit data use.
+- **Iperf & ping trend chart tooltips**: hover crosshair and floating value callout on the iperf throughput and ICMP ping trend canvases, matching the existing RF chart tooltip style.
+- **UDP smoke profiles**: three new bundled test-runner profiles — `smoke_iperf_dl_udp`, `smoke_iperf_ul_udp`, `smoke_iperf_dlul_udp` — using Clouvider London with UDP and single-stream.
 
 **Changes in v3.1**
 
