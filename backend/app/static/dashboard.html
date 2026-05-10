@@ -954,15 +954,6 @@
             <option value="3600">60 m</option>
           </select>
         </label>
-        <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6; cursor:pointer;">
-          <input id="corr-smooth-toggle" type="checkbox" style="accent-color:#00e5ff;" />
-          Smoothing (rolling avg)
-        </label>
-        <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6;">
-          Window (samples)
-          <input id="corr-smooth-window" type="number" min="2" max="200" value="10"
-            style="width:3.8em; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:3px 5px;" />
-        </label>
       </div>
       <div id="corr-kpi-info" class="label" style="font-size:11px; margin-bottom:8px; min-height:14px;">-</div>
       <canvas id="corrchart" width="900" height="440"
@@ -6977,8 +6968,8 @@
     let corrTraceDotEls = [];   // dot <span> refs, one per trace row
     let corrGapModeEnabled = false;
     let corrChartWindowMs = 600 * 1000;
-    let corrSmoothingEnabled = false;
-    let corrSmoothWindow = 10;
+    let corrTraceSmooth       = [false, false, false, false, false, false];
+    let corrTraceSmoothWindow = [10, 10, 10, 10, 10, 10];
 
     applyChartWindowSec(Number(el("chart-window-select")?.value || 600));
     updateChartGapButton();
@@ -7066,14 +7057,14 @@
       const gapBreakMs = expectedStepMs * 1.8;
 
       // Collect active traces with per-trace normalisation
-      const traceData = corrKpiKeys.map((key) => {
+      const traceData = corrKpiKeys.map((key, idx) => {
         if (key === "none") return null;
         const kpiDef = CORR_KPI_CATALOG.find((k) => k.key === key);
         if (!kpiDef) return null;
         const rawHistory = kpiDef.getHistory();
         const windowedRaw = rawHistory.filter((p) => Number(p?.t) >= cutoff);
-        const samples = (corrSmoothingEnabled && windowedRaw.length > 0)
-          ? smoothSeries(windowedRaw, corrSmoothWindow) : windowedRaw;
+        const samples = (corrTraceSmooth[idx] && windowedRaw.length > 0)
+          ? smoothSeries(windowedRaw, Math.max(2, corrTraceSmoothWindow[idx])) : windowedRaw;
         const values = samples.map((p) => Number(p.v)).filter((x) => Number.isFinite(x));
         const minV = values.length ? Math.min(...values) : 0;
         const maxV = values.length ? Math.max(...values) : 1;
@@ -7085,7 +7076,7 @@
         // (e.g. iperf/ping traces), keeping those in their catalog colours.
         const latestSample = samples.length ? samples[samples.length - 1] : null;
         const color = colorForCellKey(latestSample?.c, kpiDef.color);
-        return { kpiDef, samples, windowedRaw, yMin, yMax, span, color };
+        return { kpiDef, samples, windowedRaw, yMin, yMax, span, color, smoothed: corrTraceSmooth[idx], smoothWindow: corrTraceSmoothWindow[idx] };
       }).filter(Boolean);
 
       // Sync dot colors in the selector rows to the live cell-key colors
@@ -7112,8 +7103,10 @@
         if (!traceData.length) {
           infoEl.textContent = "Select at least one trace above.";
         } else {
-          const smoothTxt = corrSmoothingEnabled ? `  · smoothed(${corrSmoothWindow})` : "";
-          infoEl.textContent = traceData.map((t) => `${t.kpiDef.label}: ${t.windowedRaw.length} pts`).join("  ·  ") + smoothTxt;
+          infoEl.textContent = traceData.map((t, i) => {
+            const smoothed = t.smoothed ? ` ~${t.smoothWindow}` : "";
+            return `${t.kpiDef.label}: ${t.windowedRaw.length} pts${smoothed}`;
+          }).join("  ·  ");
         }
       }
 
@@ -7327,6 +7320,37 @@
           corrKpiKeys[i] = e.target.value;
           drawCorrChart();
         });
+
+        // Per-trace smooth toggle
+        const smoothCb = document.createElement("input");
+        smoothCb.type = "checkbox";
+        smoothCb.title = "Smooth this trace";
+        smoothCb.checked = corrTraceSmooth[i];
+        smoothCb.style.cssText = "accent-color:#00e5ff; flex-shrink:0; cursor:pointer;";
+        smoothCb.addEventListener("change", () => {
+          corrTraceSmooth[i] = smoothCb.checked;
+          smoothWin.style.opacity = smoothCb.checked ? "1" : "0.35";
+          drawCorrChart();
+        });
+
+        const smoothLbl = document.createElement("span");
+        smoothLbl.textContent = "≈";
+        smoothLbl.title = "Smoothing (rolling avg)";
+        smoothLbl.style.cssText = "font-size:13px; color:#9aa0a6; flex-shrink:0; cursor:default;";
+
+        // Per-trace smooth window size
+        const smoothWin = document.createElement("input");
+        smoothWin.type = "number";
+        smoothWin.min = "2"; smoothWin.max = "200";
+        smoothWin.value = corrTraceSmoothWindow[i];
+        smoothWin.title = "Smoothing window (samples)";
+        smoothWin.style.cssText = "width:3.2em; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:5px; padding:2px 4px; font-size:11px; flex-shrink:0; opacity:" + (corrTraceSmooth[i] ? "1" : "0.35") + ";";
+        smoothWin.addEventListener("input", () => {
+          const v = parseInt(smoothWin.value, 10);
+          if (Number.isFinite(v) && v >= 2) corrTraceSmoothWindow[i] = v;
+          if (corrTraceSmooth[i]) drawCorrChart();
+        });
+
         // Register dot so drawCorrChart() can push live cell colors to it
         corrTraceDotEls[i] = dot;
         // Set initial dot color from catalog
@@ -7335,6 +7359,9 @@
         wrap.appendChild(dot);
         wrap.appendChild(lbl);
         wrap.appendChild(sel);
+        wrap.appendChild(smoothCb);
+        wrap.appendChild(smoothLbl);
+        wrap.appendChild(smoothWin);
         container.appendChild(wrap);
       }
     })();
@@ -7343,8 +7370,6 @@
     el("tab-btn-correlator").addEventListener("click", () => switchTab("correlator"));
     el("btn-corr-gap-mode").addEventListener("click", () => { corrGapModeEnabled = !corrGapModeEnabled; updateCorrGapButton(); updateCorrAxisLabel(); drawCorrChart(); });
     el("corr-chart-window-select").addEventListener("change", (e) => { corrChartWindowMs = Number(e.target.value) * 1000; updateCorrAxisLabel(); drawCorrChart(); });
-    el("corr-smooth-toggle").addEventListener("change", (e) => { corrSmoothingEnabled = e.target.checked; drawCorrChart(); });
-    el("corr-smooth-window").addEventListener("input", (e) => { const v = parseInt(e.target.value, 10); if (Number.isFinite(v) && v >= 2) corrSmoothWindow = v; if (corrSmoothingEnabled) drawCorrChart(); });
     installCorrChartHoverListeners();
     updateCorrGapButton();
     updateCorrAxisLabel();
