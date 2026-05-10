@@ -6974,6 +6974,7 @@
     // drawCorrChart() (hoisted function) doesn't hit the TDZ.
     let corrCurrentTab = "dashboard";
     let corrKpiKeys = ["lte_rsrp", "none", "none", "none", "none", "none"];
+    let corrTraceDotEls = [];   // dot <span> refs, one per trace row
     let corrGapModeEnabled = false;
     let corrChartWindowMs = 600 * 1000;
     let corrSmoothingEnabled = false;
@@ -7067,8 +7068,23 @@
         const pad = Math.max(Math.abs(maxV - minV) * 0.08, 0.5);
         const yMin = minV - pad, yMax = maxV + pad;
         const span = Math.max(0.001, yMax - yMin);
-        return { kpiDef, samples, windowedRaw, yMin, yMax, span };
+        // Use the same EARFCN/PCI cell-key colour as the main RF charts.
+        // colorForCellKey falls back to kpiDef.color when sample has no .c field
+        // (e.g. iperf/ping traces), keeping those in their catalog colours.
+        const latestSample = samples.length ? samples[samples.length - 1] : null;
+        const color = colorForCellKey(latestSample?.c, kpiDef.color);
+        return { kpiDef, samples, windowedRaw, yMin, yMax, span, color };
       }).filter(Boolean);
+
+      // Sync dot colors in the selector rows to the live cell-key colors
+      corrKpiKeys.forEach((key, i) => {
+        const dot = corrTraceDotEls[i];
+        if (!dot) return;
+        if (key === "none") { dot.style.opacity = "0.3"; return; }
+        dot.style.opacity = "1";
+        const td = traceData.find((t) => t.kpiDef.key === key);
+        if (td) dot.style.background = td.color;
+      });
 
       const ctx = canvas.getContext("2d");
       const w = canvas.width, h = canvas.height;
@@ -7123,7 +7139,7 @@
 
       // Draw each trace (normalised to its own range)
       traceData.forEach((td) => {
-        const { kpiDef, samples, yMin, span } = td;
+        const { kpiDef, samples, yMin, span, color } = td;
         if (!samples.length) return;
         const n = samples.length;
         const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
@@ -7134,7 +7150,7 @@
           return x0 + Math.max(0, Math.min(1, (t - windowStartMs) / corrChartWindowMs)) * (x1 - x0);
         };
         const yFor = (v) => y0 - ((Number(v) - yMin) / span) * (y0 - y1);
-        ctx.lineWidth = 2; ctx.strokeStyle = kpiDef.color;
+        ctx.lineWidth = 2; ctx.strokeStyle = color;
         ctx.setLineDash([]);
         for (let i = 1; i < samples.length; i++) {
           const p0 = samples[i - 1], p1 = samples[i];
@@ -7147,7 +7163,7 @@
           ctx.lineTo(xFor(p1, i), yFor(p1.v));
           ctx.stroke();
         }
-        ctx.fillStyle = kpiDef.color;
+        ctx.fillStyle = color;
         samples.forEach((p, i) => {
           ctx.beginPath(); ctx.arc(xFor(p, i), yFor(p.v), 2.5, 0, Math.PI * 2); ctx.fill();
         });
@@ -7161,7 +7177,7 @@
           const tw = ctx.measureText(txt).width;
           ctx.fillStyle = "rgba(16,16,16,0.75)";
           ctx.fillRect(lx + 5, ly - 9, tw + 6, 14);
-          ctx.fillStyle = kpiDef.color;
+          ctx.fillStyle = color;
           ctx.fillText(txt, lx + 8, ly + 2);
         }
       });
@@ -7170,13 +7186,14 @@
       ctx.font = "bold 11px Arial";
       let ly = y1 + 14;
       traceData.forEach((td) => {
-        const { kpiDef } = td;
+        const { kpiDef, color } = td;
         const label = `${kpiDef.label}${kpiDef.unit ? ` (${kpiDef.unit})` : ""}`;
         const tw = ctx.measureText(label).width;
         ctx.fillStyle = "rgba(16,16,16,0.7)";
         ctx.fillRect(x0 + 4, ly - 11, tw + 20, 15);
-        ctx.fillStyle = kpiDef.color;
+        ctx.fillStyle = color;
         ctx.fillRect(x0 + 6, ly - 8, 10, 10);
+        ctx.fillStyle = color;
         ctx.fillText(label, x0 + 20, ly);
         ly += 17;
       });
@@ -7287,11 +7304,10 @@
         });
         sel.addEventListener("change", (e) => {
           corrKpiKeys[i] = e.target.value;
-          // Sync the color dot to the catalog color or the default trace color
-          const kDef = CORR_KPI_CATALOG.find((k) => k.key === corrKpiKeys[i]);
-          dot.style.background = kDef ? kDef.color : TRACE_COLORS[i];
           drawCorrChart();
         });
+        // Register dot so drawCorrChart() can push live cell colors to it
+        corrTraceDotEls[i] = dot;
         // Set initial dot color from catalog
         const initDef = CORR_KPI_CATALOG.find((k) => k.key === corrKpiKeys[i]);
         if (initDef) dot.style.background = initDef.color;
