@@ -7007,6 +7007,15 @@
     readDataGate();
     readAutoAnswerStatus(true);
     readSimHighLevel();
+    // Correlator state — must be declared before redrawAllCharts() so
+    // drawCorrChart() (hoisted function) doesn't hit the TDZ.
+    let corrCurrentTab = "dashboard";
+    let corrKpiKey = "lte_rsrp";
+    let corrGapModeEnabled = false;
+    let corrChartWindowMs = 600 * 1000;
+    let corrSmoothingEnabled = false;
+    let corrSmoothWindow = 10;
+
     applyChartWindowSec(Number(el("chart-window-select")?.value || 600));
     updateChartGapButton();
     redrawAllCharts();
@@ -7019,12 +7028,6 @@
     // CORRELATOR TAB — top-level scope so drawCorrChart is visible
     // to redrawAllCharts() and drawRfCharts() defined above.
     // ============================================================
-    let corrCurrentTab = "dashboard";
-    let corrKpiKey = "lte_rsrp";
-    let corrGapModeEnabled = false;
-    let corrChartWindowMs = 600 * 1000;
-    let corrSmoothingEnabled = false;
-    let corrSmoothWindow = 10;
 
     const CORR_KPI_CATALOG = [
       { key: "lte_rsrp",        label: "LTE RSRP",              unit: "dBm",    color: "#4da3ff", threshold: -126, getHistory: () => rfHistory.rsrp },
