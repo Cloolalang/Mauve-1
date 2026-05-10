@@ -7185,18 +7185,21 @@
           ctx.fillStyle = colorForCellKey(p?.c, kpiDef.color);
           ctx.beginPath(); ctx.arc(xFor(p, i), yFor(p.v), 2.5, 0, Math.PI * 2); ctx.fill();
         });
-        // Latest value callout on the right
+        // Latest value callout — clamp inside chart boundary
         const last = samples[samples.length - 1];
         if (last && Number.isFinite(last.v)) {
           const lx = xFor(last, samples.length - 1);
-          const ly = yFor(last.v);
+          const ly = Math.max(y1 + 8, Math.min(y0 - 6, yFor(last.v)));
           const txt = `${Number(last.v).toFixed(2)} ${kpiDef.unit}`;
-          ctx.font = "11px Arial";
+          ctx.font = "bold 11px Arial";
           const tw = ctx.measureText(txt).width;
-          ctx.fillStyle = "rgba(16,16,16,0.75)";
-          ctx.fillRect(lx + 5, ly - 9, tw + 6, 14);
+          const boxW = tw + 8;
+          // Flip left of point if it would overflow the right boundary
+          const bx = (lx + 6 + boxW > x1) ? lx - boxW - 4 : lx + 6;
+          ctx.fillStyle = "rgba(16,16,16,0.82)";
+          ctx.fillRect(bx - 2, ly - 10, boxW + 4, 16);
           ctx.fillStyle = color;
-          ctx.fillText(txt, lx + 8, ly + 2);
+          ctx.fillText(txt, bx, ly + 2);
         }
       });
 
