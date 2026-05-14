@@ -1,8 +1,10 @@
 # 5G ModemTestDriver
 
-**Version 3.9** — **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1)
+**Version 3.9** (this git tree / OpenAPI on `main`) — **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1)
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v3.9** is shown in the page header with a **Lord Kelvin** quotation on measurement).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (the **page header** version matches whatever build you run—**v3.9** when built from **`main`**, or the release tag when using a **prebuilt** zip).
+
+**Prebuilt vs source:** The **Latest** [GitHub Release](https://github.com/Cloolalang/Mauve-1/releases/latest) ships **`5GModemTestDriver-windows-amd64.zip`** for its **tag only**; that tag can lag **`main`** until maintainers cut a new release. For **v3.9** behaviour, run from source (see **Quick start**) or **`build_exe.ps1`**, or wait for a GitHub Release **≥ v3.9**.
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -12,8 +14,10 @@ License: [GNU General Public License v2.0](LICENSE).
 
 Official binaries are **not** stored in the Git source tree. Each [GitHub Release](https://github.com/Cloolalang/Mauve-1/releases) includes a **`5GModemTestDriver-windows-amd64.zip`** asset (PyInstaller **onedir** bundle, built on **windows-latest** with **Python 3.12**).
 
+The **newest zip** is always on **[Releases — Latest](https://github.com/Cloolalang/Mauve-1/releases/latest)**. The **app header version** inside that zip matches the **release tag** on that page (not necessarily the README’s **source** version on **`main`**—see the note above).
+
 1. Open **[Releases](https://github.com/Cloolalang/Mauve-1/releases)** (or **Latest**).
-2. Download **`5GModemTestDriver-windows-amd64.zip`** for the version you want.
+2. Download **`5GModemTestDriver-windows-amd64.zip`** for the tag you want (usually the top **Latest** release).
 3. Unzip to a **local folder** (avoid cloud-synced Desktop/Documents if those cause lock issues).
 4. Run **`5GModemTestDriver.exe`** inside the unzipped folder. Keep the console open; in a browser go to **`http://127.0.0.1:8011/`**.
 5. Windows / Defender may show a **SmartScreen** warning for an unsigned binary — use **More info → Run anyway** if you trust this project.
@@ -67,6 +71,7 @@ Do these in order on **Windows** with a **Robustel** modem/router (tested on **R
 - For a single antenna, prefer **Antenna Port 0** (see your hardware guide).
 - Power on the router. Connect an **Ethernet** cable between the **PC** and the router. In the **PC** browser, open the router **web UI** and **log in**. Then enable **modem mode** plus **serial AT** so the Quectel modem appears as a **COM** port (baud is commonly **`115200`**).
 - Use a **USB data** cable from **PC → router USB**. (The router can be powered from the **PC USB-C** port.)
+- **PC USB to the Quectel module** (e.g. **M.2 / HAT** or other direct USB): if **Device Manager** does not list **Quectel USB AT Port** under **Ports (COM & LPT)**, install the Quectel **Windows USB Driver (Q) NDIS** package. This build is hosted by Waveshare and documented on their [**RM520N-GL 5G HAT**](https://www.waveshare.com/wiki/RM520N-GL_5G_HAT) wiki: [**Quectel_Windows_USB_DriverQ_NDIS_V2.4.6.zip**](https://files.waveshare.com/upload/f/f5/Quectel_Windows_USB_DriverQ_NDIS_V2.4.6.zip). Unzip, run the installer, then reconnect USB. (Other USB stacks—**MBIM**, **RNDIS**—need the matching driver; do not mix conflicting Quectel Windows driver families on the same PC—see that wiki **Resource → Driver**.) **Router / gateway** setups (e.g. **Robustel**) usually expose AT via the router; use the device vendor guide if COM ports are missing.
 
 ### 2. Install Python and application dependencies
 
