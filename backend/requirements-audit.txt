@@ -1,0 +1,2 @@
+# Used by audit_deps.ps1 — PyPA pip-audit (OSV advisory DB).
+pip-audit>=2.6

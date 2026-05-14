@@ -1,6 +1,6 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 3.9** — see root [`README.md`](../README.md) for the full feature overview. FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.9**).
+**Version 3.9** — see root [`README.md`](../README.md) for the full feature overview. **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1). FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.9**).
 
 Notes for **v3.9**:
 
@@ -230,6 +230,21 @@ cd backend
 ```
 
 Connect the **PC** to the router **USB** port with a **data** cable so Windows exposes the AT **COM** port (see root **[`README.md`](../README.md)** → **Quick start** step **1**).
+
+## Dependency audit (pip-audit)
+
+After **`pip install -r requirements.txt`** into **`.venv`**:
+
+```powershell
+cd backend
+.\audit_deps.ps1
+```
+
+Optional **`.\audit_deps.ps1 -IncludeBuildDeps`** installs **`requirements-build.txt`** into the venv first (PyInstaller stack). **`audit_deps.cmd`** is the same with **`ExecutionPolicy Bypass`** if **`.ps1`** is blocked.
+
+Scripts and tool pin: **`audit_deps.ps1`**, **`audit_deps.cmd`**, **`requirements-audit.txt`**.
+
+Full notes: root **[`README.md`](../README.md)** → **Python dependency vulnerability scan**.
 
 Default serial target is `COM49 @ 115200`.
 Default KPI poll rate is `2.0 Hz`.

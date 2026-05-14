@@ -1,6 +1,6 @@
 # 5G ModemTestDriver
 
-**Version 3.9**
+**Version 3.9** — **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1)
 
 Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (release **v3.9** is shown in the page header with a **Lord Kelvin** quotation on measurement).
 
@@ -36,7 +36,7 @@ Use this when you develop from git or need a local build without GitHub Actions.
 
 3. Output: **`backend\dist\5GModemTestDriver\`**. Close any running **`5GModemTestDriver.exe`** (or **`start.ps1`**) before rebuilding, or **`dist`** may be locked.
 
-Details: **`backend/run_desktop.py`**, **`backend/modemtestdriver.spec`**, **`backend/build_exe.ps1`**.
+Details: **`backend/run_desktop.py`**, **`backend/modemtestdriver.spec`**, **`backend/build_exe.ps1`**, **`backend/audit_deps.ps1`** (CVE scan via **pip-audit**).
 
 ### Maintainers: publish a Release with binaries
 
@@ -513,6 +513,37 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
+
+## Python dependency vulnerability scan
+
+Use **[pip-audit](https://pypi.org/project/pip-audit/)** (PyPA) to check packages **currently installed in `backend\.venv`** against the **[OSV](https://osv.dev/)** advisory database. Run this from time to time and after changing dependencies.
+
+**Prerequisites:** the venv exists and dependencies are installed (see **Quick start**, step **2**, or **Install** above).
+
+**Recommended:** run the checked-in script from **`backend/`** (installs **`pip-audit`** from **`requirements-audit.txt`**, then scans the venv):
+
+```powershell
+cd C:\dev\Mauve-1-main\backend
+.\audit_deps.ps1
+```
+
+Optional: **`.\audit_deps.ps1 -IncludeBuildDeps`** first syncs **`requirements-build.txt`** into **`.venv`** so PyInstaller and its transitive deps are included in the audit.
+
+If **PowerShell** blocks scripts, use **`.\audit_deps.cmd`** (same behaviour; passes through arguments, e.g. **`.\audit_deps.cmd -IncludeBuildDeps`**).
+
+Manual equivalent:
+
+```powershell
+cd C:\dev\Mauve-1-main\backend
+.\.venv\Scripts\python.exe -m pip install -r requirements-audit.txt
+.\.venv\Scripts\python.exe -m pip_audit
+```
+
+A clean tree prints **`No known vulnerabilities found`** and exits **0**. If issues are listed, upgrade or constrain the affected packages, then re-run until the report is clean.
+
+Because **`requirements.txt`** does not pin versions, a fresh `pip install` may resolve different releases than someone else’s venv; pin versions or adopt a lockfile if you need repeatable audit results.
+
+**Installing Python on Windows:** the [python.org](https://www.python.org/downloads/) **Windows installer** is the default recommendation in **Quick start**, step **2**. Alternatively, **`winget install --id Python.Python.3.12 -e`** installs the same major version non-interactively when **Windows Package Manager** is available.
 
 ## Start the app
 
