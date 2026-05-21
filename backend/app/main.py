@@ -64,7 +64,7 @@ from app.state import engine, kpi_runtime
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "4.0"
+APP_VERSION = "4.1"
 
 
 _kpi_task: asyncio.Task[None] | None = None
@@ -1106,6 +1106,45 @@ def _normalize_lock_value(key: str, value: str | None) -> str:
     return s
 
 
+def _mode_pref_matches(want: str, got: str) -> bool:
+    """Quectel readback often differs from the written token (especially AUTO vs NR5G/LTE:NR5G)."""
+    w = str(want or "").strip().upper()
+    g = str(got or "").strip().upper()
+    if not w:
+        return True
+    if not g:
+        return False
+    if w == g:
+        return True
+    if w == "AUTO":
+        # AUTO is the default multi-RAT search; some firmware still reports NSA-style tokens.
+        return g in {"AUTO", "LTE:NR5G", "NR5G:LTE", "WCDMA:LTE:NR5G", "LTE:WCDMA:NR5G"}
+    if w == "LTE":
+        return g in {"LTE", "LTE:NR5G", "NR5G:LTE"}
+    if w == "NR5G":
+        return g in {"NR5G", "NR5G:LTE", "LTE:NR5G"}
+    if w in {"LTE:NR5G", "NR5G:LTE"}:
+        return g in {"LTE:NR5G", "NR5G:LTE", "LTE", "NR5G", "AUTO"}
+    return False
+
+
+def _modem_snapshot_in_service() -> bool:
+    """Best-effort: use latest KPI snapshot to avoid lock-guard thrash while SEARCH / no service."""
+    try:
+        snap = kpi_runtime.snapshot if isinstance(kpi_runtime.snapshot, dict) else {}
+        net = snap.get("network") if isinstance(snap.get("network"), dict) else {}
+        srv = snap.get("servingcell") if isinstance(snap.get("servingcell"), dict) else {}
+        state = str(srv.get("state") or "").strip().upper()
+        if state in {"SEARCH", "LIMSRV", "NO SERVICE"}:
+            return False
+        if str(net.get("service") or "").upper() == "NO SERVICE":
+            return False
+        act = str(net.get("act") or "").strip().upper()
+        return bool(act and act not in ("NONE", "UNKNOWN"))
+    except Exception:
+        return True
+
+
 def _lock_value_matches(key: str, want: str, current: dict[str, str | None]) -> bool:
     def _band_match_all_ok(wanted: str, got: str) -> bool:
         # Modems often echo "all bands" as either literal 0 or an expanded list.
@@ -1113,6 +1152,8 @@ def _lock_value_matches(key: str, want: str, current: dict[str, str | None]) -> 
             return bool(got)
         return wanted == got
 
+    if key == "mode_pref":
+        return _mode_pref_matches(want, _normalize_lock_value("mode_pref", current.get("mode_pref")))
     if key == "nr5g_band":
         got_nr = _normalize_lock_value("nr5g_band", current.get("nr5g_band"))
         got_nsa = _normalize_lock_value("nsa_nr5g_band", current.get("nsa_nr5g_band"))
@@ -1124,36 +1165,95 @@ def _lock_value_matches(key: str, want: str, current: dict[str, str | None]) -> 
     return want == got
 
 
+_LOCK_APPLY_ORDER = ("mode_pref", "lte_band", "nr5g_band", "nrdc_mode")
+
+
+async def _radio_refresh_soft() -> dict[str, dict]:
+    """Quectel RG520 often stays SEARCH after NR5G-SA until radio is cycled."""
+    cfun0 = await engine.send_command("AT+CFUN=0", timeout_sec=20.0)
+    await asyncio.sleep(2.0)
+    cfun1 = await engine.send_command("AT+CFUN=1", timeout_sec=35.0)
+    await asyncio.sleep(4.0)
+    return {"cfun0": cfun0, "cfun1": cfun1, "ok": bool(cfun0.get("ok")) and bool(cfun1.get("ok"))}
+
+
+async def _lock_apply_recovery_hints() -> list[str]:
+    hints: list[str] = []
+    try:
+        cgatt = await engine.send_command("AT+CGATT?", timeout_sec=8.0)
+        cereg = await engine.send_command("AT+CEREG?", timeout_sec=8.0)
+        attached = _parse_cgatt_attached(cgatt.get("lines") or [])
+        stat = _parse_cereg_stat(cereg.get("lines") or [])
+        if attached is False or stat in {0, 2}:
+            hints.append(
+                "Modem not registered or not attached (CGATT/CEREG). "
+                "Apply MNO profile, enable Allow Data, or use Modem Reset after changing RAT."
+            )
+        snap = kpi_runtime.snapshot if isinstance(kpi_runtime.snapshot, dict) else {}
+        srv = snap.get("servingcell") if isinstance(snap.get("servingcell"), dict) else {}
+        state = str(srv.get("state") or "").strip().upper()
+        if state in {"SEARCH", "LIMSRV", ""}:
+            hints.append(
+                "Still SEARCH/no service: for NR→LTE use RAT=LTE (not only AUTO), "
+                "NR bands=0, NRDC OFF, then Apply Locks."
+            )
+    except Exception:
+        pass
+    return hints
+
+
 async def _apply_lock_requests(requested: dict[str, str]) -> dict[str, dict]:
     set_results: dict[str, dict] = {}
     # RAT / band preference changes can take many seconds; short timeouts produce false
     # TIMEOUT results, confuse verify readback, and interleave badly with follow-up ATs.
-    if "mode_pref" in requested:
-        rat = requested["mode_pref"]
-        set_results["mode_pref"] = await engine.send_command(
-            f'AT+QNWPREFCFG="mode_pref",{rat}', timeout_sec=75.0
-        )
-    if "lte_band" in requested:
-        band = requested["lte_band"]
-        set_results["lte_band"] = await engine.send_command(
-            f'AT+QNWPREFCFG="lte_band",{band}', timeout_sec=25.0
-        )
-    if "nr5g_band" in requested:
-        band = requested["nr5g_band"]
-        set_results["nr5g_band"] = await engine.send_command(
-            f'AT+QNWPREFCFG="nr5g_band",{band}', timeout_sec=25.0
-        )
-        final_nr = str(set_results["nr5g_band"].get("final", "")).upper()
-        if final_nr == "OK":
-            set_results["nsa_nr5g_band"] = await engine.send_command(
-                f'AT+QNWPREFCFG="nsa_nr5g_band",{band}', timeout_sec=25.0
+    for key in _LOCK_APPLY_ORDER:
+        if key not in requested:
+            continue
+        if key == "mode_pref":
+            rat = requested["mode_pref"]
+            set_results["mode_pref"] = await engine.send_command(
+                f'AT+QNWPREFCFG="mode_pref",{rat}', timeout_sec=75.0
             )
-    if "nrdc_mode" in requested:
-        mode = requested["nrdc_mode"]
-        set_results["nrdc_mode"] = await engine.send_command(
-            f'AT+QNWPREFCFG="nrdc_mode",{mode}', timeout_sec=25.0
-        )
+            await asyncio.sleep(1.0)
+        elif key == "lte_band":
+            band = requested["lte_band"]
+            set_results["lte_band"] = await engine.send_command(
+                f'AT+QNWPREFCFG="lte_band",{band}', timeout_sec=25.0
+            )
+        elif key == "nr5g_band":
+            band = requested["nr5g_band"]
+            set_results["nr5g_band"] = await engine.send_command(
+                f'AT+QNWPREFCFG="nr5g_band",{band}', timeout_sec=25.0
+            )
+            final_nr = str(set_results["nr5g_band"].get("final", "")).upper()
+            if final_nr == "OK":
+                set_results["nsa_nr5g_band"] = await engine.send_command(
+                    f'AT+QNWPREFCFG="nsa_nr5g_band",{band}', timeout_sec=25.0
+                )
+        elif key == "nrdc_mode":
+            mode = requested["nrdc_mode"]
+            set_results["nrdc_mode"] = await engine.send_command(
+                f'AT+QNWPREFCFG="nrdc_mode",{mode}', timeout_sec=25.0
+            )
     return set_results
+
+
+def _lock_set_succeeded(set_results: dict[str, dict], key: str) -> bool:
+    res = set_results.get(key)
+    return isinstance(res, dict) and bool(res.get("ok"))
+
+
+def _update_desired_locks_from_set_results(
+    normalized_requested: dict[str, str],
+    set_results: dict[str, dict],
+) -> None:
+    """Persist user intent when the modem accepted the SET, even if readback lags (e.g. AUTO after NR5G)."""
+    for key, want in normalized_requested.items():
+        if _lock_set_succeeded(set_results, key):
+            _desired_locks[key] = want
+    if "nr5g_band" in normalized_requested and _lock_set_succeeded(set_results, "nr5g_band"):
+        if _lock_set_succeeded(set_results, "nsa_nr5g_band"):
+            _desired_locks["nsa_nr5g_band"] = normalized_requested["nr5g_band"]
 
 
 def _collect_lock_verify_errors(
@@ -1213,7 +1313,7 @@ async def _lock_guard_loop() -> None:
             for key, want in wanted.items():
                 if not _lock_value_matches(key, want, current):
                     drift[key] = want
-            if drift:
+            if drift and _modem_snapshot_in_service():
                 await _apply_lock_requests(drift)
         except Exception:
             # Non-fatal: guard should keep trying.
@@ -1566,7 +1666,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="4.0",
+    version="4.1",
     lifespan=lifespan,
 )
 app.include_router(serial_routes.router)
@@ -1701,6 +1801,23 @@ async def sim_inspector(verbose: bool = False) -> dict:
     return out
 
 
+@app.get("/api/sim/qmbncfg-list")
+async def sim_qmbncfg_list() -> dict:
+    """List modem MBN profiles (Quectel AT+QMBNCFG=\"List\")."""
+    res = await engine.send_command('AT+QMBNCFG="List"', timeout_sec=45.0)
+    lines = [str(ln).strip() for ln in (res.get("lines") or []) if str(ln).strip()]
+    text = "\n".join(lines)
+    ok = bool(res.get("ok"))
+    err = None
+    if not ok:
+        err = describe_modem_send_result(res) or f"Command failed ({res.get('final', 'UNKNOWN')})"
+    return {
+        "ok": ok,
+        "error": err,
+        "text": text,
+        "lines": lines,
+        "cmd": res,
+    }
 
 
 @app.get("/api/kpi/latest")
@@ -2372,18 +2489,28 @@ async def network_locks_get() -> dict:
 @app.post("/api/network/locks")
 async def network_locks_set(body: LockSetBody) -> dict:
     requested: dict[str, str] = {}
+    fields_set = getattr(body, "model_fields_set", None) or set(body.model_dump(exclude_unset=True).keys())
 
     if body.rat_mode:
         rat = body.rat_mode.strip().upper()
         requested["mode_pref"] = rat
+        if rat == "AUTO" and "nr5g_band" not in fields_set:
+            # AUTO mode_pref alone does not clear an NR5G-only band whitelist; modem stays NR5G-SA.
+            requested["nr5g_band"] = "0"
+        elif rat == "LTE" and "nr5g_band" not in fields_set:
+            requested["nr5g_band"] = "0"
+            if "nrdc_mode" not in fields_set:
+                requested["nrdc_mode"] = "0"
+        elif rat == "NR5G" and "lte_band" not in fields_set:
+            requested["lte_band"] = "0"
 
-    if body.lte_band:
-        band = body.lte_band.strip()
-        requested["lte_band"] = band
+    if body.lte_band is not None and str(body.lte_band).strip() != "":
+        requested["lte_band"] = str(body.lte_band).strip()
 
-    if body.nr5g_band:
-        band = body.nr5g_band.strip()
-        requested["nr5g_band"] = band
+    if body.nr5g_band is not None and str(body.nr5g_band).strip() != "":
+        requested["nr5g_band"] = str(body.nr5g_band).strip()
+    elif body.rat_mode and body.rat_mode.strip().upper() == "AUTO":
+        requested["nr5g_band"] = "0"
 
     if body.nrdc_mode is not None:
         mode = 1 if int(body.nrdc_mode) else 0
@@ -2397,21 +2524,52 @@ async def network_locks_set(body: LockSetBody) -> dict:
         for k, v in requested.items()
     }
 
-    set_results = await _apply_lock_requests(requested)
-    if "mode_pref" in requested:
-        await asyncio.sleep(2.5)
-    lock_state = await _read_lock_status()
-    locks = lock_state["values"]
-    errors = _collect_lock_verify_errors(normalized_requested, set_results, locks)
-    if errors:
-        await asyncio.sleep(2.8)
+    readback_warnings: list[str] = []
+    recovery_hints: list[str] = []
+    radio_refresh_result: dict | None = None
+    await _pause_exclusive_modem_access()
+    try:
+        set_results = await _apply_lock_requests(requested)
+        mode_pref_changed = (
+            "mode_pref" in requested
+            and _lock_set_succeeded(set_results, "mode_pref")
+        )
+        want_refresh = body.radio_refresh is not False and mode_pref_changed
+        if want_refresh:
+            rat_applied = str(requested.get("mode_pref", "")).strip().upper()
+            if rat_applied in {"LTE", "AUTO", "LTE:NR5G", "NR5G:LTE"}:
+                radio_refresh_result = await _radio_refresh_soft()
+        if "mode_pref" in requested:
+            settle = 3.5 if requested["mode_pref"] == "AUTO" else 4.0 if requested["mode_pref"] == "LTE" else 2.5
+            if radio_refresh_result:
+                settle = max(settle, 2.0)
+            await asyncio.sleep(settle)
         lock_state = await _read_lock_status()
         locks = lock_state["values"]
         errors = _collect_lock_verify_errors(normalized_requested, set_results, locks)
+        if errors:
+            await asyncio.sleep(2.8)
+            lock_state = await _read_lock_status()
+            locks = lock_state["values"]
+            errors = _collect_lock_verify_errors(normalized_requested, set_results, locks)
 
-    if not errors:
         async with _desired_locks_lock:
-            _desired_locks.update(normalized_requested)
+            _update_desired_locks_from_set_results(normalized_requested, set_results)
+            if "mode_pref" in normalized_requested and not _lock_set_succeeded(set_results, "mode_pref"):
+                _desired_locks.pop("mode_pref", None)
+
+        # If modem accepted AUTO/NR/LTE but readback still shows the old RAT, do not fail the API call.
+        hard_errors: list[str] = []
+        for err in errors:
+            if err.startswith("mode_pref verify failed") and _lock_set_succeeded(set_results, "mode_pref"):
+                readback_warnings.append(err)
+            else:
+                hard_errors.append(err)
+        errors = hard_errors
+        if not _modem_snapshot_in_service():
+            recovery_hints = await _lock_apply_recovery_hints()
+    finally:
+        _resume_exclusive_modem_access(resume_kpi=True)
 
     modem_hints: list[str] = []
     for k2, rr in set_results.items():
@@ -2421,16 +2579,25 @@ async def network_locks_set(body: LockSetBody) -> dict:
                 modem_hints.append(f"{k2}: {hint}")
     modem_detail_l = " | ".join(modem_hints) if modem_hints else None
     err_out = "; ".join(errors) if errors else None
+    if readback_warnings:
+        warn_txt = "; ".join(readback_warnings)
+        err_out = combine_errors(err_out, f"readback pending: {warn_txt}", sep=" — ")
     if modem_detail_l:
         err_out = combine_errors(err_out, modem_detail_l, sep=" — ")
+
+    async with _desired_locks_lock:
+        desired_out = dict(_desired_locks)
 
     return {
         "ok": len(errors) == 0,
         "error": err_out if err_out else None,
         "modem_detail": modem_detail_l,
+        "readback_warnings": readback_warnings or None,
+        "recovery_hints": recovery_hints or None,
+        "radio_refresh": radio_refresh_result,
         "set": set_results,
         "locks": locks,
-        "desired_locks": normalized_requested if not errors else None,
+        "desired_locks": desired_out,
         "raw": lock_state["raw"],
     }
 

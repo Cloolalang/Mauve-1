@@ -1,10 +1,10 @@
 # 5G ModemTestDriver
 
-**Version 4.0** (this git tree / OpenAPI on `main`) — **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1)
+**Version 4.1** (this git tree / OpenAPI on `main`) — **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1)
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (the **page header** version matches whatever build you run—**v4.0** when built from **`main`**, or the release tag when using a **prebuilt** zip).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (the **page header** version matches whatever build you run—**v4.1** when built from **`main`**, or the release tag when using a **prebuilt** zip).
 
-**Prebuilt vs source:** The **Latest** [GitHub Release](https://github.com/Cloolalang/Mauve-1/releases/latest) ships **`5GModemTestDriver-windows-amd64.zip`** for its **tag only**; that tag can lag **`main`** until maintainers cut a new release. For **v4.0** behaviour, run from source (see **Quick start**) or **`build_exe.ps1`**, or wait for a GitHub Release **≥ v4.0**.
+**Prebuilt vs source:** The **Latest** [GitHub Release](https://github.com/Cloolalang/Mauve-1/releases/latest) ships **`5GModemTestDriver-windows-amd64.zip`** for its **tag only**; that tag can lag **`main`** until maintainers cut a new release. For **v4.1** behaviour, run from source (see **Quick start**) or **`build_exe.ps1`**, or wait for a GitHub Release **≥ v4.1**.
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -140,6 +140,12 @@ If you used **`start.cmd`**, **`start.ps1`**, or **`uvicorn`**, focus that windo
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v4.1**
+
+- **SIM inspector — MBN list**: **`GET /api/sim/qmbncfg-list`** runs **`AT+QMBNCFG="List"`**; dashboard button **List MBN (QMBNCFG)** shows plain-text modem output in the SIM card.
+- **RAT / band lock (NR → LTE)**: **`POST /api/network/locks`** clears **`nr5g_band`** on **AUTO** and turns **NRDC** off when not sent; **LTE** forces **`nr5g_band=0`** and **`nrdc_mode=0`**; optional **`radio_refresh`** (default on) runs **`AT+CFUN=0`** then **`AT+CFUN=1`** after **`mode_pref`** changes; **`recovery_hints`** when still **SEARCH** / not attached; lock guard skips re-apply while modem has no service; dashboard **Apply Locks** aligns **AUTO/LTE** with **NR bands=0** and **NRDC OFF**.
+- **OpenAPI / page header**: **v4.1**.
 
 **Changes in v4.0**
 
@@ -696,6 +702,7 @@ The JSON includes `sample.carrier_reselection` with `window_sec` (60), `primary_
 - `POST /api/tools/volte-test`
 - `GET /api/sim/high-level`
 - `GET /api/sim/inspector`
+- `GET /api/sim/qmbncfg-list` (modem `AT+QMBNCFG="List"` — MBN profile list as plain text)
 - `WS /ws/kpi`
 
 ## Data Service KPI details
@@ -764,6 +771,10 @@ Two SIM-focused endpoints are available:
 - `GET /api/sim/high-level`
   - Executes: `AT+CGSN`, `AT+CIMI`, `AT+QSPN`, `AT+COPS?`, `AT+CPOL?`
   - Returns parsed summary (`imei`, `imsi`, `spn`, `cops`, `cpol_count`) and raw command outputs.
+
+- `GET /api/sim/qmbncfg-list`
+  - Executes: `AT+QMBNCFG="List"` (Quectel modem MBN profile list).
+  - Returns `text` (joined response lines), `lines`, and raw `cmd` status.
 
 - `GET /api/sim/inspector`
   - Read-only SIM EF reads via `AT+CRSM=176,...`:

@@ -627,9 +627,13 @@
       <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
         <button id="btn-sim-high-read">Read SIM High-Level</button>
         <button id="btn-sim-inspect-read">Read SIM Inspector</button>
+        <button id="btn-sim-qmbncfg-list" type="button">List MBN (QMBNCFG)</button>
       </div>
       <div id="simmsg" class="label" style="margin-top:8px;">-</div>
-      <pre id="siminspect" class="mono" style="max-height:420px; overflow:auto; margin-top:8px;">-</pre>
+      <div class="label" style="margin-top:8px;">AT+QMBNCFG="List"</div>
+      <pre id="sim-qmbncfg" class="mono" style="max-height:280px; overflow:auto; margin-top:4px;">-</pre>
+      <div class="label" style="margin-top:8px;">SIM EF inspector</div>
+      <pre id="siminspect" class="mono" style="max-height:420px; overflow:auto; margin-top:4px;">-</pre>
     </div>
 
     <div class="card">
@@ -2410,6 +2414,25 @@
       }
     }
 
+    async function readQmbncfgList() {
+      const btn = el("btn-sim-qmbncfg-list");
+      const pre = el("sim-qmbncfg");
+      if (btn) btn.disabled = true;
+      if (pre) pre.textContent = "Running AT+QMBNCFG=\"List\"…";
+      try {
+        const r = await fetch("/api/sim/qmbncfg-list");
+        const j = await r.json();
+        if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "QMBNCFG List failed"));
+        if (pre) pre.textContent = j.text && String(j.text).trim() ? j.text : "(no response lines)";
+        el("simmsg").textContent = "QMBNCFG List OK";
+      } catch (e) {
+        if (pre) pre.textContent = "-";
+        el("simmsg").textContent = `QMBNCFG List error: ${e.message || e}`;
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
     async function readSerialStatus(showMessage = false) {
       try {
         const r = await fetch("/api/serial/status");
@@ -2711,8 +2734,17 @@
           }
         }
       }
-      if (nrBand) body.nr5g_band = nrBand;
-      body.nrdc_mode = el("input-nrdc-enable").checked ? 1 : 0;
+      // AUTO must release NR band whitelist (0 = all); otherwise modem stays NR5G-SA despite mode_pref AUTO.
+      if (ratMode === "AUTO" || ratMode === "LTE") {
+        body.nr5g_band = "0";
+        body.nrdc_mode = 0;
+        el("input-nrdc-enable").checked = false;
+      } else if (nrBand) {
+        body.nr5g_band = nrBand;
+      }
+      if (body.nrdc_mode === undefined) {
+        body.nrdc_mode = el("input-nrdc-enable").checked ? 1 : 0;
+      }
       if (Object.keys(body).length === 0) {
         el("lockmsg").textContent = "Enter at least one value before applying.";
         return;
@@ -2725,7 +2757,19 @@
         });
         const j = await r.json();
         if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "Lock set failed"));
-        applyLocks(j, "Locks applied and verified.");
+        const pending = Array.isArray(j.readback_warnings) && j.readback_warnings.length;
+        const warn = pending ? ` Readback still settling: ${j.readback_warnings.join("; ")}` : "";
+        const hints =
+          Array.isArray(j.recovery_hints) && j.recovery_hints.length
+            ? ` ${j.recovery_hints.join(" ")}`
+            : "";
+        const rf = j.radio_refresh && j.radio_refresh.ok ? " Radio refreshed (CFUN cycle)." : "";
+        applyLocks(
+          j,
+          pending
+            ? `Locks applied (modem OK).${rf}${warn}${hints}`
+            : `Locks applied and verified.${rf}${hints}`
+        );
       } catch (e) {
         el("lockmsg").textContent = `Lock set error: ${e.message || e}`;
       }
@@ -7564,6 +7608,16 @@
     el("btn-cops-dereg").addEventListener("click", () => setCops(2));
     el("btn-lock-read").addEventListener("click", () => readLocks());
     el("btn-lock-set").addEventListener("click", () => setLocks());
+    const ratModeSel = el("input-ratmode");
+    if (ratModeSel) {
+      ratModeSel.addEventListener("change", () => {
+        const rat = (ratModeSel.value || "").trim();
+        if (rat === "LTE") {
+          el("input-nrdc-enable").checked = false;
+          if (el("input-nrband")) el("input-nrband").value = "0";
+        }
+      });
+    }
     el("btn-mno-read").addEventListener("click", () => readMnoState("MNO state read OK"));
     el("btn-mno-apply").addEventListener("click", () => applyMnoSelection());
     el("btn-data-inhibit").addEventListener("click", () => setDataGate(true));
@@ -7572,6 +7626,7 @@
     if (btnDsApn) btnDsApn.addEventListener("click", () => applyDsApn());
     el("btn-sim-high-read").addEventListener("click", () => readSimHighLevel());
     el("btn-sim-inspect-read").addEventListener("click", () => readSimInspector());
+    el("btn-sim-qmbncfg-list").addEventListener("click", () => readQmbncfgList());
     el("btn-volte-test").addEventListener("click", () => runVolteTest());
     const aaEn = el("autoanswer-enabled");
     if (aaEn) aaEn.addEventListener("change", () => applyAutoAnswer());

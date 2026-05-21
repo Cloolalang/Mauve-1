@@ -74,6 +74,10 @@ class LockSetBody(BaseModel):
     lte_band: str | None = Field(default=None, description='QNWPREFCFG lte_band string')
     nr5g_band: str | None = Field(default=None, description='QNWPREFCFG nr5g_band or nsa_nr5g_band string')
     nrdc_mode: int | None = Field(default=None, description='QNWPREFCFG nrdc_mode (0=off,1=on)')
+    radio_refresh: bool | None = Field(
+        default=None,
+        description="After mode_pref change: AT+CFUN=0 then AT+CFUN=1 to force RAT rescan (default on for LTE/AUTO).",
+    )
 
 
 class VolteTestBody(BaseModel):

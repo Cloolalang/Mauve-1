@@ -1,6 +1,14 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 4.0** — see root [`README.md`](../README.md) for the full feature overview. **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1). FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **4.0**).
+**Version 4.1** — see root [`README.md`](../README.md) for the full feature overview. **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1). FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **4.1**).
+
+Notes for **v4.1**:
+
+- **`GET /api/sim/qmbncfg-list`**: **`AT+QMBNCFG="List"`**; response **`text`** / **`lines`** for SIM inspector UI.
+- **`POST /api/network/locks`**: **AUTO** clears **`nr5g_band`** and default **NRDC off**; **LTE** forces **`nr5g_band=0`**, **`nrdc_mode=0`**; **`radio_refresh`** (optional, default on after **`mode_pref`**) — **`CFUN=0`** → **`CFUN=1`**; **`recovery_hints`** when deregistered; lock guard pauses re-apply when **SEARCH** / no service; ordered apply **`mode_pref`** → bands → **NRDC**.
+- **`LockSetBody.radio_refresh`**: set **`false`** to skip CFUN cycle.
+- **`dashboard.html`**: **List MBN (QMBNCFG)** button; **Apply Locks** sets **NRDC OFF** for **AUTO/LTE**.
+- OpenAPI / page header: **v4.1**.
 
 Notes for **v4.0**:
 
@@ -337,6 +345,7 @@ Failures from the modem (**`+CME ERROR`**, **`ERROR`**, **TIMEOUT**, etc.) surfa
   - high-level SIM/operator reads (`AT+CGSN`, `AT+CIMI`, `AT+QSPN`, `AT+COPS?`, `AT+CPOL?`)
   - returns parsed summary + raw command outputs
 - `GET /api/sim/inspector`
+- `GET /api/sim/qmbncfg-list` (modem `AT+QMBNCFG="List"` — MBN profile list as plain text)
   - read-only SIM EF inspection via `AT+CRSM=176,...`
   - optional query: **`verbose=1`** — adds short EF descriptions, EF_EPSLOCI byte length, and `label_reference` (TS 31.102 numbering note); KPI UI requests verbose reads by default
   - includes PLMN/mobility-oriented files:
