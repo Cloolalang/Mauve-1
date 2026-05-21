@@ -94,6 +94,13 @@
       0%, 100% { opacity: 1; filter: drop-shadow(0 0 4px rgba(230, 184, 0, 0.55)); }
       50% { opacity: 0.38; filter: drop-shadow(0 0 2px rgba(230, 184, 0, 0.25)); }
     }
+    @keyframes mtcp-lamp-pulse {
+      0%, 100% { opacity: 1; box-shadow: 0 0 8px rgba(255, 204, 102, 0.7); }
+      50% { opacity: 0.45; box-shadow: 0 0 4px rgba(255, 204, 102, 0.35); }
+    }
+    #mtcp-lamp.mtcp-lamp--opening {
+      animation: mtcp-lamp-pulse 0.9s ease-in-out infinite;
+    }
     .volte-phone-caption {
       font-size: 13px;
       font-weight: 600;
@@ -653,6 +660,7 @@
       </div>
 
       <div class="label" style="margin-top:14px;">Incoming calls — auto-answer</div>
+      <div class="label" style="font-size:10px; color:#888; margin-top:2px;">AT+CLCC polling runs only while auto-answer is On (or during a VoLTE test). Otherwise the serial port is left for RF KPI.</div>
       <div class="row" style="margin-top:8px;"><span class="label">Auto-answer</span>
         <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
           <input id="autoanswer-enabled" type="checkbox" />
@@ -724,9 +732,15 @@
           <div id="iperf-parallel-note" class="label" style="margin-top:4px; color:#888; font-size:10px;"></div>
         </div>
       </div>
-      <div style="margin-top:8px;">
-        <div class="label" title="Control-path TCP budget before iperf runs. Newer iperf3: --connect-timeout in ms. Bundled 3.1.1: same seconds used for a Python IPv4 TCP pre-connect (fail-fast) so the UI does not wait on OS SYN retries. Subprocess wall-clock still adds duration/stream slack after connect.">Connect timeout (s)</div>
-        <input id="iperf-connect-timeout" type="number" min="1" max="120" step="1" value="10" style="width:100%; max-width:220px; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:8px;">
+        <div>
+          <div class="label" title="Control-path TCP budget before iperf runs. Newer iperf3: --connect-timeout in ms. Bundled 3.1.1: same seconds used for a Python IPv4 TCP pre-connect (fail-fast) so the UI does not wait on OS SYN retries. Subprocess wall-clock still adds duration/stream slack after connect.">Connect timeout (s)</div>
+          <input id="iperf-connect-timeout" type="number" min="1" max="120" step="1" value="10" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+        </div>
+        <div>
+          <div class="label" title="iperf3 -O/--omit: exclude the first N seconds from the throughput summary (warmup). 0 disables. Must be less than test duration.">Omit / warmup (s, -O)</div>
+          <input id="iperf-omit-sec" type="number" min="0" max="299" step="1" value="0" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+        </div>
       </div>
       <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:8px;">
         <div>
@@ -779,6 +793,61 @@
       </div>
       <div id="iperf-msg" class="label" style="margin-top:8px;">-</div>
       <pre id="iperf-trace" class="mono" style="max-height:160px; overflow:auto; margin-top:8px;">-</pre>
+    </div>
+
+    <div class="card">
+      <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">
+        <div class="label" style="margin:0;">Modem TCP connect (AT+QIOPEN)</div>
+        <div id="mtcp-lamp-wrap" style="display:flex; align-items:center; gap:8px; padding:6px 10px; border-radius:8px; border:1px solid #333; background:#0c0c0c;" title="Modem socket state for the last single-shot test (always closed after AT+QICLOSE).">
+          <span id="mtcp-lamp" aria-hidden="true" style="width:14px; height:14px; border-radius:50%; background:#444; box-shadow:0 0 0 2px #222; flex-shrink:0;"></span>
+          <span id="mtcp-lamp-label" class="mono" style="font-size:13px; font-weight:700; color:#888; letter-spacing:0.06em;">CLOSED</span>
+        </div>
+      </div>
+      <div class="label" style="margin-top:4px; font-size:11px; color:#888; line-height:1.45;">
+        Opens a TCP socket on the <strong>modem</strong> stack (not host iperf). Times until <code>+QIOPEN</code> URC, then <code>AT+QICLOSE</code>. Requires active PDP (<code>AT+QIACT</code>) — use Allow Data first. Confirm <code>QIOPEN</code> in <code>AT+CLAC</code> on your AT port.
+      </div>
+      <div style="display:grid; grid-template-columns: 1fr 120px 120px; gap:8px; margin-top:8px;">
+        <div>
+          <div class="label">Remote IP / host:</div>
+          <input id="mtcp-host" value="8.8.8.8" placeholder="e.g. 8.8.8.8" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+        </div>
+        <div>
+          <div class="label">Port:</div>
+          <input id="mtcp-port" type="number" min="1" max="65535" value="443" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+        </div>
+        <div>
+          <div class="label" title="Max wait for +QIOPEN URC after AT+QIOPEN">Timeout (s):</div>
+          <input id="mtcp-timeout" type="number" min="1" max="120" step="1" value="30" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+        </div>
+      </div>
+      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+        <button type="button" id="btn-mtcp-run">Run TCP connect (single shot)</button>
+      </div>
+      <div style="margin-top:10px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+        <label style="display:flex; align-items:center; gap:6px; cursor:pointer; user-select:none;">
+          <input type="checkbox" id="mtcp-sweep-enable" style="width:15px; height:15px; accent-color:#ffb347;" />
+          <span class="label" style="margin:0;">Continuous sweep (every 15 s)</span>
+        </label>
+        <span id="mtcp-sweep-state" class="label" style="margin:0; font-size:11px; color:#666;">OFF</span>
+        <span class="label" style="margin:0; font-size:10px; color:#888;" title="RF KPI keeps updating between shots; EPS registration display is held steady during sweep to avoid flicker.">RF KPI live · reg display held</span>
+      </div>
+      <div id="mtcp-result" style="margin-top:12px; padding:14px 12px; border-radius:8px; border:1px solid #333; background:#101010; text-align:center;">
+        <div id="mtcp-result-status" style="font-size:15px; font-weight:600; color:#888; letter-spacing:0.03em;">Ready</div>
+        <div id="mtcp-result-ms" class="mono" style="font-size:32px; font-weight:600; margin-top:6px; color:#666;">—</div>
+        <div id="mtcp-result-detail" class="label" style="margin-top:6px; font-size:11px; color:#888;">—</div>
+      </div>
+      <div id="mtcp-msg" class="label" style="margin-top:8px;">-</div>
+      <pre id="mtcp-trace" class="mono" style="max-height:140px; overflow:auto; margin-top:8px;">-</pre>
+    </div>
+
+    <div class="card">
+      <div class="label">Modem TCP connect trend (ms)</div>
+      <canvas id="mtcp-chart" width="420" height="180" style="width:100%; height:180px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m — line: setup ms · bottom strip: OPENING (amber) / OPEN (green) / CLOSED (grey) / fail (red)</div>
+      <div style="margin-top:8px;">
+        <canvas id="mtcp-gauge" width="220" height="110" style="width:100%; max-width:280px; height:110px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
+        <div id="mtcp-gauge-note" class="label" style="margin-top:5px;">Latest connect setup (ms).</div>
+      </div>
     </div>
 
     <div class="card">
@@ -938,7 +1007,7 @@
     </div>
 
     <div class="card" style="grid-column: 1 / -1;">
-      <div class="label">AT Console</div>
+      <div class="label">AT Console <span style="font-size:10px; color:#888;">(HH:MM:SS.mmm per line)</span></div>
       <pre id="atlog" class="mono" style="max-height:220px; overflow:auto; margin-top:8px;">-</pre>
     </div>
   </div>
@@ -1097,6 +1166,19 @@
     let volteBusy = false;
     let phRepeatTimer = null;
     const PH_REPEAT_INTERVAL_MS = 15000;
+    let modemTcpBusy = false;
+    let mtcpSweepActive = false;
+    let mtcpSweepTimer = null;
+    let mtcpSweepNeedsPreClose = true;
+    const MTCP_SWEEP_INTERVAL_MS = 15000;
+    const MTCP_REG_HOLD_MS = 8000;
+    let mtcpRegHold = null;
+    const modemTcpHistory = [];
+    const modemTcpEventHistory = [];
+    const modemTcpStateHistory = [];
+    let lastModemTcpMs = null;
+    let lastModemTcpOk = null;
+    let mtcpLampRevertTimer = null;
     const phAvgHistory = [];
     const phJitHistory = [];
     const phEventHistory = []; // { t, ok } — test-complete markers drawn on chart
@@ -1273,6 +1355,9 @@
       pruneHistoryByAge(phAvgHistory, nowMs);
       pruneHistoryByAge(phJitHistory, nowMs);
       pruneHistoryByAge(phEventHistory, nowMs);
+      pruneHistoryByAge(modemTcpHistory, nowMs);
+      pruneHistoryByAge(modemTcpEventHistory, nowMs);
+      pruneHistoryByAge(modemTcpStateHistory, nowMs);
       Object.values(rfHistory).forEach((h) => pruneHistoryByAge(h, nowMs));
       Object.values(rfNeighborOverlap).forEach((h) => pruneHistoryByAge(h, nowMs));
       pruneHistoryByAge(nbrInterRsrpHistory, nowMs);
@@ -1317,6 +1402,8 @@
       drawIperfGauges();
       drawPhSweepChart();
       drawPhGauges();
+      drawModemTcpChart();
+      drawModemTcpGauges();
       drawRfCharts();
       drawInterNbrRfCharts();
       drawNeighbourCountCharts();
@@ -1531,13 +1618,48 @@
       drawNeighbourCountCharts();
     }
 
+    function updateMtcpRegHold(ds) {
+      if (ds?.eps_registered === true) {
+        mtcpRegHold = {
+          eps_registered: true,
+          eps_reg_scope: ds.eps_reg_scope,
+          eps_reg_stat: ds.eps_reg_stat,
+          eps_roaming: ds.eps_roaming,
+          packet_attached: ds.packet_attached,
+          cid1_active: ds.cid1_active,
+          cid1_ip: ds.cid1_ip,
+          until: Date.now() + MTCP_REG_HOLD_MS
+        };
+      }
+    }
+
+    /** During TCP sweep, hold last good EPS/CID1 fields so UI does not flicker on stale reads. */
+    function stabilizeDataServiceForMtcpSweep(ds) {
+      const raw = ds || {};
+      if (raw.eps_registered === true) updateMtcpRegHold(raw);
+      if (!mtcpSweepActive && !modemTcpBusy) return raw;
+      if (raw.eps_registered === true) return raw;
+      const hold = mtcpRegHold;
+      if (!hold || hold.eps_registered !== true || Date.now() >= hold.until) return raw;
+      return {
+        ...raw,
+        eps_registered: true,
+        eps_reg_scope: hold.eps_reg_scope ?? raw.eps_reg_scope,
+        eps_reg_stat: hold.eps_reg_stat ?? raw.eps_reg_stat,
+        eps_roaming: hold.eps_roaming ?? raw.eps_roaming,
+        packet_attached: hold.packet_attached ?? raw.packet_attached,
+        cid1_active: hold.cid1_active ?? raw.cid1_active,
+        cid1_ip: hold.cid1_ip ?? raw.cid1_ip
+      };
+    }
+
     function applySnap(payload) {
       const sample = payload?.sample || {};
       lastKpiSample = sample;
       const reg = sample.registration || {};
       const net = sample.network || {};
       const modem = sample.modem || {};
-      const ds = sample.data_service || {};
+      const ds = stabilizeDataServiceForMtcpSweep(sample.data_service || {});
       lastDataService = ds;
       const srv = sample.servingcell || {};
       const lte = srv.lte || {};
@@ -1567,7 +1689,7 @@
       const epsScope = ds.eps_reg_scope;
       const epsStat = ds.eps_reg_stat;
       const epsTip =
-        "EPS registration from AT+CEREG (3GPP: stat 1 = home PLMN, 5 = roaming). Refreshes with Data Service KPI (~5s).";
+        "EPS registration from AT+CEREG (3GPP: stat 1 = home PLMN, 5 = roaming). Refreshes with Data Service KPI (~30s, background).";
 
       const isMocn = mcn.confidence === "reciprocal_mocn" || mcn.partner_layer_possible;
 
@@ -1873,7 +1995,18 @@
         lastTrendSampleTs = trendTs;
         addCategorySample("state", srv.state || "-", trendTs);
         addCategorySample("rat", ratVal, trendTs);
-        addCategorySample("regTrend", composeRegistrationTrendSample(sample), trendTs);
+        const regTrendSample =
+          ds !== sample.data_service ? { ...sample, data_service: ds } : sample;
+        const regTrendLbl = composeRegistrationTrendSample(regTrendSample);
+        const skipRegTrendFlicker =
+          (mtcpSweepActive || modemTcpBusy) &&
+          mtcpRegHold &&
+          mtcpRegHold.eps_registered === true &&
+          Date.now() < mtcpRegHold.until &&
+          /\bEPS:\?|Not registered/i.test(regTrendLbl);
+        if (!skipRegTrendFlicker) {
+          addCategorySample("regTrend", regTrendLbl, trendTs);
+        }
         addCarrierReselSamples(idleMob, trendTs);
         if (primaryCellDataAvailable) {
           addRfSample("rsrp", lte.rsrp, trendTs, true);
@@ -2716,14 +2849,22 @@
     }
 
     let autoAnswerApplyBusy = false;
+    let hostAutoAnswerEnabled = false;
+
+    function voiceClccPollWanted() {
+      if (hostAutoAnswerEnabled) return true;
+      if (volteBusy || voiceCallActionBusy) return true;
+      return false;
+    }
 
     async function readAutoAnswerStatus(silent = false) {
       try {
         const r = await fetch("/api/tools/host-auto-answer");
         const j = await r.json();
         if (!r.ok || !j.ok) throw new Error(userFacingBackendError(j, "Read failed"));
+        hostAutoAnswerEnabled = !!j.enabled;
         const cb = el("autoanswer-enabled");
-        if (cb) cb.checked = !!j.enabled;
+        if (cb) cb.checked = hostAutoAnswerEnabled;
         const rin = el("autoanswer-rings");
         if (rin && j.rings != null && j.rings !== undefined) {
           rin.value = String(j.rings);
@@ -2846,7 +2987,17 @@
       }
     }
 
+    let lastVoicePollMs = 0;
+    const VOICE_POLL_MS = 1700;
+    const VOICE_POLL_DURING_MTCP_MS = 5000;
+
     async function pollVoiceCallStatus() {
+      if (!voiceClccPollWanted()) return;
+      const now = Date.now();
+      const minGap =
+        mtcpSweepActive || modemTcpBusy ? VOICE_POLL_DURING_MTCP_MS : VOICE_POLL_MS;
+      if (now - lastVoicePollMs < minGap) return;
+      lastVoicePollMs = now;
       try {
         const r = await fetch("/api/tools/voice-call-status");
         const j = await r.json();
@@ -3168,6 +3319,18 @@
         return;
       }
       const connectTimeoutSec = Math.trunc(cCt);
+      const omitRaw = String(el("iperf-omit-sec")?.value ?? "0").trim();
+      const omitSec = omitRaw === "" ? 0 : Math.trunc(Number(omitRaw));
+      if (!Number.isFinite(omitSec) || omitSec < 0 || omitSec > 299) {
+        el("iperf-msg").textContent = "Omit / warmup must be 0..299 seconds.";
+        iperfBusy = false;
+        return;
+      }
+      if (omitSec >= Math.trunc(durationSec)) {
+        el("iperf-msg").textContent = "Omit / warmup must be less than test duration.";
+        iperfBusy = false;
+        return;
+      }
       try {
         el("iperf-msg").textContent = `Running iperf ${direction} test...`;
         el("iperf-trace").textContent = "Running...";
@@ -3186,6 +3349,7 @@
           if (bindIp) body.bind_ip = bindIp;
           if (speedLimit !== null) body.bitrate_limit_mbps = speedLimit;
           body.connect_timeout_sec = connectTimeoutSec;
+          body.omit_sec = omitSec;
           const r = await fetch("/api/tools/iperf-test", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -3264,6 +3428,7 @@
             `Direction: ${j.direction || "-"}`,
             `Protocol: ${j.protocol || protocol}`,
             `Parallel streams: ${j.parallel_streams != null ? j.parallel_streams : parallelStreams}`,
+            `Omit / warmup (-O): ${j.omit_sec != null ? j.omit_sec : omitSec}s`,
             (() => {
               const lim = j.bitrate_limit_mbps != null ? Number(j.bitrate_limit_mbps) : (speedLimit != null ? speedLimit : null);
               if (lim == null || !Number.isFinite(lim) || lim <= 0) return "Speed limit: Unlimited";
@@ -4433,6 +4598,399 @@
       const jTxt = Number.isFinite(lastPhJitMs) ? `${lastPhJitMs.toFixed(2)} ms` : "-";
       const note = el("ph-gauge-note");
       if (note) note.textContent = `Latest sweep: avg ${aTxt}, jitter ${jTxt} (gauge scale from recent runs).`;
+    }
+
+    function setMtcpSocketLamp(state) {
+      const lamp = el("mtcp-lamp");
+      const label = el("mtcp-lamp-label");
+      const wrap = el("mtcp-lamp-wrap");
+      if (!lamp || !label) return;
+      lamp.classList.remove("mtcp-lamp--opening");
+      const cfg = {
+        closed: { bg: "#444", glow: "#222", text: "CLOSED", color: "#888", border: "#333" },
+        opening: { bg: "#e6b800", glow: "rgba(230,184,0,0.5)", text: "OPENING…", color: "#ffcc66", border: "#5a4a18" },
+        open: { bg: "#39d353", glow: "rgba(57,211,83,0.55)", text: "OPEN", color: "#7cffb2", border: "#2d6a4f" },
+        failed: { bg: "#d64545", glow: "rgba(214,69,69,0.45)", text: "CLOSED", color: "#ff9a9a", border: "#6a2d2d" }
+      };
+      const c = cfg[state] || cfg.closed;
+      if (state === "opening") lamp.classList.add("mtcp-lamp--opening");
+      lamp.style.background = c.bg;
+      lamp.style.boxShadow = `0 0 10px ${c.glow}`;
+      label.textContent = c.text;
+      label.style.color = c.color;
+      if (wrap) wrap.style.borderColor = c.border;
+    }
+
+    function setMtcpResultIndicator(ok, connectMs, detail) {
+      const box = el("mtcp-result");
+      const st = el("mtcp-result-status");
+      const ms = el("mtcp-result-ms");
+      const det = el("mtcp-result-detail");
+      if (!box || !st || !ms) return;
+      if (ok === null) {
+        box.style.borderColor = "#333";
+        box.style.background = "#101010";
+        st.textContent = "Ready";
+        st.style.color = "#888";
+        ms.textContent = "—";
+        ms.style.color = "#666";
+        if (det) det.textContent = detail || "—";
+        return;
+      }
+      if (ok) {
+        box.style.borderColor = "#2d6a4f";
+        box.style.background = "#0d1f14";
+        st.textContent = "CONNECTED";
+        st.style.color = "#50fa7b";
+        ms.textContent = Number.isFinite(connectMs) ? `${connectMs.toFixed(1)} ms` : "—";
+        ms.style.color = "#7cffb2";
+      } else {
+        box.style.borderColor = "#6a2d2d";
+        box.style.background = "#1f0d0d";
+        st.textContent = "FAILED";
+        st.style.color = "#ff6b6b";
+        ms.textContent = Number.isFinite(connectMs) ? `${connectMs.toFixed(1)} ms` : "—";
+        ms.style.color = "#ffb4b4";
+      }
+      if (det) det.textContent = detail || "—";
+    }
+
+    function scheduleMtcpLampClosed(detailSuffix) {
+      if (mtcpLampRevertTimer) clearTimeout(mtcpLampRevertTimer);
+      mtcpLampRevertTimer = setTimeout(() => {
+        mtcpLampRevertTimer = null;
+        setMtcpSocketLamp("closed");
+        const det = el("mtcp-result-detail");
+        if (det && detailSuffix) {
+          const cur = String(det.textContent || "").trim();
+          if (cur && cur !== "—") det.textContent = `${cur} · ${detailSuffix}`;
+          else det.textContent = detailSuffix;
+        }
+      }, 1800);
+    }
+
+    function addMtcpState(t, state) {
+      const ts = Number(t);
+      if (!Number.isFinite(ts)) return;
+      modemTcpStateHistory.push({ t: ts, state: String(state || "closed") });
+      pruneHistoryByAge(modemTcpStateHistory, ts);
+    }
+
+    function drawModemTcpChart() {
+      const canvas = el("mtcp-chart");
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#101010";
+      ctx.fillRect(0, 0, w, h);
+
+      const x0 = 44;
+      const x1 = w - 12;
+      const stateLaneH = 7;
+      const stateLaneTop = h - 16;
+      const y0 = h - 24;
+      const y1 = 10;
+      const nowMs = Date.now();
+      const windowStartMs = nowMs - chartWindowMs;
+      const xFor = (p) => {
+        const t = Number(p?.t);
+        if (!Number.isFinite(t)) return x0;
+        const ratio = Math.max(0, Math.min(1, (t - windowStartMs) / chartWindowMs));
+        return x0 + ratio * (x1 - x0);
+      };
+
+      const hasMs = modemTcpHistory.length > 0;
+      const hasState = modemTcpStateHistory.length > 0;
+      if (!hasMs && !hasState) {
+        ctx.fillStyle = "#777";
+        ctx.font = "12px Arial";
+        ctx.fillText("No modem TCP connect samples yet", 12, 24);
+        return;
+      }
+
+      let yMin = 0;
+      let yMax = 50;
+      let span = 50;
+      let yFor = (v) => y0;
+      if (hasMs) {
+        const values = modemTcpHistory.map((p) => Number(p?.v)).filter((x) => Number.isFinite(x));
+        const minV = values.length ? Math.min(...values) : 0;
+        const maxV = values.length ? Math.max(...values) : 1;
+        const pad = Math.max(5, (maxV - minV) * 0.15);
+        yMin = 0;
+        yMax = Math.max(maxV + pad, 50);
+        span = Math.max(1, yMax - yMin);
+        yFor = (v) => y0 - ((v - yMin) / span) * (y0 - y1);
+      }
+
+      ctx.strokeStyle = "#2a2a2a";
+      ctx.lineWidth = 1;
+      for (let i = 0; i <= 4; i++) {
+        const y = y1 + (i * (y0 - y1)) / 4;
+        ctx.beginPath();
+        ctx.moveTo(x0, y);
+        ctx.lineTo(x1, y);
+        ctx.stroke();
+      }
+      ctx.fillStyle = "#aaa";
+      ctx.font = "11px Arial";
+      if (hasMs) {
+        ctx.fillText(`${yMax.toFixed(0)} ms`, 4, 14);
+        ctx.fillText("0 ms", 4, y0 + 4);
+      }
+
+      const stateColors = {
+        opening: "#e6b800",
+        open: "#39d353",
+        closed: "#555555",
+        failed: "#d64545"
+      };
+      if (hasState) {
+        const stSorted = [...modemTcpStateHistory].sort((a, b) => a.t - b.t);
+        let curState = "closed";
+        let idx = 0;
+        while (idx < stSorted.length && stSorted[idx].t <= windowStartMs) {
+          curState = stSorted[idx].state;
+          idx += 1;
+        }
+        let segStart = windowStartMs;
+        const drawStateSeg = (tA, tB, state) => {
+          if (tB <= tA) return;
+          const xA = xFor({ t: tA });
+          const xB = xFor({ t: tB });
+          ctx.fillStyle = stateColors[state] || stateColors.closed;
+          ctx.fillRect(xA, stateLaneTop, Math.max(1, xB - xA), stateLaneH);
+        };
+        for (; idx < stSorted.length; idx += 1) {
+          const tCh = stSorted[idx].t;
+          if (tCh > segStart) drawStateSeg(segStart, tCh, curState);
+          curState = stSorted[idx].state;
+          segStart = tCh;
+        }
+        drawStateSeg(segStart, nowMs, curState);
+        ctx.fillStyle = "#888";
+        ctx.font = "10px Arial";
+        const legX = x1 - 168;
+        ctx.fillStyle = "#e6b800";
+        ctx.fillRect(legX, h - 5, 8, 3);
+        ctx.fillStyle = "#aaa";
+        ctx.fillText("opening", legX + 11, h - 2);
+        ctx.fillStyle = "#39d353";
+        ctx.fillRect(legX + 52, h - 5, 8, 3);
+        ctx.fillStyle = "#aaa";
+        ctx.fillText("open", legX + 63, h - 2);
+        ctx.fillStyle = "#555";
+        ctx.fillRect(legX + 88, h - 5, 8, 3);
+        ctx.fillText("closed", legX + 99, h - 2);
+      }
+
+      if (hasMs) {
+        const sorted = [...modemTcpHistory].sort((a, b) => Number(a.t) - Number(b.t));
+        ctx.strokeStyle = "#ffb347";
+        ctx.lineWidth = 2;
+        for (let i = 1; i < sorted.length; i++) {
+          ctx.beginPath();
+          ctx.moveTo(xFor(sorted[i - 1]), yFor(sorted[i - 1].v));
+          ctx.lineTo(xFor(sorted[i]), yFor(sorted[i].v));
+          ctx.stroke();
+        }
+        ctx.fillStyle = "#ffe066";
+        sorted.forEach((p) => {
+          ctx.beginPath();
+          ctx.arc(xFor(p), yFor(p.v), 2.2, 0, Math.PI * 2);
+          ctx.fill();
+        });
+      }
+    }
+
+    function drawModemTcpGauges() {
+      drawLatencyGauge("mtcp-gauge", lastModemTcpMs, "#ffb347", "TCP setup", modemTcpHistory);
+      const note = el("mtcp-gauge-note");
+      if (note) {
+        const msTxt = Number.isFinite(lastModemTcpMs) ? `${lastModemTcpMs.toFixed(1)} ms` : "—";
+        const st = lastModemTcpOk === true ? "OK" : lastModemTcpOk === false ? "fail" : "—";
+        note.textContent = `Latest: ${msTxt} (${st}).`;
+      }
+    }
+
+    function stopMtcpSweep(reason) {
+      mtcpSweepActive = false;
+      mtcpSweepNeedsPreClose = true;
+      if (mtcpSweepTimer) clearTimeout(mtcpSweepTimer);
+      mtcpSweepTimer = null;
+      const cb = el("mtcp-sweep-enable");
+      if (cb) cb.checked = false;
+      const st = el("mtcp-sweep-state");
+      if (st) {
+        st.textContent = "OFF";
+        st.className = "label";
+        st.style.color = "#666";
+      }
+      if (reason) {
+        const msg = el("mtcp-msg");
+        if (msg) msg.textContent = reason;
+      }
+    }
+
+    async function _mtcpSweepTick() {
+      if (!mtcpSweepActive) return;
+      await runModemTcpConnect();
+      if (!mtcpSweepActive) return;
+      mtcpSweepTimer = setTimeout(_mtcpSweepTick, MTCP_SWEEP_INTERVAL_MS);
+    }
+
+    function setMtcpSweep(enabled) {
+      const toggle = el("mtcp-sweep-enable");
+      const state = el("mtcp-sweep-state");
+      if (mtcpSweepTimer) {
+        clearTimeout(mtcpSweepTimer);
+        mtcpSweepTimer = null;
+      }
+      if (!enabled) {
+        stopMtcpSweep(null);
+        return;
+      }
+      if (modemTcpBusy) {
+        if (toggle) toggle.checked = false;
+        return;
+      }
+      mtcpSweepActive = true;
+      mtcpSweepNeedsPreClose = true;
+      if (toggle) toggle.checked = true;
+      if (lastDataService?.eps_registered === true) updateMtcpRegHold(lastDataService);
+      if (state) {
+        state.textContent = "ON";
+        state.className = "ok";
+        state.style.color = "";
+      }
+      _mtcpSweepTick();
+    }
+
+    async function runModemTcpConnect() {
+      if (modemTcpBusy) return;
+      modemTcpBusy = true;
+      const host = String(el("mtcp-host")?.value || "").trim();
+      const port = Number(el("mtcp-port")?.value || 443);
+      const timeoutRaw = String(el("mtcp-timeout")?.value || "30").trim();
+      const timeoutSec = Math.trunc(Number(timeoutRaw || 30));
+      if (!host) {
+        el("mtcp-msg").textContent = "Enter remote IP or hostname.";
+        modemTcpBusy = false;
+        if (mtcpSweepActive) stopMtcpSweep("Continuous sweep stopped — enter remote IP or host.");
+        return;
+      }
+      if (!Number.isFinite(port) || port < 1 || port > 65535) {
+        el("mtcp-msg").textContent = "Port must be 1..65535.";
+        modemTcpBusy = false;
+        if (mtcpSweepActive) stopMtcpSweep("Continuous sweep stopped — invalid port.");
+        return;
+      }
+      if (!Number.isFinite(timeoutSec) || timeoutSec < 1 || timeoutSec > 120) {
+        el("mtcp-msg").textContent = "Timeout must be 1..120 seconds.";
+        modemTcpBusy = false;
+        if (mtcpSweepActive) stopMtcpSweep("Continuous sweep stopped — invalid timeout.");
+        return;
+      }
+      try {
+        el("mtcp-msg").textContent = `AT+QIOPEN → ${host}:${port}…`;
+        el("mtcp-trace").textContent = "Running…";
+        if (mtcpLampRevertTimer) clearTimeout(mtcpLampRevertTimer);
+        const tRunStart = Date.now();
+        addMtcpState(tRunStart, "opening");
+        setMtcpSocketLamp("opening");
+        setMtcpResultIndicator(null, null, "Waiting for modem…");
+        drawModemTcpChart();
+        const r = await fetch("/api/tools/modem-tcp-connect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            host,
+            port: Math.trunc(port),
+            timeout_sec: timeoutSec,
+            skip_pre_close: mtcpSweepActive && !mtcpSweepNeedsPreClose
+          })
+        });
+        const j = await r.json();
+        if (!r.ok) {
+          const detail =
+            typeof j.detail === "string"
+              ? j.detail
+              : Array.isArray(j.detail)
+                ? JSON.stringify(j.detail)
+                : j.detail
+                  ? JSON.stringify(j.detail)
+                  : "";
+          throw new Error(j.error || detail || "Modem TCP connect failed");
+        }
+        const ms = j.connect_setup_ms != null ? Number(j.connect_setup_ms) : NaN;
+        lastModemTcpOk = !!j.ok;
+        if (j.ok && Number.isFinite(ms)) {
+          lastModemTcpMs = ms;
+          const t = Date.now();
+          modemTcpHistory.push({ t, v: ms });
+          pruneHistoryByAge(modemTcpHistory, t);
+        }
+        const tEnd = Date.now();
+        modemTcpEventHistory.push({ t: tEnd, ok: !!j.ok });
+        pruneHistoryByAge(modemTcpEventHistory, tEnd);
+        if (j.ok && Number.isFinite(ms) && ms > 0) {
+          addMtcpState(Math.max(tRunStart, tEnd - ms), "open");
+          addMtcpState(tEnd, "closed");
+        } else {
+          addMtcpState(tEnd, "failed");
+          addMtcpState(tEnd + 1, "closed");
+        }
+
+        const detail = [
+          j.qiopen_detail || j.error || "",
+          j.qiopen_err != null ? `QIOPEN err=${j.qiopen_err}` : ""
+        ]
+          .filter(Boolean)
+          .join(" · ");
+        if (j.ok) {
+          setMtcpSocketLamp("open");
+          setMtcpResultIndicator(true, Number.isFinite(ms) ? ms : null, detail || "OK");
+          scheduleMtcpLampClosed("AT+QICLOSE — socket closed");
+        } else {
+          setMtcpSocketLamp("failed");
+          setMtcpResultIndicator(false, Number.isFinite(ms) ? ms : null, detail || "Failed");
+        }
+        el("mtcp-msg").textContent = j.ok
+          ? `OK: ${host}:${j.port} — setup ${Number.isFinite(ms) ? ms.toFixed(1) : "?"} ms`
+          : `Failed: ${j.error || j.qiopen_detail || "unknown"}`;
+        const traceLines = (j.actions || []).map((a) => {
+          const cmd = a.cmd || "?";
+          const fin = a.res?.final || a.res?.ok;
+          return `> ${cmd}\n< ${fin}`;
+        });
+        el("mtcp-trace").textContent = traceLines.length ? traceLines.join("\n\n") : JSON.stringify(j, null, 2);
+        if (mtcpSweepActive && j.ok) {
+          const postClose = (j.actions || []).find(
+            (a) => String(a.cmd || "").includes("AT+QICLOSE=") && !String(a.cmd).includes("pre-open")
+          );
+          const fin = postClose?.res?.final;
+          // Post-close is skipped after +QIOPEN:0,0 — use pre-close on the next sweep tick.
+          mtcpSweepNeedsPreClose = fin !== "OK";
+        }
+        drawModemTcpChart();
+        drawModemTcpGauges();
+      } catch (e) {
+        const msg = String(e?.message || e || "Modem TCP connect failed");
+        lastModemTcpOk = false;
+        setMtcpSocketLamp("failed");
+        setMtcpResultIndicator(false, null, msg);
+        el("mtcp-msg").textContent = msg;
+        el("mtcp-trace").textContent = msg;
+        const tFail = Date.now();
+        addMtcpState(tFail, "failed");
+        modemTcpEventHistory.push({ t: tFail, ok: false });
+        pruneHistoryByAge(modemTcpEventHistory, tFail);
+        drawModemTcpChart();
+      } finally {
+        modemTcpBusy = false;
+      }
     }
 
     function drawMetricChart(canvasId, samples, unitLabel, color, thresholdValue = null, yFloorAtZero = false) {
@@ -6620,6 +7178,15 @@
       phEventHistory.length = 0;
       lastPhAvgMs = null;
       lastPhJitMs = null;
+      modemTcpHistory.length = 0;
+      modemTcpEventHistory.length = 0;
+      modemTcpStateHistory.length = 0;
+      lastModemTcpMs = null;
+      lastModemTcpOk = null;
+      if (mtcpLampRevertTimer) clearTimeout(mtcpLampRevertTimer);
+      mtcpLampRevertTimer = null;
+      setMtcpSocketLamp("closed");
+      setMtcpResultIndicator(null, null, "—");
       rfHistory.rsrp.length = 0;
       rfHistory.rsrq.length = 0;
       rfHistory.sinr.length = 0;
@@ -6659,6 +7226,8 @@
       drawIperfGauges();
       drawPhSweepChart();
       drawPhGauges();
+      drawModemTcpChart();
+      drawModemTcpGauges();
       drawRfCharts();
       drawInterNbrRfCharts();
       drawNeighbourCountCharts();
@@ -6773,6 +7342,7 @@
           parallel_ul: _trVal("iperf-parallel-ul"),
           parallel_dl: _trVal("iperf-parallel-dl"),
           connect_timeout_sec: _trVal("iperf-connect-timeout"),
+          omit_sec: _trVal("iperf-omit-sec"),
           direction: _trVal("iperf-direction"),
           protocol: _trVal("iperf-protocol"),
           bind_select: _trVal("iperf-bind-select"),
@@ -6907,6 +7477,8 @@
       if (pingSweepBusy)    activeTools.push("ping sweep");
       if (phRepeatTimer)    activeTools.push("ping auto-repeat");
       if (volteBusy)        activeTools.push("VoLTE call test");
+      if (modemTcpBusy)     activeTools.push("modem TCP connect");
+      if (mtcpSweepActive)  activeTools.push("modem TCP continuous sweep");
       if (activeTools.length) {
         if (msg) msg.textContent = `Cannot start — please wait for these to finish first: ${activeTools.join(", ")}.`;
         return;
@@ -7026,6 +7598,10 @@
     if (btnPhRefresh) btnPhRefresh.addEventListener("click", () => loadBindInterfaces());
     const btnPhRun = el("btn-ph-run");
     if (btnPhRun) btnPhRun.addEventListener("click", () => runPingSweepTest());
+    const btnMtcpRun = el("btn-mtcp-run");
+    if (btnMtcpRun) btnMtcpRun.addEventListener("click", () => runModemTcpConnect());
+    const mtcpSweepToggle = el("mtcp-sweep-enable");
+    if (mtcpSweepToggle) mtcpSweepToggle.addEventListener("change", (ev) => setMtcpSweep(!!ev.target.checked));
     const btnTrRefresh = el("btn-test-runner-refresh");
     if (btnTrRefresh) btnTrRefresh.addEventListener("click", () => refreshTestRunnerProfiles());
     const btnTrIf = el("btn-test-runner-refresh-ifaces");
@@ -7082,7 +7658,6 @@
     }, 400);
     pollFallback();
     pollNeighbourChannels();
-    pollVoiceCallStatus();
     pollAtLog();
     readSerialStatus(true);
     refreshSerialPorts(true);

@@ -156,6 +156,41 @@ class IperfTestBody(BaseModel):
             "Default 10. Bundled iperf 3.1.1 omits the flag but the subprocess wall-clock still allows this headroom."
         ),
     )
+    omit_sec: int = Field(
+        default=0,
+        ge=0,
+        le=299,
+        description=(
+            "iperf3 -O/--omit: exclude the first N seconds from throughput summary (TCP/UDP warmup). "
+            "0 disables. Must be less than duration_sec."
+        ),
+    )
+
+
+class ModemTcpConnectBody(BaseModel):
+    host: str = Field(
+        default="8.8.8.8",
+        min_length=1,
+        max_length=127,
+        description="Remote IPv4 or hostname for AT+QIOPEN",
+    )
+    port: int = Field(default=443, ge=1, le=65535)
+    timeout_sec: float = Field(
+        default=30.0,
+        ge=1.0,
+        le=120.0,
+        description="Max seconds to wait for +QIOPEN URC after AT+QIOPEN",
+    )
+    pdp_cid: int = Field(default=1, ge=1, le=15, description="PDP context ID (AT+QIOPEN first argument)")
+    connect_id: int = Field(default=0, ge=0, le=11, description="Socket connectID (0–11)")
+    keep_kpi_paused: bool = Field(
+        default=False,
+        description="If true, do not resume KPI poll after the test (continuous sweep holds pause).",
+    )
+    skip_pre_close: bool = Field(
+        default=False,
+        description="If true, skip AT+QICLOSE before AT+QIOPEN (use when prior shot already closed the socket).",
+    )
 
 
 class IcmpPingSweepBody(BaseModel):

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "name": "smoke_tcp_connect",
+  "project_name": "Example",
+  "test_location": "",
+  "engineer": "",
+  "modem_antenna_config": "SISO",
+  "modem_requirements": {
+    "require_packet_data": true
+  },
+  "test_type": "tcp_connect",
+  "test_config": {
+    "host": "8.8.8.8",
+    "port": 443,
+    "timeout_sec": 30,
+    "pdp_cid": 1,
+    "connect_id": 0
+  }
+}

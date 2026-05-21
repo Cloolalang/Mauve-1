@@ -1,10 +1,10 @@
 # 5G ModemTestDriver
 
-**Version 3.9** (this git tree / OpenAPI on `main`) — **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1)
+**Version 4.0** (this git tree / OpenAPI on `main`) — **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1)
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (the **page header** version matches whatever build you run—**v3.9** when built from **`main`**, or the release tag when using a **prebuilt** zip).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (the **page header** version matches whatever build you run—**v4.0** when built from **`main`**, or the release tag when using a **prebuilt** zip).
 
-**Prebuilt vs source:** The **Latest** [GitHub Release](https://github.com/Cloolalang/Mauve-1/releases/latest) ships **`5GModemTestDriver-windows-amd64.zip`** for its **tag only**; that tag can lag **`main`** until maintainers cut a new release. For **v3.9** behaviour, run from source (see **Quick start**) or **`build_exe.ps1`**, or wait for a GitHub Release **≥ v3.9**.
+**Prebuilt vs source:** The **Latest** [GitHub Release](https://github.com/Cloolalang/Mauve-1/releases/latest) ships **`5GModemTestDriver-windows-amd64.zip`** for its **tag only**; that tag can lag **`main`** until maintainers cut a new release. For **v4.0** behaviour, run from source (see **Quick start**) or **`build_exe.ps1`**, or wait for a GitHub Release **≥ v4.0**.
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -105,6 +105,8 @@ py -3.12 -m venv .venv
 Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 ```
 
+If policy cannot be changed (e.g. Group Policy), from **`backend`** run **`start.cmd`** instead of **`start.ps1`** — it starts the same app using **`-ExecutionPolicy Bypass`**. Optional args pass through (example **`start.cmd -Port 8012`**).
+
 Files from a **Download ZIP** may be marked as from the internet; from **`backend`**, run **`Unblock-File .\start.ps1`** (or unzip after unblocking the ZIP in **File Explorer → Properties → Unblock**). Locked-down PCs may disable script execution entirely via Group Policy—your administrator has to allow PowerShell or you run the **`uvicorn`** line under **Start the app** instead of **`start.ps1`**.
 
 ### 3. Confirm the Quectel AT COM port, then start the server
@@ -115,8 +117,10 @@ In PowerShell, start the backend from the **`backend`** folder:
 
 ```powershell
 cd C:\dev\Mauve-1-main\backend
-.\start.ps1
+.\start.cmd
 ```
+
+Use **`.\start.ps1`** instead if your execution policy allows scripts. If **`start.ps1`** is blocked and **`start.cmd`** is missing, run **`powershell -ExecutionPolicy Bypass -File .\start.ps1`**.
 
 **Optional — standalone Windows folder (no Python on PATH for end users):** after `pip install -r requirements.txt`, install build deps and run **`.\build_exe.ps1`** (PyInstaller **onedir**). Output: **`backend\dist\5GModemTestDriver\5GModemTestDriver.exe`**. Run the exe, then open **`http://127.0.0.1:8011/`**. Last-used COM port is stored under **`%LOCALAPPDATA%\5GModemTestDriver\serial_last.json`** when frozen. Override bind with **`MODEM_DRIVER_BIND`**, port with **`MODEM_DRIVER_PORT`**, or **`--host` / `--port`** on the exe. **Rebuild:** close any running **`5GModemTestDriver.exe`** (and **`start.ps1`**) before **`build_exe.ps1`**, or PyInstaller cannot replace **`dist\5GModemTestDriver`**. If the console flashes and closes on double-click, run the exe from PowerShell in that folder to see the error; fatal startup errors also show **Press Enter to exit**.
 
@@ -128,7 +132,7 @@ Under **Serial Port**, choose your modem COM port and click **Reconnect**. Use *
 
 ### 5. Stop the app
 
-If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`**. If you ran **`5GModemTestDriver.exe`**, close its console window (or **`Ctrl + C`** there).
+If you used **`start.cmd`**, **`start.ps1`**, or **`uvicorn`**, focus that window and press **`Ctrl + C`**. If you ran **`5GModemTestDriver.exe`**, close its console window (or **`Ctrl + C`** there).
 
 ## Requirements
 
@@ -136,6 +140,14 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v4.0**
+
+- **Modem TCP connect (AT+QIOPEN)**: dashboard tool measures setup time from **`AT+QIOPEN`** until **`+QIOPEN`** URC; single-shot and continuous sweep; timestamped **AT console** (`HH:MM:SS.mmm`); socket lamp and setup-ms trend chart.
+- **Serial / KPI coexistence**: port-wide lock so KPI does not interleave during TCP; cooperative KPI hold; post-**`QICLOSE`** skipped on **`+QIOPEN:0,0`** (avoids multi-second modem stalls); capped command waits; KPI RF polls use tighter wait caps.
+- **Test runner `tcp_connect`**: new profile type and bundled **`smoke_tcp_connect`**; **`POST /api/test/run`** executes modem TCP connect with KPI JSONL sampling; summary CSV columns **`tcp_host`** … **`tcp_connect_setup_ms`** / **`tcp_qiopen_err`** / **`tcp_qiopen_detail`**.
+- **Data service / voice polling**: heavy PDP readback moved to a background loop; VoLTE **`AT+CLCC`** throttled when idle; registration debounce during TCP sweep.
+- **OpenAPI / page header**: **v4.0**.
 
 **Changes in v3.9**
 
@@ -249,7 +261,7 @@ If you used **`start.ps1`**, focus that PowerShell window and press **`Ctrl + C`
 
 **Changes in v2.0**
 
-- **Test runner in tree**: **`backend/app/test_runner.py`** plus bundled profiles under **`backend/automated_tests/test_cases/`** (**`smoke_ping`**, **`smoke_iperf_dl`**, **`smoke_iperf_ul`**, **`smoke_iperf_dlul`**, **`smoke_volte`**). Profile **`test_type`** **`iperf_download_upload`** runs TCP **download** then **upload** (same chosen server port). The app merges these with saved profiles in **`backend/.state/test_profiles.json`** (saved names override bundled files). Generated run output under **`backend/automated_tests/test_results/`** is not committed (see **`.gitignore`**); keep only **`.gitkeep`** there in git.
+- **Test runner in tree**: **`backend/app/test_runner.py`** plus bundled profiles under **`backend/automated_tests/test_cases/`** (**`smoke_ping`**, **`smoke_iperf_dl`**, **`smoke_iperf_ul`**, **`smoke_iperf_dlul`**, **`smoke_volte`**, **`smoke_tcp_connect`**). Profile **`test_type`** **`iperf_download_upload`** runs TCP **download** then **upload** (same chosen server port). **`tcp_connect`** runs modem **`AT+QIOPEN`** setup timing (**`+QIOPEN`** URC). The app merges these with saved profiles in **`backend/.state/test_profiles.json`** (saved names override bundled files). Generated run output under **`backend/automated_tests/test_results/`** is not committed (see **`.gitignore`**); keep only **`.gitkeep`** there in git.
 - **iperf smoke profiles**: **`connect_timeout_sec`** set on download/upload smoke configs (1–120 s; same semantics as **`POST /api/tools/iperf-test`** / profile **`test_config`**). **`iperf3 --connect-timeout`** is appended only when the discovered binary’s **`--help`** lists it (bundled Windows **3.1.1** skips it); set **`MD_IPERF_BIN`** to a newer **iperf3.exe** if you want that flag. Subprocess wall-clock still includes connect headroom from **`connect_timeout_sec`**.
 - **QCAINFO text**: **`earfcn_active_text`** / carrier summaries use **`EARFCN/PCI(PCC)`** and **`EARFCN/PCI(SCC)`** style (comma-separated), aligned with the dashboard **EARFCN active (CA)** row.
 
@@ -552,7 +564,7 @@ Because **`requirements.txt`** does not pin versions, a fresh `pip install` may 
 
 ## Start the app
 
-Default: **Quick start**, steps **3**–**4** (COM port + **`.\start.ps1`** + browser **Reconnect**). Stop with step **5**. Additional options from `backend`:
+Default: **Quick start**, steps **3**–**4** (COM port + **`.\start.cmd`** or **`.\start.ps1`** + browser **Reconnect**). Stop with step **5**. Additional options from `backend`:
 
 From `backend` folder (adjust path if your unzip location differs):
 
@@ -565,14 +577,16 @@ Safer start helper (auto-clears stale listener on selected port before launch):
 
 ```powershell
 cd C:\dev\Mauve-1-main\backend
-.\start.ps1
+.\start.cmd
 ```
+
+Or **`.\start.ps1`** if execution policy allows scripts.
 
 Optional custom port/host:
 
 ```powershell
 cd C:\dev\Mauve-1-main\backend
-.\start.ps1 -Port 8012 -BindHost 127.0.0.1
+.\start.cmd -Port 8012 -BindHost 127.0.0.1
 ```
 
 From the unzipped project folder (parent of `backend`):
@@ -674,8 +688,9 @@ The JSON includes `sample.carrier_reselection` with `window_sec` (60), `primary_
 - `POST /api/network/locks`
 - `POST /api/tools/modem-reset`
 - `GET /api/tools/bind-interfaces` (Windows IPv4 adapters for bind dropdowns)
-- `POST /api/tools/iperf-test` (TCP iperf3 client; optional **`port_range_max`** with **`port`** ≤ max picks one random server port per request; optional **`parallel_streams`**; **`connect_timeout_sec`** default **10** (1–120; iperf3 **`--connect-timeout`** in ms when supported, else TCP pre-connect with the same bind as **`-B`**); optional **`bind_ip`** (**`-B`**); **`mobile_only`** (default **true** in the API model) auto-picks a local IPv4 on **Windows** by probing **modem `cid1_ip`** (KPI) and mobile-like **ipconfig** addresses — see **Changes in v2.2.2** and **Common issues**; optional **`bitrate_limit_mbps`**; UI default **10** streams; dashboard **Port** default **`5300-5400`** or a single port such as **`5361`**)
+- `POST /api/tools/iperf-test` (TCP iperf3 client; optional **`port_range_max`** with **`port`** ≤ max picks one random server port per request; optional **`parallel_streams`**; **`connect_timeout_sec`** default **10** (1–120; iperf3 **`--connect-timeout`** in ms when supported, else TCP pre-connect with the same bind as **`-B`**); optional **`omit_sec`** (default **0**, iperf3 **`-O`/`--omit`**: exclude first *N* seconds from throughput summary; must be **&lt; `duration_sec`**); optional **`bind_ip`** (**`-B`**); **`mobile_only`** (default **true** in the API model) auto-picks a local IPv4 on **Windows** by probing **modem `cid1_ip`** (KPI) and mobile-like **ipconfig** addresses — see **Changes in v2.2.2** and **Common issues**; optional **`bitrate_limit_mbps`**; UI default **10** streams; dashboard **Port** default **`5300-5400`** or a single port such as **`5361`**)
 - `POST /api/tools/icmp-ping` (host OS ICMP ping sweep; optional Windows `-S` bind)
+- `POST /api/tools/modem-tcp-connect` (modem `AT+QIOPEN` → wait `+QIOPEN` URC; post-`QICLOSE` skipped on `+QIOPEN:0,0`; body `host`, `port`, optional `timeout_sec` default **30**, `pdp_cid` default **1**, `connect_id` default **0**, optional `skip_pre_close`; requires active PDP)
 - `GET /api/tools/auto-answer` / `POST /api/tools/auto-answer` — optional **modem `ATS0`** (legacy); not used by the dashboard VoLTE card
 - `GET /api/tools/host-auto-answer` / `POST /api/tools/host-auto-answer` — **auto-answer** used by the dashboard (**`ATA`** from PC; body **`enabled`**, **`rings`**, **`password`**)
 - `POST /api/tools/volte-test`
@@ -798,15 +813,15 @@ The dashboard **VoLTE** card controls **auto-answer** via **`GET`/`POST /api/too
 
 Saved profile **overrides** live in **`backend/.state/test_profiles.json`** in development, or under **`%LOCALAPPDATA%\5GModemTestDriver\`** when using the frozen Windows build. **Bundled** profile JSON files and **per-run artifact folders** live under **`backend/automated_tests/`** (same relative layout under app state when frozen).
 
-**iperf profiles** use the same server path as **`POST /api/tools/iperf-test`**: fields such as **`host`**, **`port`**, optional **`port_range_max`**, **`duration_sec`**, **`parallel_streams`**, **`protocol`**, **`mobile_only`**, optional **`bitrate_limit_mbps`**, and optional **`connect_timeout_sec`** come from the profile’s **`test_config`**. Bundled smoke iperf examples set **`mobile_only`** **`false`** so traffic can use the OS default route without a manual **`-B`** address; set **`true`** when you need traffic pinned to the cellular/USB interface IPv4 (see **Common issues** if Windows bind fails).
+**iperf profiles** use the same server path as **`POST /api/tools/iperf-test`**: fields such as **`host`**, **`port`**, optional **`port_range_max`**, **`duration_sec`**, **`parallel_streams`**, **`protocol`**, **`mobile_only`**, optional **`bitrate_limit_mbps`**, optional **`connect_timeout_sec`**, and optional **`omit_sec`** (iperf3 **`-O`**, default **0**) come from the profile’s **`test_config`**. Bundled smoke iperf examples set **`mobile_only`** **`false`** so traffic can use the OS default route without a manual **`-B`** address; set **`true`** when you need traffic pinned to the cellular/USB interface IPv4 (see **Common issues** if Windows bind fails).
 
 ### Profiles
 
-Bundled examples ship under **`backend/automated_tests/test_cases/`** (one `*.json` file per profile: **`smoke_ping`**, **`smoke_iperf_dl`**, **`smoke_iperf_ul`**, **`smoke_iperf_dlul`**, **`smoke_volte`**). The loader merges them with **`test_profiles.json`**: **saved names win** over bundled files with the same `name`. **`DELETE`** only removes entries from **`test_profiles.json`** (files under `test_cases/` are not deleted).
+Bundled examples ship under **`backend/automated_tests/test_cases/`** (one `*.json` file per profile: **`smoke_ping`**, **`smoke_iperf_dl`**, **`smoke_iperf_ul`**, **`smoke_iperf_dlul`**, **`smoke_volte`**, **`smoke_tcp_connect`**). The loader merges them with **`test_profiles.json`**: **saved names win** over bundled files with the same `name`. **`DELETE`** only removes entries from **`test_profiles.json`** (files under `test_cases/` are not deleted).
 
 - **`GET /api/test/profiles`** — merged list: `profiles`, `names`, plus `example_profile_names` (bundled-only names), `bundled_examples_dir` / **`test_cases_dir`** (same path), **`test_results_root_dir`**, and **`automated_tests_root`**.
 - **`GET /api/test/profiles/{name}`** — fetch one profile by name (registry or bundled).
-- **`POST /api/test/profiles`** — create or replace a profile in **`test_profiles.json`** (JSON body must match the schema: `schema_version` **1**, `name`, `test_type` one of `ping` | `iperf_download` | `iperf_upload` | **`iperf_download_upload`** | `volte_call_outbound`, `test_config`, optional `modem_requirements`, optional defaults `project_name`, `test_location`, `engineer`, optional **`modem_antenna_config`** **`SISO`** (default) or **`MIMO`**). For **ping**, `test_config.bind_ipv4` must be present; use **`""`** for no default bind (Test Runner / API can override per run). For **iperf** profiles (including **`iperf_download_upload`**, which runs **download** then **upload** on the same chosen port), optional **`test_config.port_range_max`** (integer, ≥ **`port`**) randomizes the port for the **download** leg; **upload** reuses that port. Omit **`port_range_max`** for a fixed **`port`**. **`test_config.connect_timeout_sec`** is optional (1–120 seconds; defaults to **10** when omitted; same semantics as **`POST /api/tools/iperf-test`**).
+- **`POST /api/test/profiles`** — create or replace a profile in **`test_profiles.json`** (JSON body must match the schema: `schema_version` **1**, `name`, `test_type` one of `ping` | `iperf_download` | `iperf_upload` | **`iperf_download_upload`** | `volte_call_outbound` | **`tcp_connect`**, `test_config`, optional `modem_requirements`, optional defaults `project_name`, `test_location`, `engineer`, optional **`modem_antenna_config`** **`SISO`** (default) or **`MIMO`**). For **ping**, `test_config.bind_ipv4` must be present; use **`""`** for no default bind (Test Runner / API can override per run). For **iperf** profiles (including **`iperf_download_upload`**, which runs **download** then **upload** on the same chosen port), optional **`test_config.port_range_max`** (integer, ≥ **`port`**) randomizes the port for the **download** leg; **upload** reuses that port. Omit **`port_range_max`** for a fixed **`port`**. **`test_config.connect_timeout_sec`** is optional (1–120 seconds; defaults to **10** when omitted; same semantics as **`POST /api/tools/iperf-test`**). For **`tcp_connect`**, **`test_config`** requires **`host`**, **`port`**, **`timeout_sec`** (1–120); optional **`pdp_cid`** (1–15, default **1**) and **`connect_id`** (0–11, default **0**). Use **`modem_requirements.require_packet_data`** **`true`** when PDP must be up before the run.
 - **`DELETE /api/test/profiles/{name}`** — remove a profile from **`test_profiles.json`** only.
 
 ### Run
@@ -820,7 +835,7 @@ Bundled examples ship under **`backend/automated_tests/test_cases/`** (one `*.js
 
 ### CSV summary row
 
-**`run_<id>_summary.csv`** has a header row plus **one data row per tool iteration** in that run (same header; extra iterations are appended). Column order: lab fields (**`project_name`**, **`test_location`**, **`engineer`**, **`modem_antenna_config`**, **`note`**), **`run_started_utc`** / **`run_ended_utc`** (per iteration), profile **`test_type`**, **`run_success`** / **`run_error`** / **`run_duration_ms`** (that iteration), **`test_config_json`**, **`test_iteration_index`**, **`test_iterations_total`**, **`test_iteration_delay_sec`**, then **active tool columns** (ping, iperf, and VoLTE families are all present; unused families are blank), then **RF KPI aggregates** for the whole run (**`kpi_sample_count`** through **`primary_cell_id_most_common`**), then **modem lock readback** (**`lock_rat_mode`**, **`lock_lte_bands`**, **`lock_ca_policy`**, **`lock_nr_bands`**, **`lock_nrdc`** — from **`AT+QNWPREFCFG`** after the run (retried if the modem was busy; see **Changes in v2.2.3** / **Changes in v2.2.1**), then KPI aggregate **`apn_most_common`**, **`operator_most_common`**, **`rat_most_common`**, **`registration_state`** (see **Changes in v2.2.6**), **`endc_state`**, **`ca_status_most_common`**, **`ca_carriers_pcc_scc`**, **`ca_aggregated_dl_bw_mhz_avg`**, **`lte_pcell_earfcn_reselections_per_min_avg`**, **`lte_pcell_pci_reselections_per_min_avg`**, **`nr5g_primary_rsrp_avg_dbm`**, **`nr5g_primary_rsrq_avg_db`**, **`nr5g_primary_sinr_avg_db`**, **`nr5g_primary_arfcn_most_common`**, **`nr5g_primary_pci_most_common`**, **`nr5g_primary_dl_bw_mhz_avg`**. Type-specific tool headers include **`iperf_connect_timeout_sec`** (when set), **`iperf_direction`** (**`download_upload`** for **`iperf_download_upload`** profiles), **`iperf_throughput_dl_mbps`**, and **`iperf_throughput_ul_mbps`** (**`iperf_download`** fills DL only, **`iperf_upload`** UL only, **`iperf_download_upload`** both; numeric Mbps strings, blank when absent). For **`volte_call_outbound`**, **`volte_ceer`** (**`AT+CEER`**) and **`volte_modem_call_messages`** (captures during the VoLTE API call — see **Changes in v2.2.5**).
+**`run_<id>_summary.csv`** has a header row plus **one data row per tool iteration** in that run (same header; extra iterations are appended). Column order: lab fields (**`project_name`**, **`test_location`**, **`engineer`**, **`modem_antenna_config`**, **`note`**), **`run_started_utc`** / **`run_ended_utc`** (per iteration), profile **`test_type`**, **`run_success`** / **`run_error`** / **`run_duration_ms`** (that iteration), **`test_config_json`**, **`test_iteration_index`**, **`test_iterations_total`**, **`test_iteration_delay_sec`**, then **active tool columns** (ping, iperf, VoLTE, and modem TCP families are all present; unused families are blank), then **RF KPI aggregates** for the whole run (**`kpi_sample_count`** through **`primary_cell_id_most_common`**), then **modem lock readback** (**`lock_rat_mode`**, **`lock_lte_bands`**, **`lock_ca_policy`**, **`lock_nr_bands`**, **`lock_nrdc`** — from **`AT+QNWPREFCFG`** after the run (retried if the modem was busy; see **Changes in v2.2.3** / **Changes in v2.2.1**), then KPI aggregate **`apn_most_common`**, **`operator_most_common`**, **`rat_most_common`**, **`registration_state`** (see **Changes in v2.2.6**), **`endc_state`**, **`ca_status_most_common`**, **`ca_carriers_pcc_scc`**, **`ca_aggregated_dl_bw_mhz_avg`**, **`lte_pcell_earfcn_reselections_per_min_avg`**, **`lte_pcell_pci_reselections_per_min_avg`**, **`nr5g_primary_rsrp_avg_dbm`**, **`nr5g_primary_rsrq_avg_db`**, **`nr5g_primary_sinr_avg_db`**, **`nr5g_primary_arfcn_most_common`**, **`nr5g_primary_pci_most_common`**, **`nr5g_primary_dl_bw_mhz_avg`**. Type-specific tool headers include **`iperf_connect_timeout_sec`** (when set), **`iperf_direction`** (**`download_upload`** for **`iperf_download_upload`** profiles), **`iperf_throughput_dl_mbps`**, and **`iperf_throughput_ul_mbps`** (**`iperf_download`** fills DL only, **`iperf_upload`** UL only, **`iperf_download_upload`** both; numeric Mbps strings, blank when absent). For **`volte_call_outbound`**, **`volte_ceer`** (**`AT+CEER`**) and **`volte_modem_call_messages`** (captures during the VoLTE API call — see **Changes in v2.2.5**). For **`tcp_connect`**, **`tcp_host`**, **`tcp_port`**, **`tcp_timeout_sec`**, **`tcp_connect_setup_ms`** ( **`+QIOPEN`** URC timing), **`tcp_qiopen_err`**, **`tcp_qiopen_detail`**, **`tcp_pdp_cid`**, **`tcp_connect_id`**.
 
 ### KPI vs dashboard charts
 

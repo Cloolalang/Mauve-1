@@ -17,6 +17,7 @@
     "parallel_streams_ul": 1,
     "parallel_streams_dl": 1,
     "connect_timeout_sec": 10,
+    "omit_sec": 0,
     "bitrate_limit_mbps": 10,
     "mobile_only": false
   }

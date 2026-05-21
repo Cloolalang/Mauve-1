@@ -23,12 +23,14 @@ from typing import Any, Literal
 from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse
 
+from app.modem_tcp_connect import run_modem_tcp_connect
 from app.kpi_service import (
     _parse_cgdcont,
     _parse_cgauth,
     _parse_qiact,
     _parse_qicsgp,
     _read_qicsgp_best_effort,
+    data_service_poll_loop,
     kpi_poll_loop,
 )
 from app import test_runner as tr
@@ -41,6 +43,7 @@ from app.models import (
     HostAutoAnswerBody,
     IcmpPingSweepBody,
     IperfTestBody,
+    ModemTcpConnectBody,
     KpiPollBody,
     LockSetBody,
     MnoSelectBody,
@@ -61,10 +64,11 @@ from app.state import engine, kpi_runtime
 
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "3.9"
+APP_VERSION = "4.0"
 
 
 _kpi_task: asyncio.Task[None] | None = None
+_data_service_task: asyncio.Task[None] | None = None
 _ws_push_task: asyncio.Task[None] | None = None
 _lock_guard_task: asyncio.Task[None] | None = None
 _host_auto_answer_task: asyncio.Task[None] | None = None
@@ -89,8 +93,22 @@ _voice_clcc_res_ok: bool = False
 _voice_clcc_data_lock = asyncio.Lock()
 _voice_clcc_fetch_lock = asyncio.Lock()
 VOICE_CLCC_CACHE_TTL_SEC = 0.7
+VOICE_CLCC_IDLE_TTL_SEC = 90.0
 VOICE_CLCC_TIMEOUT_SEC = 2.5
 HOST_AUTO_ANSWER_POLL_SEC = 0.85
+
+
+def _host_auto_answer_running() -> bool:
+    global _host_auto_answer_task
+    t = _host_auto_answer_task
+    return t is not None and not t.done()
+
+
+def _voice_clcc_idle_modem_ok() -> bool:
+    """Skip periodic AT+CLCC when not monitoring calls (no host AA, no recent RING URC)."""
+    if _host_auto_answer_running():
+        return False
+    return not _urc_recent_incoming_ring(list(engine.urc_log), max_age_sec=15.0)
 VOICE_STATUS_POLL_MS = 1700
 
 
@@ -102,17 +120,33 @@ async def _voice_clcc_snapshot(*, force: bool = False) -> tuple[list[dict], bool
     dashboard poll often skips the modem while the auto-answer worker is already polling CLCC.
     """
     global _voice_clcc_cache_ts, _voice_clcc_rows, _voice_clcc_res_ok
+    if not force and kpi_runtime.at_exclusive_hold_depth > 0:
+        async with _voice_clcc_data_lock:
+            if _voice_clcc_rows is not None:
+                return list(_voice_clcc_rows), _voice_clcc_res_ok
+        return [], False
+    cache_ttl = VOICE_CLCC_CACHE_TTL_SEC
+    if not force and _voice_clcc_idle_modem_ok():
+        cache_ttl = VOICE_CLCC_IDLE_TTL_SEC
     if not force:
         now = time.time()
         async with _voice_clcc_data_lock:
-            if _voice_clcc_rows is not None and (now - _voice_clcc_cache_ts) <= VOICE_CLCC_CACHE_TTL_SEC:
+            if _voice_clcc_rows is not None and (now - _voice_clcc_cache_ts) <= cache_ttl:
                 return list(_voice_clcc_rows), _voice_clcc_res_ok
+            if _voice_clcc_idle_modem_ok():
+                if _voice_clcc_rows is not None:
+                    return list(_voice_clcc_rows), _voice_clcc_res_ok
+                return [], False
     async with _voice_clcc_fetch_lock:
         now2 = time.time()
         if not force:
             async with _voice_clcc_data_lock:
-                if _voice_clcc_rows is not None and (now2 - _voice_clcc_cache_ts) <= VOICE_CLCC_CACHE_TTL_SEC:
+                if _voice_clcc_rows is not None and (now2 - _voice_clcc_cache_ts) <= cache_ttl:
                     return list(_voice_clcc_rows), _voice_clcc_res_ok
+                if _voice_clcc_idle_modem_ok():
+                    if _voice_clcc_rows is not None:
+                        return list(_voice_clcc_rows), _voice_clcc_res_ok
+                    return [], False
         clcc_res = await engine.send_command("AT+CLCC", timeout_sec=VOICE_CLCC_TIMEOUT_SEC)
         rows = _parse_clcc_lines(clcc_res.get("lines", []))
         ok = bool(clcc_res.get("ok"))
@@ -151,16 +185,23 @@ async def _stop_kpi_poll_task_hard() -> None:
 
 
 async def _pause_exclusive_modem_access() -> None:
-    """Pause lock-guard AT traffic and stop KPI poll task until resume."""
+    """Pause lock-guard AT traffic; KPI poll yields promptly (no full-cycle wait)."""
     global _lock_guard_paused
     _lock_guard_paused = True
-    await _stop_kpi_poll_task_hard()
+    kpi_runtime.at_exclusive_hold_depth += 1
+    # Brief yield so an in-flight KPI command can finish; cycle aborts on next _kpi_at check.
+    for _ in range(40):
+        if not kpi_runtime.poll_cycle_active:
+            break
+        await asyncio.sleep(0.02)
 
 
 def _resume_exclusive_modem_access(resume_kpi: bool) -> None:
-    """Allow lock guard and optionally restart KPI polling."""
+    """Allow lock guard and release KPI hold (poll task keeps running)."""
     global _lock_guard_paused, _kpi_task
-    _lock_guard_paused = False
+    kpi_runtime.at_exclusive_hold_depth = max(0, kpi_runtime.at_exclusive_hold_depth - 1)
+    if kpi_runtime.at_exclusive_hold_depth == 0:
+        _lock_guard_paused = False
     if not resume_kpi:
         return
     kpi_runtime.poll_running = True
@@ -277,6 +318,36 @@ def _iperf_supports_connect_timeout(binary: str) -> bool:
         return "connect-timeout" in blob
     except Exception:
         return False
+
+
+@functools.lru_cache(maxsize=16)
+def _iperf_supports_omit(binary: str) -> bool:
+    """True if *binary* accepts ``-O`` / ``--omit`` (iperf3 3.2+)."""
+    try:
+        proc = subprocess.run(
+            [binary, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+        blob = f"{proc.stdout or ''}\n{proc.stderr or ''}".lower()
+        return "--omit" in blob
+    except Exception:
+        return False
+
+
+def _iperf_omit_sec_for_profile(cfg: dict[str, Any]) -> int:
+    """Clamp profile ``omit_sec`` to 0..duration-1; default 0 when unset."""
+    dur = int(cfg.get("duration_sec") or 1)
+    raw = cfg.get("omit_sec")
+    if raw is None or raw == "":
+        return 0
+    try:
+        o = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(dur - 1, o))
 
 
 def _iperf_preflight_tcp_ipv4(
@@ -765,6 +836,8 @@ async def _host_auto_answer_worker(rings_target: int, password: str) -> None:
             await asyncio.sleep(HOST_AUTO_ANSWER_POLL_SEC)
             if (password or "") != DATA_GATE_UNLOCK_PASSWORD:
                 break
+            if kpi_runtime.at_exclusive_hold_depth > 0:
+                continue
             try:
                 entries = list(engine.urc_log)
                 rows, _ = await _voice_clcc_snapshot(force=True)
@@ -1464,7 +1537,7 @@ async def _broadcast_kpi_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    global _kpi_task, _ws_push_task, _lock_guard_task
+    global _kpi_task, _data_service_task, _ws_push_task, _lock_guard_task
     _acquire_instance_lock()
     try:
         await engine.start()
@@ -1472,12 +1545,15 @@ async def lifespan(_: FastAPI):
         if st.get("serial_open"):
             save_last_serial_state(str(st.get("port") or engine.port), int(st.get("baudrate") or engine.baudrate))
         _kpi_task = asyncio.create_task(kpi_poll_loop(engine, kpi_runtime))
+        _data_service_task = asyncio.create_task(data_service_poll_loop(engine, kpi_runtime))
         _ws_push_task = asyncio.create_task(_broadcast_kpi_loop())
         _lock_guard_task = asyncio.create_task(_lock_guard_loop())
         yield
         kpi_runtime.poll_running = False
         if _kpi_task:
             _kpi_task.cancel()
+        if _data_service_task:
+            _data_service_task.cancel()
         if _ws_push_task:
             _ws_push_task.cancel()
         if _lock_guard_task:
@@ -1490,7 +1566,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="5G ModemTestDriver",
-    version="3.9",
+    version="4.0",
     lifespan=lifespan,
 )
 app.include_router(serial_routes.router)
@@ -1661,10 +1737,12 @@ async def kpi_poll_config(_body: KpiPollBody = KpiPollBody()) -> dict:
 
 @app.post("/api/kpi/poll/start")
 async def kpi_poll_start() -> dict:
-    global _kpi_task
+    global _kpi_task, _data_service_task
+    kpi_runtime.poll_running = True
     if _kpi_task is None or _kpi_task.done():
-        kpi_runtime.poll_running = True
         _kpi_task = asyncio.create_task(kpi_poll_loop(engine, kpi_runtime))
+    if _data_service_task is None or _data_service_task.done():
+        _data_service_task = asyncio.create_task(data_service_poll_loop(engine, kpi_runtime))
     return await kpi_latest()
 
 
@@ -2412,6 +2490,13 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
     reverse = direction == "download"
     parallel_streams = int(body.parallel_streams)
     ct_sec = max(1.0, min(120.0, float(body.connect_timeout_sec)))
+    dur = int(body.duration_sec)
+    omit_sec = max(0, int(body.omit_sec or 0))
+    if omit_sec >= dur:
+        raise HTTPException(
+            status_code=400,
+            detail=f"omit_sec ({omit_sec}) must be less than duration_sec ({dur}).",
+        )
     effective_port, port_range_requested = _iperf_resolve_port(body)
     limit_mbps = body.bitrate_limit_mbps
     bind_ip = str(body.bind_ip or "").strip() or None
@@ -2444,6 +2529,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
                 "bitrate_limit_mbps": limit_mbps,
                 "parallel_streams": parallel_streams,
                 "connect_timeout_sec": ct_sec,
+                "omit_sec": omit_sec,
             }
     if bind_ip and os.name == "nt" and not _windows_ipv4_assignable_for_bind(bind_ip):
         return {
@@ -2466,6 +2552,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
             "bitrate_limit_mbps": limit_mbps,
             "parallel_streams": parallel_streams,
             "connect_timeout_sec": ct_sec,
+            "omit_sec": omit_sec,
         }
     binary = _discover_iperf_binary()
     if not binary:
@@ -2483,6 +2570,25 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
             "bitrate_limit_mbps": limit_mbps,
             "parallel_streams": parallel_streams,
             "connect_timeout_sec": ct_sec,
+            "omit_sec": omit_sec,
+        }
+    if omit_sec > 0 and not _iperf_supports_omit(binary):
+        return {
+            "ok": False,
+            "error": "iperf3 binary does not support -O/--omit; set omit_sec to 0 or use a newer iperf3.",
+            "host": host,
+            "port": effective_port,
+            "port_range_requested": port_range_requested,
+            "duration_sec": dur,
+            "direction": direction,
+            "protocol": protocol,
+            "mobile_only": bool(body.mobile_only),
+            "bind_ip": bind_ip,
+            "detected_mobile_adapter": detected_adapter,
+            "bitrate_limit_mbps": limit_mbps,
+            "parallel_streams": parallel_streams,
+            "connect_timeout_sec": ct_sec,
+            "omit_sec": omit_sec,
         }
     cmd = [
         binary,
@@ -2493,9 +2599,11 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
         "-p",
         str(int(effective_port)),
         "-t",
-        str(int(body.duration_sec)),
+        str(dur),
         "-J",
     ]
+    if omit_sec > 0:
+        cmd.extend(["-O", str(omit_sec)])
     if reverse:
         cmd.append("-R")
     if protocol == "udp":
@@ -2544,6 +2652,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
                 "bitrate_limit_mbps": limit_mbps,
                 "parallel_streams": parallel_streams,
                 "connect_timeout_sec": ct_sec,
+                "omit_sec": omit_sec,
                 "throughput_mbps": None,
                 "throughput_source": None,
                 "command": cmd,
@@ -2553,7 +2662,6 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
                 "stdout_head": "",
                 "raw": None,
             }
-    dur = int(body.duration_sec)
     # Wall-clock often exceeds iperf -t: TCP slow-start, JSON flush, cellular UL teardown.
     # Upload (no -R) is slower and needs more headroom than download (-R).
     slack_dl = 40
@@ -2586,6 +2694,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
             "bitrate_limit_mbps": limit_mbps,
             "parallel_streams": parallel_streams,
             "connect_timeout_sec": ct_sec,
+            "omit_sec": omit_sec,
         }
     stdout = str(proc.stdout or "")
     stderr = str(proc.stderr or "")
@@ -2615,6 +2724,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
         "bitrate_limit_mbps": limit_mbps,
         "parallel_streams": parallel_streams,
         "connect_timeout_sec": ct_sec,
+        "omit_sec": omit_sec,
         "throughput_mbps": round(float(mbps), 3) if mbps is not None else None,
         "throughput_source": source,
         "command": cmd,
@@ -2624,6 +2734,29 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
         "stdout_head": (stdout[:1200] + "...") if len(stdout) > 1200 else stdout if stdout else "",
         "raw": report,
     }
+
+
+@app.post("/api/tools/modem-tcp-connect")
+async def tools_modem_tcp_connect(body: ModemTcpConnectBody) -> dict:
+    """Modem AT+QIOPEN TCP connect setup time (+QIOPEN URC), then AT+QICLOSE."""
+    host = str(body.host or "").strip()
+    if not host:
+        raise HTTPException(status_code=400, detail="host is required.")
+    async with _modem_exclusive_lock:
+        try:
+            result = await run_modem_tcp_connect(
+                engine,
+                host=host,
+                port=int(body.port),
+                timeout_sec=float(body.timeout_sec),
+                pdp_cid=int(body.pdp_cid),
+                connect_id=int(body.connect_id),
+                skip_pre_close=bool(body.skip_pre_close),
+                kpi_runtime=kpi_runtime,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return result
 
 
 @app.post("/api/tools/icmp-ping")
@@ -3043,6 +3176,7 @@ async def _apply_modem_requirements(mr: Any, test_type: str) -> None:
         "iperf_download",
         "iperf_upload",
         "iperf_download_upload",
+        "tcp_connect",
     ):
         await _require_packet_data_for_host_traffic_tests()
     if mr.get("require_serving_cell"):
@@ -3263,7 +3397,10 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
         "delay_deadline_ts": None,
     }
 
+    tcp_skip_pre_close = False
+
     async def run_one_tool() -> dict[str, Any]:
+        nonlocal tcp_skip_pre_close
         tr_progress_state["phase"] = "modem_requirements"
         tr_progress_state["iteration_running"] = None
         tr_progress_state["iteration_next"] = None
@@ -3318,6 +3455,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                         bitrate_limit_mbps=lim_f,
                         parallel_streams=int(cfg.get("parallel_streams_dl") or cfg["parallel_streams"]),
                         connect_timeout_sec=_iperf_connect_timeout_for_profile(cfg),
+                        omit_sec=_iperf_omit_sec_for_profile(cfg),
                     )
                 )
             elif test_type == "iperf_upload":
@@ -3340,6 +3478,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                         bitrate_limit_mbps=lim_f,
                         parallel_streams=int(cfg.get("parallel_streams_ul") or cfg["parallel_streams"]),
                         connect_timeout_sec=_iperf_connect_timeout_for_profile(cfg),
+                        omit_sec=_iperf_omit_sec_for_profile(cfg),
                     )
                 )
             elif test_type == "iperf_download_upload":
@@ -3350,6 +3489,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                 prm_raw = cfg.get("port_range_max")
                 prm_i = None if prm_raw is None or prm_raw == "" else int(prm_raw)
                 conn_to = _iperf_connect_timeout_for_profile(cfg)
+                omit_o = _iperf_omit_sec_for_profile(cfg)
                 ps_dl = int(cfg.get("parallel_streams_dl") or cfg["parallel_streams"])
                 ps_ul = int(cfg.get("parallel_streams_ul") or cfg["parallel_streams"])
                 j_dl = await tools_iperf_test(
@@ -3365,6 +3505,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                         bitrate_limit_mbps=lim_f,
                         parallel_streams=ps_dl,
                         connect_timeout_sec=conn_to,
+                        omit_sec=omit_o,
                     )
                 )
                 if not j_dl.get("ok"):
@@ -3382,6 +3523,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                         "protocol": str(cfg.get("protocol") or "tcp").lower(),
                         "mobile_only": bool(cfg["mobile_only"]),
                         "connect_timeout_sec": conn_to,
+                        "omit_sec": omit_o,
                         "direction": "download_upload",
                         "throughput_mbps_dl": j_dl.get("throughput_mbps"),
                         "throughput_mbps_ul": None,
@@ -3402,6 +3544,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                             bitrate_limit_mbps=lim_f,
                             parallel_streams=ps_ul,
                             connect_timeout_sec=conn_to,
+                            omit_sec=omit_o,
                         )
                     )
                     ul_err = ""
@@ -3419,6 +3562,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                         "protocol": str(cfg.get("protocol") or "tcp").lower(),
                         "mobile_only": bool(cfg["mobile_only"]),
                         "connect_timeout_sec": conn_to,
+                        "omit_sec": omit_o,
                         "direction": "download_upload",
                         "throughput_mbps_dl": j_dl.get("throughput_mbps"),
                         "throughput_mbps_ul": j_ul.get("throughput_mbps"),
@@ -3438,6 +3582,26 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                         password=body.unlock_password,
                     )
                 )
+            elif test_type == "tcp_connect":
+                await _require_packet_data_for_host_traffic_tests()
+                host_tcp = str(cfg["host"]).strip()
+                if not host_tcp:
+                    raise HTTPException(status_code=400, detail="tcp_connect.test_config.host is required.")
+                async with _modem_exclusive_lock:
+                    try:
+                        last_tr = await run_modem_tcp_connect(
+                            engine,
+                            host=host_tcp,
+                            port=int(cfg["port"]),
+                            timeout_sec=float(cfg["timeout_sec"]),
+                            pdp_cid=int(cfg.get("pdp_cid") or 1),
+                            connect_id=int(cfg.get("connect_id") or 0),
+                            skip_pre_close=tcp_skip_pre_close,
+                            kpi_runtime=kpi_runtime,
+                        )
+                    except ValueError as exc:
+                        raise HTTPException(status_code=400, detail=str(exc)) from exc
+                tcp_skip_pre_close = tr.tcp_skip_pre_close_next(last_tr)
             else:
                 raise HTTPException(status_code=400, detail=f"Unsupported test_type: {test_type}")
             iteration_log.append(
@@ -3535,7 +3699,9 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
         tr_one = entry.get("tool_result")
         if not isinstance(tr_one, dict):
             tr_one = {"ok": False, "error": "invalid tool_result"}
-        ping_cols, iperf_cols, volte_cols = tr.tool_csv_columns_for_test_type(test_type, cfg, tr_one)
+        ping_cols, iperf_cols, volte_cols, tcp_cols = tr.tool_csv_columns_for_test_type(
+            test_type, cfg, tr_one
+        )
         t0 = entry.get("started", started)
         t1 = entry.get("ended", ended)
         if not isinstance(t0, (int, float)):
@@ -3563,6 +3729,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
             ping_cols=ping_cols,
             iperf_cols=iperf_cols,
             volte_cols=volte_cols,
+            tcp_cols=tcp_cols,
             agg=agg_str,
         )
         if first_csv:

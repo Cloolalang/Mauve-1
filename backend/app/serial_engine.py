@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -57,6 +58,7 @@ class SerialEngine:
         self._active_request: CommandRequest | None = None
         self._lock = asyncio.Lock()
         self._reopen_lock = asyncio.Lock()
+        self.command_port_lock = asyncio.Lock()
         self._last_reopen_attempt_at = 0.0
         self._reopen_interval_sec = 2.0
 
@@ -107,26 +109,54 @@ class SerialEngine:
         self.baudrate = baudrate
         await self.start()
 
+    @staticmethod
+    def _format_trace_ts(ts: float | None = None) -> str:
+        t = time.time() if ts is None else ts
+        ms = int((t % 1.0) * 1000)
+        return time.strftime("%H:%M:%S", time.localtime(t)) + f".{ms:03d}"
+
+    def _at_trace_append(self, text: str, *, ts: float | None = None) -> None:
+        self.at_trace.append(f"{self._format_trace_ts(ts)} {text}")
+
+    @asynccontextmanager
+    async def modem_socket_critical_section(self):
+        """Exclusive AT port for QIOPEN→+QIOPEN→QICLOSE (no KPI commands between)."""
+        async with self.command_port_lock:
+            yield
+
     async def send_command(self, command: str, timeout_sec: float = 2.0) -> dict[str, Any]:
         if not self._running:
             raise RuntimeError("Serial engine is not running.")
+        async with self.command_port_lock:
+            return await self._send_command_unlocked(command, timeout_sec)
 
+    @staticmethod
+    def _command_wait_cap(timeout_sec: float, *, max_wait_sec: float | None = None) -> float:
+        if max_wait_sec is not None:
+            return max(float(timeout_sec), float(max_wait_sec))
+        slack = max(5.0, min(30.0, float(timeout_sec) * 0.35))
+        return float(timeout_sec) + slack
+
+    async def _send_command_unlocked(
+        self,
+        command: str,
+        timeout_sec: float = 2.0,
+        *,
+        max_wait_sec: float | None = None,
+    ) -> dict[str, Any]:
         req = CommandRequest(command=command.strip(), timeout_sec=max(0.2, timeout_sec))
         req.done = asyncio.get_running_loop().create_future()
         await self._queue.put(req)
 
-        # asyncio.shield keeps req.done alive if wait_for cancels on timeout.
-        # Without shield, wait_for cancels the future itself, so the writer's
-        # subsequent `await req.done` would raise CancelledError and crash the
-        # writer task, breaking all subsequent AT commands.
-        slack = max(5.0, min(30.0, float(timeout_sec) * 0.35))
+        wait_cap = self._command_wait_cap(float(req.timeout_sec), max_wait_sec=max_wait_sec)
         try:
-            return await asyncio.wait_for(
-                asyncio.shield(req.done), timeout=float(req.timeout_sec) + slack
-            )
+            return await asyncio.wait_for(asyncio.shield(req.done), timeout=wait_cap)
         except asyncio.TimeoutError:
             elapsed_ms = int((time.time() - req.created_at) * 1000)
             await self._record_at_command_complete(float(elapsed_ms))
+            self._at_trace_append(
+                f"< TIMEOUT (no final within {wait_cap:g}s, {elapsed_ms}ms elapsed)"
+            )
             timeout_result: dict[str, Any] = {
                 "ok": False,
                 "command": req.command,
@@ -134,7 +164,6 @@ class SerialEngine:
                 "lines": list(req.lines),
                 "elapsed_ms": elapsed_ms,
             }
-            # Unblock the writer's `await req.done` so the next command can proceed.
             if req.done and not req.done.done():
                 req.done.set_result(timeout_result)
             if self._active_request is req:
@@ -232,7 +261,7 @@ class SerialEngine:
                 return True
             try:
                 await self._open_serial()
-                self.at_trace.append(f"< URC SERIAL_REOPENED {self.port}@{self.baudrate}")
+                self._at_trace_append(f"< URC SERIAL_REOPENED {self.port}@{self.baudrate}")
                 return True
             except Exception as exc:  # noqa: BLE001
                 self._last_open_error = str(exc)
@@ -240,7 +269,7 @@ class SerialEngine:
 
     async def _mark_serial_disconnected(self, reason: str) -> None:
         self._last_open_error = reason
-        self.at_trace.append(f"< URC SERIAL_DISCONNECTED {reason}")
+        self._at_trace_append(f"< URC SERIAL_DISCONNECTED {reason}")
         if self._serial:
             try:
                 await asyncio.to_thread(self._serial.close)
@@ -266,7 +295,7 @@ class SerialEngine:
                     raise RuntimeError(f"Serial port {self.port} is not open")
                 tx = req.command.strip()
                 self.tx_log.append(tx)
-                self.at_trace.append(f"> {tx}")
+                self._at_trace_append(f"> {tx}", ts=req.created_at)
                 await asyncio.to_thread(self._serial.write, payload.encode("utf-8", errors="replace"))
                 await asyncio.to_thread(self._serial.flush)
                 # Half-duplex pacing: do not send the next command until the
@@ -316,11 +345,11 @@ class SerialEngine:
             req = self._active_request
             if req is None:
                 self.urc_log.append((time.time(), line))
-                self.at_trace.append(f"< URC {line}")
+                self._at_trace_append(f"< URC {line}")
                 continue
 
             req.lines.append(line)
-            self.at_trace.append(f"< {line}")
+            self._at_trace_append(f"< {line}")
             if _is_final_line(line):
                 final = line.strip()
                 if req.done and not req.done.done():

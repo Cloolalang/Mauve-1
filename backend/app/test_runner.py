@@ -19,7 +19,14 @@ from fastapi import HTTPException
 from app.kpi_service import format_qcainfo_carriers_pcc_scc
 
 TEST_TYPES = frozenset(
-    {"ping", "iperf_download", "iperf_upload", "iperf_download_upload", "volte_call_outbound"}
+    {
+        "ping",
+        "iperf_download",
+        "iperf_upload",
+        "iperf_download_upload",
+        "volte_call_outbound",
+        "tcp_connect",
+    }
 )
 MODEM_ANTENNA_CONFIGS = frozenset({"SISO", "MIMO"})
 DEFAULT_MODEM_ANTENNA_CONFIG = "SISO"
@@ -315,10 +322,47 @@ def validate_profile(p: dict[str, Any]) -> list[str]:
                         p0 = -1
                     if p0 >= 1 and pm < p0:
                         errs.append("iperf.test_config.port_range_max must be >= port")
+        omit = cfg.get("omit_sec")
+        if omit is not None and omit != "":
+            try:
+                dur_i = int(cfg.get("duration_sec"))
+                omit_i = int(omit)
+                if omit_i < 0:
+                    errs.append("iperf.test_config.omit_sec must be >= 0 when set")
+                elif omit_i >= dur_i:
+                    errs.append("iperf.test_config.omit_sec must be less than duration_sec when set")
+            except (TypeError, ValueError):
+                errs.append("iperf.test_config.omit_sec must be an integer when set")
     elif tt == "volte_call_outbound":
         for k in ("phone_number", "call_duration_sec", "answer_wait_sec", "auto_hangup"):
             if k not in cfg:
                 errs.append(f"volte.test_config.{k} is required")
+    elif tt == "tcp_connect":
+        for k in ("host", "port", "timeout_sec"):
+            if k not in cfg or cfg.get(k) in (None, ""):
+                errs.append(f"tcp_connect.test_config.{k} is required")
+        if "port" in cfg and cfg.get("port") not in (None, ""):
+            try:
+                tcp_port = int(cfg["port"])
+                if tcp_port < 1 or tcp_port > 65535:
+                    errs.append("tcp_connect.test_config.port must be 1..65535")
+            except (TypeError, ValueError):
+                errs.append("tcp_connect.test_config.port must be an integer")
+        if "timeout_sec" in cfg and cfg.get("timeout_sec") not in (None, ""):
+            try:
+                ts = float(cfg["timeout_sec"])
+                if ts < 1 or ts > 120:
+                    errs.append("tcp_connect.test_config.timeout_sec must be between 1 and 120")
+            except (TypeError, ValueError):
+                errs.append("tcp_connect.test_config.timeout_sec must be a number")
+        for opt, lo, hi in (("pdp_cid", 1, 15), ("connect_id", 0, 11)):
+            if opt in cfg and cfg.get(opt) not in (None, ""):
+                try:
+                    v = int(cfg[opt])
+                    if v < lo or v > hi:
+                        errs.append(f"tcp_connect.test_config.{opt} must be {lo}..{hi}")
+                except (TypeError, ValueError):
+                    errs.append(f"tcp_connect.test_config.{opt} must be an integer when set")
     mr0 = p.get("modem_requirements")
     if mr0 is not None and not isinstance(mr0, dict):
         errs.append("modem_requirements must be an object (may be {})")
@@ -723,6 +767,7 @@ def _empty_iperf_tool_cols() -> dict[str, str]:
             "iperf_parallel_streams_ul",
             "iperf_parallel_streams_dl",
             "iperf_connect_timeout_sec",
+            "iperf_omit_sec",
             "iperf_protocol",
             "iperf_bitrate_limit_mbps",
             "iperf_mobile_only",
@@ -730,6 +775,64 @@ def _empty_iperf_tool_cols() -> dict[str, str]:
             "iperf_throughput_dl_mbps",
             "iperf_throughput_ul_mbps",
         )
+    }
+
+
+def _empty_tcp_tool_cols() -> dict[str, str]:
+    return {
+        k: ""
+        for k in (
+            "tcp_host",
+            "tcp_port",
+            "tcp_timeout_sec",
+            "tcp_connect_setup_ms",
+            "tcp_qiopen_err",
+            "tcp_qiopen_detail",
+            "tcp_pdp_cid",
+            "tcp_connect_id",
+        )
+    }
+
+
+def tcp_skip_pre_close_next(tool_result: dict[str, Any]) -> bool:
+    """True when the next iteration should run AT+QICLOSE before AT+QIOPEN."""
+    if not bool(tool_result.get("ok")):
+        return False
+    for action in tool_result.get("actions") or []:
+        if not isinstance(action, dict):
+            continue
+        cmd = str(action.get("cmd") or "")
+        if "AT+QICLOSE=" not in cmd or "pre-open" in cmd:
+            continue
+        fin = str((action.get("res") or {}).get("final") or "")
+        return fin != "OK"
+    return True
+
+
+def tcp_tool_csv_columns(cfg: dict[str, Any], tool_result: dict[str, Any]) -> dict[str, str]:
+    setup = tool_result.get("connect_setup_ms")
+    setup_s = ""
+    if isinstance(setup, (int, float)):
+        setup_s = str(round(float(setup), 1))
+    err = tool_result.get("qiopen_err")
+    err_s = "" if err is None else str(int(err))
+    ts = cfg.get("timeout_sec")
+    ts_s = ""
+    if ts is not None and str(ts).strip() != "":
+        try:
+            tf = float(ts)
+            ts_s = str(int(tf)) if tf == int(tf) else str(round(tf, 3)).rstrip("0").rstrip(".")
+        except (TypeError, ValueError):
+            ts_s = str(ts)
+    return {
+        "tcp_host": str(tool_result.get("host") or cfg.get("host") or ""),
+        "tcp_port": str(tool_result.get("port") or cfg.get("port") or ""),
+        "tcp_timeout_sec": ts_s,
+        "tcp_connect_setup_ms": setup_s,
+        "tcp_qiopen_err": err_s,
+        "tcp_qiopen_detail": str(tool_result.get("qiopen_detail") or "").strip(),
+        "tcp_pdp_cid": str(tool_result.get("pdp_cid") or cfg.get("pdp_cid") or ""),
+        "tcp_connect_id": str(tool_result.get("connect_id") or cfg.get("connect_id") or ""),
     }
 
 
@@ -834,6 +937,7 @@ def iperf_tool_csv_columns(cfg: dict[str, Any], tool_result: dict[str, Any], tes
         "iperf_parallel_streams_ul": ps_ul,
         "iperf_parallel_streams_dl": ps_dl,
         "iperf_connect_timeout_sec": ct_s,
+        "iperf_omit_sec": "" if cfg.get("omit_sec") is None else str(cfg.get("omit_sec")),
         "iperf_protocol": str(tool_result.get("protocol") or ""),
         "iperf_bitrate_limit_mbps": "" if cfg.get("bitrate_limit_mbps") is None else str(cfg.get("bitrate_limit_mbps")),
         "iperf_mobile_only": str(bool(tool_result.get("mobile_only"))).lower(),
@@ -862,16 +966,23 @@ def volte_tool_csv_columns(cfg: dict[str, Any], tool_result: dict[str, Any]) -> 
 
 def tool_csv_columns_for_test_type(
     test_type: str, cfg: dict[str, Any], tool_result: dict[str, Any]
-) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
-    """Ping / iperf / VoLTE tool columns for one iteration; inactive tool families are empty strings."""
-    ep, ei, ev = _empty_ping_tool_cols(), _empty_iperf_tool_cols(), _empty_volte_tool_cols()
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]]:
+    """Tool columns for one iteration; inactive tool families are empty strings."""
+    ep, ei, ev, et = (
+        _empty_ping_tool_cols(),
+        _empty_iperf_tool_cols(),
+        _empty_volte_tool_cols(),
+        _empty_tcp_tool_cols(),
+    )
     if test_type == "ping":
         ep = ping_tool_csv_columns(cfg, tool_result)
     elif test_type in ("iperf_download", "iperf_upload", "iperf_download_upload"):
         ei = iperf_tool_csv_columns(cfg, tool_result, test_type)
     elif test_type == "volte_call_outbound":
         ev = volte_tool_csv_columns(cfg, tool_result)
-    return ep, ei, ev
+    elif test_type == "tcp_connect":
+        et = tcp_tool_csv_columns(cfg, tool_result)
+    return ep, ei, ev, et
 
 
 def build_csv_row(
@@ -895,6 +1006,7 @@ def build_csv_row(
     ping_cols: dict[str, str],
     iperf_cols: dict[str, str],
     volte_cols: dict[str, str],
+    tcp_cols: dict[str, str],
     agg: dict[str, str],
 ) -> list[str]:
     """Column order: lab metadata, iteration settings, active tool results, then RF KPI aggregates."""
@@ -933,6 +1045,7 @@ def build_csv_row(
         iperf_cols.get("iperf_parallel_streams_ul", ""),
         iperf_cols.get("iperf_parallel_streams_dl", ""),
         iperf_cols.get("iperf_connect_timeout_sec", ""),
+        iperf_cols.get("iperf_omit_sec", ""),
         iperf_cols.get("iperf_protocol", ""),
         iperf_cols.get("iperf_bitrate_limit_mbps", ""),
         iperf_cols.get("iperf_mobile_only", ""),
@@ -947,6 +1060,14 @@ def build_csv_row(
         volte_cols.get("volte_call_duration_sec", ""),
         volte_cols.get("volte_ceer", ""),
         volte_cols.get("volte_modem_call_messages", ""),
+        tcp_cols.get("tcp_host", ""),
+        tcp_cols.get("tcp_port", ""),
+        tcp_cols.get("tcp_timeout_sec", ""),
+        tcp_cols.get("tcp_connect_setup_ms", ""),
+        tcp_cols.get("tcp_qiopen_err", ""),
+        tcp_cols.get("tcp_qiopen_detail", ""),
+        tcp_cols.get("tcp_pdp_cid", ""),
+        tcp_cols.get("tcp_connect_id", ""),
         agg.get("kpi_sample_count", ""),
         agg.get("primary_rsrp_avg_dbm", ""),
         agg.get("primary_rssi_avg_dbm", ""),
@@ -1009,6 +1130,7 @@ CSV_HEADER = [
     "iperf_parallel_streams_ul",
     "iperf_parallel_streams_dl",
     "iperf_connect_timeout_sec",
+    "iperf_omit_sec",
     "iperf_protocol",
     "iperf_bitrate_limit_mbps",
     "iperf_mobile_only",
@@ -1023,6 +1145,14 @@ CSV_HEADER = [
     "volte_call_duration_sec",
     "volte_ceer",
     "volte_modem_call_messages",
+    "tcp_host",
+    "tcp_port",
+    "tcp_timeout_sec",
+    "tcp_connect_setup_ms",
+    "tcp_qiopen_err",
+    "tcp_qiopen_detail",
+    "tcp_pdp_cid",
+    "tcp_connect_id",
     "kpi_sample_count",
     "primary_rsrp_avg_dbm",
     "primary_rssi_avg_dbm",

@@ -1,6 +1,16 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 3.9** — see root [`README.md`](../README.md) for the full feature overview. **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1). FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **3.9**).
+**Version 4.0** — see root [`README.md`](../README.md) for the full feature overview. **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1). FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **4.0**).
+
+Notes for **v4.0**:
+
+- **`modem_tcp_connect.py`**: **`run_modem_tcp_connect()`** — **`AT+QIOPEN`** → **`+QIOPEN`** URC timing; pre-close inside critical section; post-close skipped on success; **`AT`** sync after failed close timeout.
+- **`serial_engine.py`**: timestamped **`at_trace`**; **`command_port_lock`**; **`modem_socket_critical_section()`**; **`max_wait_sec`** on **`_send_command_unlocked()`**; **`< TIMEOUT …>`** trace lines.
+- **`kpi_service.py`**: cooperative **`at_exclusive_hold_depth`** / **`KpiCyclePreempted`**; background **`data_service_poll_loop`**; **`_kpi_at`** capped waits.
+- **`test_runner.py`**: **`test_type`** **`tcp_connect`**; **`smoke_tcp_connect.json`**; CSV **`tcp_*`** columns; **`tcp_skip_pre_close_next()`**.
+- **`main.py`**: **`POST /api/tools/modem-tcp-connect`**; test-runner branch for **`tcp_connect`**.
+- **`dashboard.html`**: Modem TCP connect card, sweep, registration hold, reduced VoLTE/CLCC during TCP.
+- OpenAPI / page header: **v4.0**.
 
 Notes for **v3.9**:
 
@@ -226,8 +236,10 @@ Preferred launcher (clears stale listener on target port):
 
 ```powershell
 cd backend
-.\start.ps1
+.\start.cmd
 ```
+
+Or **`.\start.ps1`** if your execution policy allows it.
 
 Connect the **PC** to the router **USB** port with a **data** cable so Windows exposes the AT **COM** port (see root **[`README.md`](../README.md)** → **Quick start** step **1**).
 

@@ -1114,13 +1114,15 @@ async def _read_qicsgp_best_effort(
     timeout_sec: float = 2.0,
     initial: dict[str, Any] | None = None,
     probe_append: list[dict[str, Any]] | None = None,
+    runtime: KpiRuntime | None = None,
 ) -> dict[str, Any]:
     """Quectel PDP profile read: ``AT+QICSGP?`` or per-context ``AT+QICSGP=<cid>`` when ``?`` is empty/ERROR."""
-    qicsgp = (
-        initial
-        if initial is not None
-        else await engine.send_command("AT+QICSGP?", timeout_sec=timeout_sec)
-    )
+    async def _send(cmd: str) -> dict[str, Any]:
+        if runtime is not None:
+            return await _kpi_at(engine, runtime, cmd, timeout_sec=timeout_sec)
+        return await engine.send_command(cmd, timeout_sec=timeout_sec)
+
+    qicsgp = initial if initial is not None else await _send("AT+QICSGP?")
     lines = qicsgp.get("lines", []) or []
     if qicsgp.get("ok") and _parse_qicsgp(lines):
         return qicsgp
@@ -1129,7 +1131,7 @@ async def _read_qicsgp_best_effort(
         if cid < 1 or cid in seen:
             continue
         seen.add(cid)
-        q2 = await engine.send_command(f"AT+QICSGP={cid}", timeout_sec=timeout_sec)
+        q2 = await _send(f"AT+QICSGP={cid}")
         if probe_append is not None:
             probe_append.append({"cmd": f"AT+QICSGP={cid} (readback fallback)", "res": q2})
         if q2.get("ok") and _parse_qicsgp(q2.get("lines", []) or []):
@@ -1235,9 +1237,16 @@ async def _read_cgcontrdp_best_effort(
     primary_cid: int,
     *,
     timeout_sec: float = 2.5,
+    runtime: KpiRuntime | None = None,
 ) -> dict[str, Any]:
     """``AT+CGCONTRDP?`` or ``AT+CGCONTRDP=<cid>`` when bulk read is empty or unsupported."""
-    r = await engine.send_command("AT+CGCONTRDP?", timeout_sec=timeout_sec)
+
+    async def _send(cmd: str) -> dict[str, Any]:
+        if runtime is not None:
+            return await _kpi_at(engine, runtime, cmd, timeout_sec=timeout_sec)
+        return await engine.send_command(cmd, timeout_sec=timeout_sec)
+
+    r = await _send("AT+CGCONTRDP?")
     if r.get("ok") and _parse_cgcontrdp(r.get("lines", []) or []):
         return r
     last: dict[str, Any] = r
@@ -1246,7 +1255,7 @@ async def _read_cgcontrdp_best_effort(
         if cid < 1 or cid in seen:
             continue
         seen.add(cid)
-        r2 = await engine.send_command(f"AT+CGCONTRDP={cid}", timeout_sec=timeout_sec)
+        r2 = await _send(f"AT+CGCONTRDP={cid}")
         last = r2
         if r2.get("ok") and _parse_cgcontrdp(r2.get("lines", []) or []):
             return r2
@@ -1296,12 +1305,40 @@ def _parse_qnetdevstatus(lines: list[str]) -> str | None:
     return None
 
 
+DATA_SERVICE_REFRESH_SEC = 30.0
+
+
+class KpiCyclePreempted(Exception):
+    """KPI poll cycle aborted so an exclusive modem tool (e.g. TCP connect) can run."""
+
+
+def kpi_socket_hold_enter(runtime: KpiRuntime) -> None:
+    """Block KPI AT only during AT+QIOPEN / +QIOPEN URC (not whole TCP test)."""
+    runtime.at_exclusive_hold_depth += 1
+
+
+def kpi_socket_hold_leave(runtime: KpiRuntime) -> None:
+    runtime.at_exclusive_hold_depth = max(0, runtime.at_exclusive_hold_depth - 1)
+
+
+async def _kpi_at(engine: SerialEngine, runtime: KpiRuntime, command: str, *, timeout_sec: float) -> dict:
+    if runtime.at_exclusive_hold_depth > 0:
+        raise KpiCyclePreempted()
+    cap = float(timeout_sec) + min(1.25, max(0.5, float(timeout_sec) * 0.35))
+    async with engine.command_port_lock:
+        return await engine._send_command_unlocked(
+            command, timeout_sec=timeout_sec, max_wait_sec=cap
+        )
+
+
 @dataclass
 class KpiRuntime:
     snapshot: dict[str, Any] = field(default_factory=dict)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     poll_running: bool = False
     poll_hz: float = 2.0
+    at_exclusive_hold_depth: int = 0
+    poll_cycle_active: bool = False
     last_error: str | None = None
     modem_fw: str | None = None
     modem_fw_at: float = 0.0
@@ -1313,23 +1350,139 @@ class KpiRuntime:
     )
 
 
+async def refresh_data_service_snapshot(engine: SerialEngine, runtime: KpiRuntime) -> bool:
+    """Slow-path PDP/registration reads; kept off the RF KPI loop."""
+    if not runtime.poll_running or runtime.at_exclusive_hold_depth > 0:
+        return False
+    now = time.time()
+    if runtime.data_service and (now - runtime.data_service_at) <= DATA_SERVICE_REFRESH_SEC:
+        return False
+    cgatt = await engine.send_command("AT+CGATT?", timeout_sec=1.5)
+    cereg = await engine.send_command("AT+CEREG?", timeout_sec=1.5)
+    cgdcont = await engine.send_command("AT+CGDCONT?", timeout_sec=2.0)
+    contexts = _parse_cgdcont(cgdcont.get("lines", []))
+    primary_ctx_ds = next((c for c in contexts if c.get("cid") == 1), contexts[0] if contexts else {})
+    primary_cid_ds = int(primary_ctx_ds.get("cid") or 1)
+    cgauth = await engine.send_command("AT+CGAUTH?", timeout_sec=2.0)
+    qicsgp = await _read_qicsgp_best_effort(engine, primary_cid_ds, timeout_sec=2.0)
+    qiact = await engine.send_command("AT+QIACT?", timeout_sec=2.0)
+    cgcontrdp_res = await _read_cgcontrdp_best_effort(engine, primary_cid_ds, timeout_sec=2.5)
+    cgcontrdp_rows = _parse_cgcontrdp(cgcontrdp_res.get("lines", []) or [])
+    qcfg_usbnet = await engine.send_command('AT+QCFG="usbnet"', timeout_sec=2.0)
+    qnetdev = await engine.send_command("AT+QNETDEVSTATUS?", timeout_sec=2.0)
+
+    cgatt_v = _parse_cgatt(cgatt.get("lines", []))
+    cereg_v = _parse_cereg(cereg.get("lines", [])) or {}
+    auth_rows = _parse_cgauth(cgauth.get("lines", []))
+    qicsgp_rows = _parse_qicsgp(qicsgp.get("lines", []))
+    active = _parse_qiact(qiact.get("lines", []))
+    usbnet_mode = _parse_qcfg_usbnet(qcfg_usbnet.get("lines", []))
+    qnetdev_status = _parse_qnetdevstatus(qnetdev.get("lines", []))
+    active_by_cid = {x.get("cid"): x for x in active if isinstance(x.get("cid"), int)}
+    primary_ctx = primary_ctx_ds
+    cid1 = active_by_cid.get(1) or {}
+    primary_cid = primary_cid_ds
+    ca_one = next((r for r in auth_rows if r.get("cid") == primary_cid), None)
+    qi_one = next((r for r in qicsgp_rows if r.get("cid") == primary_cid), None)
+    pdp_user = None
+    pdp_auth = None
+    pwd_hint = False
+    if ca_one:
+        u = str(ca_one.get("username") or "").strip()
+        if u:
+            pdp_user = u
+        pdp_auth = ca_one.get("auth_type")
+        pwd_hint = pwd_hint or bool(ca_one.get("password_present_in_response"))
+    if qi_one:
+        if not pdp_user:
+            u2 = str(qi_one.get("username") or "").strip()
+            if u2:
+                pdp_user = u2
+        if pdp_auth is None:
+            pdp_auth = qi_one.get("auth_type")
+        pwd_hint = pwd_hint or bool(qi_one.get("password_present_in_response"))
+    pdp_auth_label = _pdp_auth_type_label(int(pdp_auth) if pdp_auth is not None else None)
+    eps_qci_rows = [
+        {"cid": int(r["cid"]), "bearer_id": r.get("bearer_id"), "qci": r.get("qci")}
+        for r in cgcontrdp_rows
+    ]
+    eps_qci_label = _format_eps_qci_label(cgcontrdp_rows, primary_cid_ds)
+
+    _creg_stat = cereg_v.get("stat")
+    _eps_scope: str | None = (
+        "roaming"
+        if _creg_stat == 5
+        else "home"
+        if _creg_stat == 1
+        else None
+    )
+    ds_block = {
+        "apn": primary_ctx.get("apn"),
+        "pdp_type": primary_ctx.get("pdp_type"),
+        "pdp_auth_type": pdp_auth,
+        "pdp_auth_label": pdp_auth_label,
+        "pdp_username": pdp_user,
+        "pdp_password_reported": pwd_hint,
+        "pdp_contexts": len(contexts),
+        "active_pdp_contexts": sum(1 for x in active if x.get("active")),
+        "packet_attached": cgatt_v == 1 if cgatt_v is not None else None,
+        "eps_reg_stat": _creg_stat,
+        "eps_registered": _creg_stat in (1, 5) if _creg_stat is not None else None,
+        "eps_roaming": True if _creg_stat == 5 else False if _creg_stat == 1 else None,
+        "eps_reg_scope": _eps_scope,
+        "cid1_active": cid1.get("active"),
+        "cid1_ip": cid1.get("ip"),
+        "usbnet_mode": usbnet_mode,
+        "usbnet_mode_label": _usbnet_mode_label(usbnet_mode),
+        "qnetdev_status": qnetdev_status,
+        "eps_qci_rows": eps_qci_rows,
+        "eps_qci_label": eps_qci_label,
+        "eps_qci_query_ok": bool(cgcontrdp_res.get("ok")),
+    }
+    async with runtime.lock:
+        runtime.data_service = ds_block
+        runtime.data_service_at = now
+        if runtime.snapshot:
+            snap = dict(runtime.snapshot)
+            snap["data_service"] = dict(ds_block)
+            runtime.snapshot = snap
+    return True
+
+
+async def data_service_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
+    """Background PDP/registration refresh so RF KPI cycles stay short."""
+    await asyncio.sleep(3.0)
+    while runtime.poll_running:
+        try:
+            await refresh_data_service_snapshot(engine, runtime)
+        except Exception as exc:  # noqa: BLE001
+            async with runtime.lock:
+                runtime.last_error = f"data_service: {exc}"
+        await asyncio.sleep(DATA_SERVICE_REFRESH_SEC)
+
+
 async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
     runtime.poll_running = True
     try:
         while runtime.poll_running:
+            while runtime.poll_running and runtime.at_exclusive_hold_depth > 0:
+                await asyncio.sleep(0.05)
+            if not runtime.poll_running:
+                break
             started = time.time()
+            runtime.poll_cycle_active = True
             try:
                 now = time.time()
                 need_fw = (now - runtime.modem_fw_at) > 60.0 or not runtime.modem_fw
                 if need_fw:
-                    cgmr = await engine.send_command("AT+CGMR", timeout_sec=2.0)
+                    cgmr = await _kpi_at(engine, runtime, "AT+CGMR", timeout_sec=2.0)
                     fw = _parse_cgmr(cgmr.get("lines", []))
                     if fw:
                         runtime.modem_fw = fw
                     runtime.modem_fw_at = now
 
-                qeng = await engine.send_command('AT+QENG="servingcell"', timeout_sec=2.0)
-                qnwinfo = await engine.send_command("AT+QNWINFO", timeout_sec=1.5)
+                qeng = await _kpi_at(engine, runtime, 'AT+QENG="servingcell"', timeout_sec=2.0)
+                qnwinfo = await _kpi_at(engine, runtime, "AT+QNWINFO", timeout_sec=1.5)
                 net = _parse_qnwinfo(qnwinfo.get("lines", []))
                 in_service = bool(
                     net
@@ -1338,11 +1491,11 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                 )
 
                 if in_service:
-                    qrsrp = await engine.send_command("AT+QRSRP", timeout_sec=1.5)
-                    qrsrq = await engine.send_command("AT+QRSRQ", timeout_sec=1.5)
-                    qsinr = await engine.send_command("AT+QSINR", timeout_sec=1.5)
-                    qeng_nb = await engine.send_command('AT+QENG="neighbourcell"', timeout_sec=2.0)
-                    qcainfo_res = await engine.send_command("AT+QCAINFO", timeout_sec=2.0)
+                    qrsrp = await _kpi_at(engine, runtime, "AT+QRSRP", timeout_sec=1.5)
+                    qrsrq = await _kpi_at(engine, runtime, "AT+QRSRQ", timeout_sec=1.5)
+                    qsinr = await _kpi_at(engine, runtime, "AT+QSINR", timeout_sec=1.5)
+                    qeng_nb = await _kpi_at(engine, runtime, 'AT+QENG="neighbourcell"', timeout_sec=2.0)
+                    qcainfo_res = await _kpi_at(engine, runtime, "AT+QCAINFO", timeout_sec=2.0)
                 else:
                     # Avoid command spam/errors when modem is deregistered/no-service.
                     qrsrp = {"ok": False, "command": "AT+QRSRP", "final": "SKIPPED_NO_SERVICE", "lines": []}
@@ -1350,94 +1503,6 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                     qsinr = {"ok": False, "command": "AT+QSINR", "final": "SKIPPED_NO_SERVICE", "lines": []}
                     qeng_nb = {"ok": False, "command": 'AT+QENG="neighbourcell"', "final": "SKIPPED_NO_SERVICE", "lines": []}
                     qcainfo_res = {"ok": False, "command": "AT+QCAINFO", "final": "SKIPPED_NO_SERVICE", "lines": []}
-
-                refresh_ds = (now - runtime.data_service_at) > 5.0 or not runtime.data_service
-
-                if refresh_ds:
-                    cgatt = await engine.send_command("AT+CGATT?", timeout_sec=1.5)
-                    cereg = await engine.send_command("AT+CEREG?", timeout_sec=1.5)
-                    cgdcont = await engine.send_command("AT+CGDCONT?", timeout_sec=2.0)
-                    contexts = _parse_cgdcont(cgdcont.get("lines", []))
-                    primary_ctx_ds = next((c for c in contexts if c.get("cid") == 1), contexts[0] if contexts else {})
-                    primary_cid_ds = int(primary_ctx_ds.get("cid") or 1)
-                    cgauth = await engine.send_command("AT+CGAUTH?", timeout_sec=2.0)
-                    qicsgp = await _read_qicsgp_best_effort(engine, primary_cid_ds, timeout_sec=2.0)
-                    qiact = await engine.send_command("AT+QIACT?", timeout_sec=2.0)
-                    cgcontrdp_res = await _read_cgcontrdp_best_effort(engine, primary_cid_ds, timeout_sec=2.5)
-                    cgcontrdp_rows = _parse_cgcontrdp(cgcontrdp_res.get("lines", []) or [])
-                    qcfg_usbnet = await engine.send_command('AT+QCFG="usbnet"', timeout_sec=2.0)
-                    qnetdev = await engine.send_command("AT+QNETDEVSTATUS?", timeout_sec=2.0)
-
-                    cgatt_v = _parse_cgatt(cgatt.get("lines", []))
-                    cereg_v = _parse_cereg(cereg.get("lines", [])) or {}
-                    auth_rows = _parse_cgauth(cgauth.get("lines", []))
-                    qicsgp_rows = _parse_qicsgp(qicsgp.get("lines", []))
-                    active = _parse_qiact(qiact.get("lines", []))
-                    usbnet_mode = _parse_qcfg_usbnet(qcfg_usbnet.get("lines", []))
-                    qnetdev_status = _parse_qnetdevstatus(qnetdev.get("lines", []))
-                    active_by_cid = {x.get("cid"): x for x in active if isinstance(x.get("cid"), int)}
-                    primary_ctx = primary_ctx_ds
-                    cid1 = active_by_cid.get(1) or {}
-                    primary_cid = primary_cid_ds
-                    ca_one = next((r for r in auth_rows if r.get("cid") == primary_cid), None)
-                    qi_one = next((r for r in qicsgp_rows if r.get("cid") == primary_cid), None)
-                    pdp_user = None
-                    pdp_auth = None
-                    pwd_hint = False
-                    if ca_one:
-                        u = str(ca_one.get("username") or "").strip()
-                        if u:
-                            pdp_user = u
-                        pdp_auth = ca_one.get("auth_type")
-                        pwd_hint = pwd_hint or bool(ca_one.get("password_present_in_response"))
-                    if qi_one:
-                        if not pdp_user:
-                            u2 = str(qi_one.get("username") or "").strip()
-                            if u2:
-                                pdp_user = u2
-                        if pdp_auth is None:
-                            pdp_auth = qi_one.get("auth_type")
-                        pwd_hint = pwd_hint or bool(qi_one.get("password_present_in_response"))
-                    pdp_auth_label = _pdp_auth_type_label(int(pdp_auth) if pdp_auth is not None else None)
-                    eps_qci_rows = [
-                        {"cid": int(r["cid"]), "bearer_id": r.get("bearer_id"), "qci": r.get("qci")}
-                        for r in cgcontrdp_rows
-                    ]
-                    eps_qci_label = _format_eps_qci_label(cgcontrdp_rows, primary_cid_ds)
-
-                    _creg_stat = cereg_v.get("stat")
-                    # 3GPP TS 27.007 +CEREG stat: 1=home, 5=roaming (when registered on EPS).
-                    _eps_scope: str | None = (
-                        "roaming"
-                        if _creg_stat == 5
-                        else "home"
-                        if _creg_stat == 1
-                        else None
-                    )
-                    runtime.data_service = {
-                        "apn": primary_ctx.get("apn"),
-                        "pdp_type": primary_ctx.get("pdp_type"),
-                        "pdp_auth_type": pdp_auth,
-                        "pdp_auth_label": pdp_auth_label,
-                        "pdp_username": pdp_user,
-                        "pdp_password_reported": pwd_hint,
-                        "pdp_contexts": len(contexts),
-                        "active_pdp_contexts": sum(1 for x in active if x.get("active")),
-                        "packet_attached": cgatt_v == 1 if cgatt_v is not None else None,
-                        "eps_reg_stat": _creg_stat,
-                        "eps_registered": _creg_stat in (1, 5) if _creg_stat is not None else None,
-                        "eps_roaming": True if _creg_stat == 5 else False if _creg_stat == 1 else None,
-                        "eps_reg_scope": _eps_scope,
-                        "cid1_active": cid1.get("active"),
-                        "cid1_ip": cid1.get("ip"),
-                        "usbnet_mode": usbnet_mode,
-                        "usbnet_mode_label": _usbnet_mode_label(usbnet_mode),
-                        "qnetdev_status": qnetdev_status,
-                        "eps_qci_rows": eps_qci_rows,
-                        "eps_qci_label": eps_qci_label,
-                        "eps_qci_query_ok": bool(cgcontrdp_res.get("ok")),
-                    }
-                    runtime.data_service_at = now
 
                 serving = _parse_qeng_servingcell(qeng.get("lines", []))
                 serving_pci = None
@@ -1579,6 +1644,8 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                     runtime.snapshot = parsed
                     runtime.neighbour_channel_card = neighbour_channel_card
                     runtime.last_error = None
+            except KpiCyclePreempted:
+                pass
             except Exception as exc:  # noqa: BLE001
                 async with runtime.lock:
                     runtime.last_error = str(exc)
@@ -1587,6 +1654,8 @@ async def kpi_poll_loop(engine: SerialEngine, runtime: KpiRuntime) -> None:
                         "inter_text": "-",
                         "sample_ts": None,
                     }
+            finally:
+                runtime.poll_cycle_active = False
 
             elapsed = time.time() - started
             interval = max(0.05, 1.0 / max(1.0, float(runtime.poll_hz)))
