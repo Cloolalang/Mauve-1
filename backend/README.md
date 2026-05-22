@@ -1,6 +1,11 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 4.1** — see root [`README.md`](../README.md) for the full feature overview. **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1). FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **4.1**).
+**Version 4.2** — see root [`README.md`](../README.md) for the full feature overview. **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1). FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **4.2**).
+
+Notes for **v4.2**:
+
+- **`dashboard.html` — correlator**: **`historyRetentionMs()`** (`max(chartWindowMs, corrChartWindowMs)`); expanded **`CORR_KPI_CATALOG`** and trace **`GROUPS`** (**Modem TCP Setup**, neighbours, CA PCC, NR ARFCN/PCI, resel rates); MTCP trend uses retention window; axis **`data-axis-suffix`** / **`data-use-retention-window`**; **`corrZeroOnFail`** pushes **9999** to **`modemTcpHistory`**; **`collectUiControlsForRun()`** **`correlator`** block.
+- OpenAPI / page header: **v4.2**.
 
 Notes for **v4.1**:
 

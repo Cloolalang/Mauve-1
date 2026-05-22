@@ -847,7 +847,7 @@
     <div class="card">
       <div class="label">Modem TCP connect trend (ms)</div>
       <canvas id="mtcp-chart" width="420" height="180" style="width:100%; height:180px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m — line: setup ms · bottom strip: OPENING (amber) / OPEN (green) / CLOSED (grey) / fail (red)</div>
+      <div class="label chart-axis-label" data-use-retention-window="1" data-axis-suffix="— line: setup ms · bottom strip: OPENING (amber) / OPEN (green) / CLOSED (grey) / fail (red)" style="margin-top:6px;">Time axis: last 10m — line: setup ms · bottom strip: OPENING (amber) / OPEN (green) / CLOSED (grey) / fail (red)</div>
       <div style="margin-top:8px;">
         <canvas id="mtcp-gauge" width="220" height="110" style="width:100%; max-width:280px; height:110px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
         <div id="mtcp-gauge-note" class="label" style="margin-top:5px;">Latest connect setup (ms).</div>
@@ -886,7 +886,7 @@
     <div class="card">
       <div class="label">Iperf Throughput &amp; Spectral Efficiency Trend</div>
       <canvas id="iperfchart" width="420" height="180" style="width:100%; height:180px; background:#101010; border:1px solid #333; border-radius:8px;"></canvas>
-      <div class="label chart-axis-label" style="margin-top:6px;">Time axis: last 10m &nbsp;|&nbsp; Left Y: Mbps &nbsp;|&nbsp; Right Y: bps/Hz (dashed = SE)</div>
+      <div class="label chart-axis-label" data-axis-suffix="· Left Y: Mbps · Right Y: bps/Hz (dashed = SE)" style="margin-top:6px;">Time axis: last 10m · Left Y: Mbps · Right Y: bps/Hz (dashed = SE)</div>
     </div>
 
     <div class="card">
@@ -1027,13 +1027,13 @@
       <div id="corr-trace-selects" style="display:grid; grid-template-columns:repeat(3,1fr); gap:6px 16px; margin-bottom:10px;"></div>
       <div class="corr-controls">
         <button id="btn-corr-gap-mode" style="white-space:nowrap;">Time-roll gaps: OFF</button>
-        <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6; cursor:pointer;" title="When a test fails, push v=9999 into the iperf/ping history so the correlator trace spikes high instead of showing a gap">
+        <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6; cursor:pointer;" title="When a test fails, push v=9999 into iperf/ping/modem-TCP histories so the correlator trace spikes high instead of showing a gap">
           <input id="corr-zero-on-fail" type="checkbox" style="accent-color:#ff79c6;" />
           Record 9999 on test fail
         </label>
         <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6;">
           Window
-          <select id="corr-chart-window-select" style="background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:3px 6px;">
+          <select id="corr-chart-window-select" title="Display range for this chart. Sample history is kept for the larger of this window and the global Chart window (top bar)." style="background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:3px 6px;">
             <option value="60">60 s</option>
             <option value="120">2 m</option>
             <option value="300">5 m</option>
@@ -1219,6 +1219,7 @@
     const carrierReselEarfcnHistory = [];
     const categoryHistory = { state: [], rat: [], regTrend: [], band: [], caEarfcn: [], nrBand: [] };
     let chartWindowMs = 600 * 1000;
+    let corrChartWindowMs = 600 * 1000;
     const RF_SMOOTH_WINDOW = 10;
     const RF_STD_SAMPLE_MIN = 2;
     const RF_STD_SAMPLE_MAX = 600;
@@ -1343,9 +1344,13 @@
       return er || md || fallback || "";
     }
 
+    function historyRetentionMs() {
+      return Math.max(chartWindowMs, corrChartWindowMs);
+    }
+
     function pruneHistoryByAge(history, nowMs = Date.now()) {
       if (!Array.isArray(history) || history.length === 0) return;
-      const cutoff = nowMs - chartWindowMs;
+      const cutoff = nowMs - historyRetentionMs();
       while (history.length && Number(history[0]?.t || 0) < cutoff) history.shift();
     }
 
@@ -1394,9 +1399,15 @@
     }
 
     function updateChartAxisLabels() {
-      const txt = `Time axis: last ${formatAxisDuration(chartWindowMs)}`;
       document.querySelectorAll(".chart-axis-label").forEach((node) => {
-        node.textContent = txt;
+        const useRetention = node.getAttribute("data-use-retention-window") === "1";
+        const ms = useRetention ? historyRetentionMs() : chartWindowMs;
+        let base = `Time axis: last ${formatAxisDuration(ms)}`;
+        if (useRetention && historyRetentionMs() > chartWindowMs) {
+          base += ` (RF/iperf charts ${formatAxisDuration(chartWindowMs)})`;
+        }
+        const suffix = node.getAttribute("data-axis-suffix");
+        node.textContent = suffix ? `${base} ${suffix}` : base;
       });
     }
 
@@ -1438,6 +1449,7 @@
       if (!Number.isFinite(s) || s < 60 || s > 3600) return;
       chartWindowMs = Math.round(s * 1000);
       updateChartAxisLabels();
+      updateCorrAxisLabel();
       pruneAllHistory(Date.now());
       redrawAllCharts();
     }
@@ -4737,11 +4749,12 @@
       const y0 = h - 24;
       const y1 = 10;
       const nowMs = Date.now();
-      const windowStartMs = nowMs - chartWindowMs;
+      const mtcpWindowMs = historyRetentionMs();
+      const windowStartMs = nowMs - mtcpWindowMs;
       const xFor = (p) => {
         const t = Number(p?.t);
         if (!Number.isFinite(t)) return x0;
-        const ratio = Math.max(0, Math.min(1, (t - windowStartMs) / chartWindowMs));
+        const ratio = Math.max(0, Math.min(1, (t - windowStartMs) / mtcpWindowMs));
         return x0 + ratio * (x1 - x0);
       };
 
@@ -4985,6 +4998,10 @@
         } else {
           addMtcpState(tEnd, "failed");
           addMtcpState(tEnd + 1, "closed");
+          if (corrZeroOnFail) {
+            modemTcpHistory.push({ t: tEnd, v: 9999 });
+            pruneHistoryByAge(modemTcpHistory, tEnd);
+          }
         }
 
         const detail = [
@@ -5031,6 +5048,10 @@
         addMtcpState(tFail, "failed");
         modemTcpEventHistory.push({ t: tFail, ok: false });
         pruneHistoryByAge(modemTcpEventHistory, tFail);
+        if (corrZeroOnFail) {
+          modemTcpHistory.push({ t: tFail, v: 9999 });
+          pruneHistoryByAge(modemTcpHistory, tFail);
+        }
         drawModemTcpChart();
       } finally {
         modemTcpBusy = false;
@@ -7407,6 +7428,13 @@
           test_iterations: Number(el("test-runner-iterations")?.value || 1),
           test_iteration_delay_sec: Number(el("test-runner-iter-delay")?.value || 10),
         },
+        correlator: {
+          window_sec: Number(el("corr-chart-window-select")?.value || 600),
+          gap_mode: !!corrGapModeEnabled,
+          zero_on_fail: !!corrZeroOnFail,
+          scale_mode: String(corrScaleMode || "stacked"),
+          trace_keys: Array.isArray(corrKpiKeys) ? corrKpiKeys.slice() : [],
+        },
       };
     }
     async function refreshTestRunnerProfiles() {
@@ -7728,7 +7756,6 @@
     let corrKpiKeys = ["lte_rsrp", "none", "none", "none", "none", "none"];
     let corrTraceDotEls = [];   // dot <span> refs, one per trace row
     let corrGapModeEnabled = false;
-    let corrChartWindowMs = 600 * 1000;
     let corrTraceSmooth       = [false, false, false, false, false, false];
     let corrTraceSmoothWindow = [10, 10, 10, 10, 10, 10];
     let corrZeroOnFail        = false;  // push v:9999 to iperf/ping histories on test failure
@@ -7749,6 +7776,22 @@
     // to redrawAllCharts() and drawRfCharts() defined above.
     // ============================================================
 
+    function historyFromCaPccMetric(field) {
+      const out = [];
+      for (const s of caCarrierHistory) {
+        const pcc = (s.carriers || []).find((c) => String(c.role || "").toUpperCase() === "PCC");
+        if (!pcc) continue;
+        const v = Number(pcc[field]);
+        if (!Number.isFinite(v)) continue;
+        const c =
+          Number.isFinite(Number(pcc.earfcn)) && Number.isFinite(Number(pcc.pci))
+            ? `${pcc.earfcn}/${pcc.pci}`
+            : undefined;
+        out.push({ t: s.t, v, ...(c ? { c } : {}) });
+      }
+      return out;
+    }
+
     const CORR_KPI_CATALOG = [
       { key: "lte_rsrp",        label: "LTE RSRP",              unit: "dBm",    color: "#4da3ff", threshold: -126, rangeMin: -140, rangeMax: -44,  getHistory: () => rfHistory.rsrp },
       { key: "lte_rsrq",        label: "LTE RSRQ",              unit: "dB",     color: "#4da3ff", threshold: -15,  rangeMin: -20,  rangeMax: -3,   getHistory: () => rfHistory.rsrq },
@@ -7758,22 +7801,37 @@
       { key: "congestion_proxy",label: "Congestion Proxy",      unit: "dB",     color: "#ffb86c", threshold: 0,    rangeMin: -30,  rangeMax: 30,   getHistory: () => congestionProxyHistory },
       { key: "lte_dl_bw",       label: "LTE DL Bandwidth",      unit: "MHz",    color: "#b8ffc8", threshold: null, rangeMin: 0,    rangeMax: 20,   getHistory: () => bwHistory },
       { key: "ca_agg_bw",       label: "CA Aggregated DL BW",   unit: "MHz",    color: "#b8ffc8", threshold: null, rangeMin: 0,    rangeMax: 100,  getHistory: () => caAggBwHistory },
+      { key: "ca_pcc_rsrp",     label: "CA PCC RSRP",           unit: "dBm",    color: "#b8ffc8", threshold: -126, rangeMin: -140, rangeMax: -44,  getHistory: () => historyFromCaPccMetric("rsrp") },
+      { key: "ca_pcc_rsrq",     label: "CA PCC RSRQ",           unit: "dB",     color: "#b8ffc8", threshold: -15,  rangeMin: -20,  rangeMax: -3,   getHistory: () => historyFromCaPccMetric("rsrq") },
+      { key: "ca_pcc_sinr",     label: "CA PCC SINR",           unit: "dB",     color: "#b8ffc8", threshold: 0,    rangeMin: -20,  rangeMax: 40,   getHistory: () => historyFromCaPccMetric("sinr") },
+      { key: "carrier_resel_earfcn", label: "PCell EARFCN Resel/min", unit: "/min", color: "#ff8ec8", threshold: null, rangeMin: 0, rangeMax: 30, getHistory: () => carrierReselEarfcnHistory },
+      { key: "carrier_resel_pci",    label: "PCell PCI Resel/min",    unit: "/min", color: "#87ceeb", threshold: null, rangeMin: 0, rangeMax: 30, getHistory: () => carrierReselPciHistory },
       { key: "nr_rsrp",         label: "NR5G RSRP",             unit: "dBm",    color: "#ff79c6", threshold: -126, rangeMin: -160, rangeMax: -44,  getHistory: () => nrRfHistory.rsrp },
       { key: "nr_rsrq",         label: "NR5G RSRQ",             unit: "dB",     color: "#ff79c6", threshold: -15,  rangeMin: -20,  rangeMax: -3,   getHistory: () => nrRfHistory.rsrq },
       { key: "nr_sinr",         label: "NR5G SINR",             unit: "dB",     color: "#ff79c6", threshold: 0,    rangeMin: -20,  rangeMax: 40,   getHistory: () => nrRfHistory.sinr },
       { key: "nr_dominance",    label: "NR5G Cell Dominance",   unit: "dB",     color: "#bd93f9", threshold: 6,    rangeMin: -20,  rangeMax: 30,   getHistory: () => nrRfHistory.dominance },
       { key: "nr_dl_bw",        label: "NR5G DL Bandwidth",     unit: "MHz",    color: "#ff79c6", threshold: null, rangeMin: 0,    rangeMax: 400,  getHistory: () => nrBwHistory },
+      { key: "nr_arfcn",        label: "NR Serving ARFCN",      unit: "",       color: "#dda0dd", threshold: null, rangeMin: 0,    rangeMax: 3279165, getHistory: () => nrArfcnHistory },
+      { key: "nr_pci",          label: "NR Serving PCI",        unit: "",       color: "#f0e68c", threshold: null, rangeMin: 0,    rangeMax: 1007, getHistory: () => nrPciHistory },
       { key: "nbr_intra_rsrp",  label: "Intra Nbr RSRP",        unit: "dBm",    color: "#aaaaaa", threshold: -126, rangeMin: -140, rangeMax: -44,  getHistory: () => rfNeighborOverlap.rsrp },
+      { key: "nbr_intra_rsrq",  label: "Intra Nbr RSRQ",        unit: "dB",     color: "#aaaaaa", threshold: -15,  rangeMin: -20,  rangeMax: -3,   getHistory: () => rfNeighborOverlap.rsrq },
+      { key: "nbr_intra_rssi",  label: "Intra Nbr RSSI",        unit: "dBm",    color: "#aaaaaa", threshold: -95,  rangeMin: -120, rangeMax: -40,  getHistory: () => rfNeighborOverlap.rssi },
       { key: "nbr_inter_rsrp",  label: "Inter Nbr RSRP",        unit: "dBm",    color: "#aaaaaa", threshold: -126, rangeMin: -140, rangeMax: -44,  getHistory: () => nbrInterRsrpHistory },
       { key: "nbr_inter_rsrq",  label: "Inter Nbr RSRQ",        unit: "dB",     color: "#aaaaaa", threshold: -15,  rangeMin: -20,  rangeMax: -3,   getHistory: () => nbrInterRsrqHistory },
+      { key: "nbr_inter_rssi",  label: "Inter Nbr RSSI",        unit: "dBm",    color: "#aaaaaa", threshold: -95,  rangeMin: -120, rangeMax: -40,  getHistory: () => nbrInterRssiHistory },
+      { key: "nbr_inter_dominance", label: "Inter Nbr Dominance", unit: "dB", color: "#aaaaaa", threshold: 6,    rangeMin: -20,  rangeMax: 30,   getHistory: () => nInterDomHistory },
       { key: "nbr_intra_count", label: "Intra Nbr Count",       unit: "",       color: "#bd93f9", threshold: null, rangeMin: 0,    rangeMax: 20,   getHistory: () => nbrIntraCountHistory },
       { key: "nbr_inter_count", label: "Inter Nbr Count",       unit: "",       color: "#8be9fd", threshold: null, rangeMin: 0,    rangeMax: 20,   getHistory: () => nbrInterCountHistory },
+      { key: "nr_nbr_rsrp",     label: "NR Intra Nbr RSRP",     unit: "dBm",    color: "#ff79c6", threshold: -126, rangeMin: -160, rangeMax: -44,  getHistory: () => nrRfNeighborOverlap.rsrp },
+      { key: "nr_nbr_rsrq",     label: "NR Intra Nbr RSRQ",     unit: "dB",     color: "#ff79c6", threshold: -15,  rangeMin: -20,  rangeMax: -3,   getHistory: () => nrRfNeighborOverlap.rsrq },
+      { key: "nr_nbr_sinr",     label: "NR Intra Nbr SINR",     unit: "dB",     color: "#ff79c6", threshold: 0,    rangeMin: -20,  rangeMax: 40,   getHistory: () => nrRfNeighborOverlap.sinr },
       { key: "iperf_dl",        label: "Iperf DL Throughput",   unit: "Mbps",   color: "#00e5ff", threshold: null, rangeMin: 0,    rangeMax: 300,  getHistory: () => iperfDlHistory },
       { key: "iperf_ul",        label: "Iperf UL Throughput",   unit: "Mbps",   color: "#ffb86c", threshold: null, rangeMin: 0,    rangeMax: 150,  getHistory: () => iperfUlHistory },
       { key: "iperf_dl_se",     label: "Iperf DL Spectral Eff.",unit: "bps/Hz", color: "#7cffb2", threshold: null, rangeMin: 0,    rangeMax: 15,   getHistory: () => iperfDlSeHistory },
       { key: "iperf_ul_se",     label: "Iperf UL Spectral Eff.",unit: "bps/Hz", color: "#ffe066", threshold: null, rangeMin: 0,    rangeMax: 8,    getHistory: () => iperfUlSeHistory },
       { key: "ping_rtt",        label: "Ping Avg RTT",          unit: "ms",     color: "#50fa7b", threshold: null, rangeMin: 0,    rangeMax: 500,  invertY: true, getHistory: () => phAvgHistory },
       { key: "ping_jitter",     label: "Ping Jitter",           unit: "ms",     color: "#ffb86c", threshold: null, rangeMin: 0,    rangeMax: 200,  invertY: true, getHistory: () => phJitHistory },
+      { key: "modem_tcp_setup", label: "Modem TCP Setup",       unit: "ms",     color: "#ffb347", threshold: null, rangeMin: 0,    rangeMax: 30000, invertY: true, getHistory: () => modemTcpHistory },
     ];
 
     function switchTab(tabName) {
@@ -7791,7 +7849,13 @@
 
     function updateCorrAxisLabel() {
       const aEl = el("corr-axis-label");
-      if (aEl) aEl.textContent = `Time axis: ${formatAxisDuration(corrChartWindowMs)}${corrGapModeEnabled ? "  ·  gap mode ON" : ""}`;
+      if (!aEl) return;
+      let txt = `Time axis: ${formatAxisDuration(corrChartWindowMs)}`;
+      if (corrChartWindowMs > chartWindowMs) {
+        txt += `  ·  history ${formatAxisDuration(historyRetentionMs())} (global chart window is ${formatAxisDuration(chartWindowMs)})`;
+      }
+      if (corrGapModeEnabled) txt += "  ·  gap mode ON";
+      aEl.textContent = txt;
     }
 
     function updateCorrGapButton() {
@@ -8119,12 +8183,16 @@
       const container = el("corr-trace-selects");
       if (!container) return;
       const GROUPS = [
-        { label: "LTE Primary Cell", keys: ["lte_rsrp","lte_rsrq","lte_sinr","lte_rssi","lte_dominance","congestion_proxy","lte_dl_bw","ca_agg_bw"] },
-        { label: "NR5G",             keys: ["nr_rsrp","nr_rsrq","nr_sinr","nr_dominance","nr_dl_bw"] },
-        { label: "Neighbours",       keys: ["nbr_intra_rsrp","nbr_inter_rsrp","nbr_inter_rsrq","nbr_intra_count","nbr_inter_count"] },
+        { label: "LTE Primary Cell", keys: ["lte_rsrp","lte_rsrq","lte_sinr","lte_rssi","lte_dominance","congestion_proxy","lte_dl_bw","ca_agg_bw","ca_pcc_rsrp","ca_pcc_rsrq","ca_pcc_sinr","carrier_resel_earfcn","carrier_resel_pci"] },
+        { label: "NR5G",             keys: ["nr_rsrp","nr_rsrq","nr_sinr","nr_dominance","nr_dl_bw","nr_arfcn","nr_pci"] },
+        { label: "Neighbours",       keys: ["nbr_intra_rsrp","nbr_intra_rsrq","nbr_intra_rssi","nbr_inter_rsrp","nbr_inter_rsrq","nbr_inter_rssi","nbr_inter_dominance","nbr_intra_count","nbr_inter_count","nr_nbr_rsrp","nr_nbr_rsrq","nr_nbr_sinr"] },
         { label: "Iperf",            keys: ["iperf_dl","iperf_ul","iperf_dl_se","iperf_ul_se"] },
         { label: "Ping",             keys: ["ping_rtt","ping_jitter"] },
+        { label: "Modem TCP",        keys: ["modem_tcp_setup"] },
       ];
+      const listedKeys = new Set(GROUPS.flatMap((g) => g.keys));
+      const otherKeys = CORR_KPI_CATALOG.map((k) => k.key).filter((k) => !listedKeys.has(k));
+      if (otherKeys.length) GROUPS.push({ label: "Other", keys: otherKeys });
       const TRACE_COLORS = ["#4da3ff","#ff79c6","#50fa7b","#ffb86c","#bd93f9","#8be9fd"];
       for (let i = 0; i < 6; i++) {
         const wrap = document.createElement("label");
@@ -8246,7 +8314,14 @@
     el("tab-btn-correlator").addEventListener("click", () => switchTab("correlator"));
     el("btn-corr-gap-mode").addEventListener("click", () => { corrGapModeEnabled = !corrGapModeEnabled; updateCorrGapButton(); updateCorrAxisLabel(); drawCorrChart(); });
     el("corr-zero-on-fail").addEventListener("change", (e) => { corrZeroOnFail = e.target.checked; });
-    el("corr-chart-window-select").addEventListener("change", (e) => { corrChartWindowMs = Number(e.target.value) * 1000; updateCorrAxisLabel(); drawCorrChart(); });
+    el("corr-chart-window-select").addEventListener("change", (e) => {
+      corrChartWindowMs = Number(e.target.value) * 1000;
+      pruneAllHistory(Date.now());
+      updateChartAxisLabels();
+      updateCorrAxisLabel();
+      drawCorrChart();
+      drawModemTcpChart();
+    });
     el("corr-scale-mode").addEventListener("change", (e) => { corrScaleMode = e.target.value; drawCorrChart(); });
     installCorrChartHoverListeners();
     updateCorrGapButton();
