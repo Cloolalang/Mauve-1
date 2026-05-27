@@ -205,8 +205,23 @@
       <div class="label">Access / Operator</div>
       <div class="row"><span class="label">Registered network (PLMN)</span><span id="operator">-</span></div>
       <div class="row"><span class="label">Registration</span><span id="access-eps-scope">-</span></div>
+      <div class="row" id="access-eps-reject-row" style="display:none;" title="From AT+CEREG when registration is denied or the modem reports an EMM reject cause (requires AT+CEREG=3). Refreshes with Data Service KPI (~30s).">
+        <span class="label">EPS reject (EMM)</span><span id="access-eps-reject">-</span>
+      </div>
+      <div class="row" id="access-nr5g-reject-row" style="display:none;" title="From AT+C5GREG when 5GS registration is denied or the modem reports a 5GMM reject cause (requires AT+C5GREG=3). Refreshes with Data Service KPI (~30s).">
+        <span class="label">5GS reject (5GMM)</span><span id="access-nr5g-reject">-</span>
+      </div>
       <div class="row"><span class="label">Modem FW</span><span id="modemfw" class="modemfw-value">-</span></div>
       <div class="row"><span class="label">Updated</span><span id="updated">-</span></div>
+      <div style="margin-top:8px;">
+        <label
+          style="display:flex; align-items:center; gap:8px;"
+          title="When on, Primary Cell RF KPIs and LTE RF trend charts use AT+QENG serving-cell metrics even if QNWINFO reports NO SERVICE (e.g. no SIM or cell search). Neighbour, CA, and Data Service KPIs still require network registration."
+        >
+          <input id="access-qeng-search-rf" type="checkbox" />
+          <span>Show QENG serving RF (cell search / no SIM)</span>
+        </label>
+      </div>
       <div class="label" style="margin-top:12px;">Registration Control (COPS)</div>
       <div class="row"><span class="label">Mode</span><span id="copsmode">-</span></div>
       <div class="row"><span class="label">COPS operator</span><span id="copsoperator">-</span></div>
@@ -1312,6 +1327,50 @@
       return s;
     }
 
+    function accessQengSearchRfEnabled() {
+      return !!el("access-qeng-search-rf")?.checked;
+    }
+
+    function qengServingLteRfOk(lte) {
+      const earfcn = Number(lte?.earfcn);
+      const pci = Number(lte?.pcid);
+      const rsrp = Number(lte?.rsrp);
+      return Number.isFinite(earfcn) && Number.isFinite(pci) && Number.isFinite(rsrp) && rsrp < 0;
+    }
+
+    function primaryLteSinrValue(qsinr, lte) {
+      const prx = qsinr?.prx;
+      if (prx !== null && prx !== undefined && Number.isFinite(Number(prx))) return Number(prx);
+      const raw = lte?.sinr_raw;
+      if (raw !== null && raw !== undefined && Number.isFinite(Number(raw))) return Number(raw);
+      return null;
+    }
+
+    function formatRegRejectCause(ds, prefix, domainLabel) {
+      const cause = ds?.[`${prefix}_reject_cause`];
+      if (cause === null || cause === undefined) return null;
+      const ctype = ds?.[`${prefix}_reject_cause_type`];
+      const label = ds?.[`${prefix}_reject_cause_label`];
+      const typeStr = ctype === 1 ? "mfg" : domainLabel;
+      const tail = label ? ` — ${label}` : "";
+      return `${typeStr} #${cause}${tail}`;
+    }
+
+    function applyAccessRegRejectRow(rowId, elId, text) {
+      const row = el(rowId);
+      const cell = el(elId);
+      if (!row || !cell) return;
+      if (text) {
+        row.style.display = "";
+        cell.textContent = text;
+        cell.className = "warn";
+      } else {
+        row.style.display = "none";
+        cell.textContent = "-";
+        cell.className = "";
+      }
+    }
+
     /** Snapshot line for Registration trend categorical chart */
     function composeRegistrationTrendSample(sample) {
       const reg = sample?.registration || {};
@@ -1739,7 +1798,23 @@
         scopeEl.textContent = regMain;
         scopeEl.className = regClass;
       }
-      el("band").textContent = net.band || "-";
+
+      applyAccessRegRejectRow(
+        "access-eps-reject-row",
+        "access-eps-reject",
+        formatRegRejectCause(ds, "eps", "EMM")
+      );
+      applyAccessRegRejectRow(
+        "access-nr5g-reject-row",
+        "access-nr5g-reject",
+        formatRegRejectCause(ds, "nr5g", "5GMM")
+      );
+
+      const qengSearchRfOn = accessQengSearchRfEnabled();
+      const qengLteRfOk = qengServingLteRfOk(lte);
+      const bandFromQeng =
+        lte.band !== null && lte.band !== undefined && `${lte.band}`.trim().length ? String(lte.band) : null;
+      el("band").textContent = net.band || (qengSearchRfOn && bandFromQeng ? bandFromQeng : null) || "-";
       {
         const dpx = lte.duplex;
         let dpxText = "-";
@@ -1822,7 +1897,8 @@
         el("ds-warn").className = "label";
       }
 
-      const ratVal = inService ? (lte.rat || srv.mode || "-") : "-";
+      const ratVal =
+        inService || (qengSearchRfOn && qengLteRfOk) ? lte.rat || srv.mode || "-" : "-";
       el("rat").textContent = ratVal;
       el("state").textContent = srv.state || "-";
       const dlBw = lte.dl_bw;
@@ -1838,14 +1914,15 @@
       currentServingPci = Number.isFinite(Number(pci)) ? Number(pci) : null;
       const lteRsrpN = Number(lte.rsrp);
       const lteStateNoRf = /\bSEARCH\b/i.test(String(srv.state || ""));
-      /* Camped / connected LTE RF: RSRP must be a finite negative dBm. Non‑negative (e.g. 0) appears during invalid parse; SEARCH has no usable serving RF — do not feed charts or derivative KPIs. */
+      const lteSinrVal = primaryLteSinrValue(qsinr, lte);
       primaryCellDataAvailable =
-        inService &&
-        !lteStateNoRf &&
-        Number.isFinite(currentServingEarfcn) &&
-        Number.isFinite(currentServingPci) &&
-        Number.isFinite(lteRsrpN) &&
-        lteRsrpN < 0;
+        (inService &&
+          !lteStateNoRf &&
+          Number.isFinite(currentServingEarfcn) &&
+          Number.isFinite(currentServingPci) &&
+          Number.isFinite(lteRsrpN) &&
+          lteRsrpN < 0) ||
+        (qengSearchRfOn && qengLteRfOk);
       if (earfcn === null || earfcn === undefined || pci === null || pci === undefined) {
         el("earfcnpci").textContent = "-";
       } else {
@@ -1932,11 +2009,11 @@
       currentNrPci =
         nrp.pci !== null && nrp.pci !== undefined && Number.isFinite(Number(nrp.pci)) ? Number(nrp.pci) : null;
       nrCellDataAvailable =
-        !!nrf.available &&
         currentNrArfcn !== null &&
         currentNrPci !== null &&
         Number.isFinite(nrRsrpGate) &&
-        nrRsrpGate < 0;
+        nrRsrpGate < 0 &&
+        (!!nrf.available || qengSearchRfOn);
       const nrDominance =
         intraNrStrongestDistinctFromServing(nrn, nrp) &&
         nrp.rsrp !== null &&
@@ -1960,7 +2037,7 @@
         el("idle-earfcn-rate").textContent = String(idleMob.primary_earfcn_reselections_per_min);
       }
       el("rsrq").textContent = primaryCellDataAvailable ? fmt(lte.rsrq, " dB") : "-";
-      el("sinr").textContent = primaryCellDataAvailable ? fmt(qsinr.prx, " dB") : "-";
+      el("sinr").textContent = primaryCellDataAvailable ? fmt(lteSinrVal, " dB") : "-";
       el("rssi").textContent = primaryCellDataAvailable ? fmt(lte.rssi, " dBm") : "-";
       const trendTs = sample.sample_ts || null;
       const advanceRfHistory = trendTs !== null && trendTs !== lastTrendSampleTs;
@@ -2027,7 +2104,7 @@
         if (primaryCellDataAvailable) {
           addRfSample("rsrp", lte.rsrp, trendTs, true);
           addRfSample("rsrq", lte.rsrq, trendTs, true);
-          addRfSample("sinr", qsinr.prx, trendTs, true);
+          addRfSample("sinr", lteSinrVal, trendTs, true);
           addRfSample("rssi", lte.rssi, trendTs, true);
           addRfSample("dominance", dominance, trendTs, true);
           pushRfNeighborIntraOverlap(nb, lte, trendTs);
@@ -2814,6 +2891,9 @@
         el("input-ca-single-band").value = "";
         el("input-nrband").value = UI_DEFAULT_NR_BANDS;
         el("input-nrdc-enable").checked = true;
+
+        const qengSearchRf = el("access-qeng-search-rf");
+        if (qengSearchRf) qengSearchRf.checked = false;
 
         el("mno-select").value = "auto";
 
@@ -7372,6 +7452,7 @@
         },
         serial: { port: _trVal("serial-port-select"), baud: serialBaud },
         cops_scan_uk_only: _trVal("cops-scan-uk-only"),
+        access_qeng_search_rf: _trVal("access-qeng-search-rf"),
         data_service_form: {
           apn: _trVal("ds-apn-set"),
           pdp_type: _trVal("ds-pdp-type"),
@@ -7710,6 +7791,16 @@
     el("btn-clear-charts").addEventListener("click", () => clearAllCharts());
     const btnUiDefaults = el("btn-ui-defaults");
     if (btnUiDefaults) btnUiDefaults.addEventListener("click", () => applyUiDefaults());
+    const accessQengSearchRfEl = el("access-qeng-search-rf");
+    if (accessQengSearchRfEl) {
+      accessQengSearchRfEl.addEventListener("change", () => {
+        if (lastKpiSample && Object.keys(lastKpiSample).length) {
+          applySnap({ sample: lastKpiSample });
+        } else {
+          redrawAllCharts();
+        }
+      });
+    }
     el("btn-chart-gap-mode").addEventListener("click", () => setChartGapMode(!chartGapModeEnabled));
     el("chart-window-select").addEventListener("change", (ev) => {
       applyChartWindowSec(Number(ev.target?.value || 600));

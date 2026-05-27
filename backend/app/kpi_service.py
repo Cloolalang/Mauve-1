@@ -982,17 +982,103 @@ def _parse_cgatt(lines: list[str]) -> int | None:
     return None
 
 
-def _parse_cereg(lines: list[str]) -> dict[str, Any] | None:
+_EMM_REJECT_LABELS: dict[int, str] = {
+    2: "IMSI unknown in HSS",
+    3: "Illegal UE",
+    6: "Illegal ME",
+    7: "EPS services not allowed",
+    8: "EPS and non-EPS services not allowed",
+    9: "UE identity cannot be derived",
+    10: "Implicitly detached",
+    11: "PLMN not allowed",
+    12: "Tracking area not allowed",
+    13: "Roaming not allowed in TA",
+    14: "EPS services not allowed in PLMN",
+    15: "No suitable cells in TA",
+    17: "Network failure",
+    18: "CS domain not available",
+    19: "ESM failure",
+    22: "Congestion",
+    25: "Not authorized for this CSG",
+    35: "Requested service option not authorized in PLMN",
+    38: "CS services not allowed",
+    40: "No EPS bearer context activated",
+    42: "Severe network failure",
+    111: "Protocol error",
+}
+
+_5GMM_REJECT_LABELS: dict[int, str] = {
+    3: "Illegal UE",
+    6: "Illegal ME",
+    7: "5GS services not allowed",
+    9: "UE identity cannot be derived",
+    10: "Implicitly de-registered",
+    11: "PLMN not allowed",
+    12: "Tracking area not allowed",
+    13: "Roaming not allowed in TA",
+    15: "No suitable cells in TA",
+    17: "Network failure",
+    22: "Congestion",
+    27: "N1 mode not allowed",
+    62: "No network slices available",
+    72: "Non-3GPP access to 5GS not allowed",
+    73: "Serving network not authorized",
+    111: "Protocol error",
+}
+
+
+def _reg_reject_cause_label(
+    cause_type: int | None, reject_cause: int | None, *, five_g: bool
+) -> str | None:
+    if reject_cause is None:
+        return None
+    if cause_type == 1:
+        return f"Manufacturer-specific #{reject_cause}"
+    labels = _5GMM_REJECT_LABELS if five_g else _EMM_REJECT_LABELS
+    return labels.get(reject_cause) or f"Cause #{reject_cause}"
+
+
+def _parse_reg_status(lines: list[str], tag: str) -> dict[str, Any] | None:
+    """Parse ``+CEREG:`` / ``+C5GREG:`` (27.007) including optional reject cause fields."""
+    prefix = f"+{tag.upper()}:"
     for raw in lines:
-        if not raw.startswith("+CEREG:"):
+        if not raw.upper().startswith(prefix):
             continue
         payload = raw.split(":", 1)[1].strip()
         parts = _parse_csv_payload(payload)
         if not parts:
             continue
-        stat = _safe_int(parts[-1] if len(parts) == 1 else parts[1])
-        return {"stat": stat}
+        if len(parts) == 1:
+            stat = _safe_int(parts[0])
+            return {"n": None, "stat": stat, "cause_type": None, "reject_cause": None}
+        n = _safe_int(parts[0])
+        stat = _safe_int(parts[1])
+        cause_type: int | None = None
+        reject_cause: int | None = None
+        if n is not None and n >= 3 and len(parts) >= 4:
+            ct = _safe_int(parts[-2])
+            rc = _safe_int(parts[-1])
+            if ct in (0, 1) and rc is not None and (stat == 3 or len(parts) >= 6):
+                cause_type, reject_cause = ct, rc
+        return {"n": n, "stat": stat, "cause_type": cause_type, "reject_cause": reject_cause}
     return None
+
+
+def _parse_cereg(lines: list[str]) -> dict[str, Any] | None:
+    parsed = _parse_reg_status(lines, "CEREG")
+    if not parsed:
+        return None
+    return {"stat": parsed.get("stat"), **parsed}
+
+
+async def _ensure_reg_status_reporting(
+    engine: SerialEngine, tag: str, parsed: dict[str, Any] | None
+) -> None:
+    """Enable location + MM reject-cause fields in +CEREG/+C5GREG read responses (27.007 n=3)."""
+    n = (parsed or {}).get("n")
+    if n is not None and n >= 3:
+        return
+    await engine.send_command(f"AT+{tag.upper()}=3", timeout_sec=2.0)
 
 
 _QIACT_LINE_RE = re.compile(
@@ -1359,6 +1445,13 @@ async def refresh_data_service_snapshot(engine: SerialEngine, runtime: KpiRuntim
         return False
     cgatt = await engine.send_command("AT+CGATT?", timeout_sec=1.5)
     cereg = await engine.send_command("AT+CEREG?", timeout_sec=1.5)
+    cereg_v = _parse_reg_status(cereg.get("lines", []), "CEREG") or {}
+    await _ensure_reg_status_reporting(engine, "CEREG", cereg_v)
+    c5greg_v: dict[str, Any] = {}
+    c5greg_res = await engine.send_command("AT+C5GREG?", timeout_sec=1.5)
+    if c5greg_res.get("ok"):
+        c5greg_v = _parse_reg_status(c5greg_res.get("lines", []), "C5GREG") or {}
+        await _ensure_reg_status_reporting(engine, "C5GREG", c5greg_v)
     cgdcont = await engine.send_command("AT+CGDCONT?", timeout_sec=2.0)
     contexts = _parse_cgdcont(cgdcont.get("lines", []))
     primary_ctx_ds = next((c for c in contexts if c.get("cid") == 1), contexts[0] if contexts else {})
@@ -1372,7 +1465,6 @@ async def refresh_data_service_snapshot(engine: SerialEngine, runtime: KpiRuntim
     qnetdev = await engine.send_command("AT+QNETDEVSTATUS?", timeout_sec=2.0)
 
     cgatt_v = _parse_cgatt(cgatt.get("lines", []))
-    cereg_v = _parse_cereg(cereg.get("lines", [])) or {}
     auth_rows = _parse_cgauth(cgauth.get("lines", []))
     qicsgp_rows = _parse_qicsgp(qicsgp.get("lines", []))
     active = _parse_qiact(qiact.get("lines", []))
@@ -1416,6 +1508,21 @@ async def refresh_data_service_snapshot(engine: SerialEngine, runtime: KpiRuntim
         if _creg_stat == 1
         else None
     )
+    _eps_reject_cause = cereg_v.get("reject_cause")
+    _eps_reject_cause_type = cereg_v.get("cause_type")
+    _eps_reject_cause_label = (
+        _reg_reject_cause_label(_eps_reject_cause_type, _eps_reject_cause, five_g=False)
+        if _eps_reject_cause is not None
+        else None
+    )
+    _nr5g_stat = c5greg_v.get("stat")
+    _nr5g_reject_cause = c5greg_v.get("reject_cause")
+    _nr5g_reject_cause_type = c5greg_v.get("cause_type")
+    _nr5g_reject_cause_label = (
+        _reg_reject_cause_label(_nr5g_reject_cause_type, _nr5g_reject_cause, five_g=True)
+        if _nr5g_reject_cause is not None
+        else None
+    )
     ds_block = {
         "apn": primary_ctx.get("apn"),
         "pdp_type": primary_ctx.get("pdp_type"),
@@ -1430,6 +1537,13 @@ async def refresh_data_service_snapshot(engine: SerialEngine, runtime: KpiRuntim
         "eps_registered": _creg_stat in (1, 5) if _creg_stat is not None else None,
         "eps_roaming": True if _creg_stat == 5 else False if _creg_stat == 1 else None,
         "eps_reg_scope": _eps_scope,
+        "eps_reject_cause_type": _eps_reject_cause_type,
+        "eps_reject_cause": _eps_reject_cause,
+        "eps_reject_cause_label": _eps_reject_cause_label,
+        "nr5g_reg_stat": _nr5g_stat,
+        "nr5g_reject_cause_type": _nr5g_reject_cause_type,
+        "nr5g_reject_cause": _nr5g_reject_cause,
+        "nr5g_reject_cause_label": _nr5g_reject_cause_label,
         "cid1_active": cid1.get("active"),
         "cid1_ip": cid1.get("ip"),
         "usbnet_mode": usbnet_mode,

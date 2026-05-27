@@ -1,6 +1,17 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 4.2** — see root [`README.md`](../README.md) for the full feature overview. **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1). FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **4.2**).
+**Version 4.4** — see root [`README.md`](../README.md) for the full feature overview. **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1). FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **4.4**).
+
+Notes for **v4.4**:
+
+- **`dashboard.html` — Access / Operator**: **`#access-qeng-search-rf`** toggle (default off) — when on, **`primaryCellDataAvailable`** accepts valid QENG LTE serving metrics without **`QNWINFO`** in-service; RAT/band fallback from QENG; SINR from **`QSINR`** or **`lte.sinr_raw`**; re-applies last KPI sample on change; **`collectUiControlsForRun()`** **`access_qeng_search_rf`**.
+- OpenAPI / page header: **v4.4**.
+
+Notes for **v4.3**:
+
+- **`kpi_service.py` — registration reject causes**: **`_parse_reg_status()`** for **`+CEREG:`** / **`+C5GREG:`**; **`AT+CEREG=3`** / **`AT+C5GREG=3`** on first Data Service read; EMM / 5GMM cause label maps; **`refresh_data_service_snapshot()`** exposes **`eps_reject_cause_*`**, **`nr5g_reg_stat`**, **`nr5g_reject_cause_*`** on **`sample.data_service`**.
+- **`dashboard.html` — Access / Operator**: **EPS reject (EMM)** and **5GS reject (5GMM)** rows under **Registration** (shown when modem reports a reject cause).
+- OpenAPI / page header: **v4.3**.
 
 Notes for **v4.2**:
 

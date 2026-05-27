@@ -1,10 +1,10 @@
 # 5G ModemTestDriver
 
-**Version 4.2** (this git tree / OpenAPI on `main`) — **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1)
+**Version 4.4** (this git tree / OpenAPI on `main`) — **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1)
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (the **page header** version matches whatever build you run—**v4.2** when built from **`main`**, or the release tag when using a **prebuilt** zip).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (the **page header** version matches whatever build you run—**v4.4** when built from **`main`**, or the release tag when using a **prebuilt** zip).
 
-**Prebuilt vs source:** The **Latest** [GitHub Release](https://github.com/Cloolalang/Mauve-1/releases/latest) ships **`5GModemTestDriver-windows-amd64.zip`** for its **tag only**; that tag can lag **`main`** until maintainers cut a new release. For **v4.2** behaviour, run from source (see **Quick start**) or **`build_exe.ps1`**, or wait for a GitHub Release **≥ v4.2**.
+**Prebuilt vs source:** The **Latest** [GitHub Release](https://github.com/Cloolalang/Mauve-1/releases/latest) ships **`5GModemTestDriver-windows-amd64.zip`** for its **tag only**; that tag can lag **`main`** until maintainers cut a new release. For **v4.4** behaviour, run from source (see **Quick start**) or **`build_exe.ps1`**, or wait for a GitHub Release **≥ v4.4**.
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -140,6 +140,16 @@ If you used **`start.cmd`**, **`start.ps1`**, or **`uvicorn`**, focus that windo
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v4.4**
+
+- **Access / Operator — QENG serving RF toggle** (default off): **Show QENG serving RF (cell search / no SIM)** uses **`AT+QENG="servingcell"`** Primary Cell RF (RSRP/RSRQ/SINR, EARFCN/PCI, LTE trend charts) when **`QNWINFO`** reports **NO SERVICE** (e.g. no SIM or cell search). Neighbour, CA, and Data Service KPIs still require network registration.
+- **OpenAPI / page header**: **v4.4**.
+
+**Changes in v4.3**
+
+- **Access / Operator — registration reject causes**: Data Service refresh enables **`AT+CEREG=3`** and **`AT+C5GREG=3`**, reads **`AT+CEREG?`** / **`AT+C5GREG?`**, and parses **EMM** / **5GMM** reject causes when the modem reports them. The **Access / Operator** card shows **EPS reject (EMM)** and **5GS reject (5GMM)** rows (hidden until a cause is present). **`GET /api/kpi/latest`** → **`sample.data_service`** adds **`eps_reject_cause_type`**, **`eps_reject_cause`**, **`eps_reject_cause_label`**, **`nr5g_reg_stat`**, **`nr5g_reject_cause_type`**, **`nr5g_reject_cause`**, **`nr5g_reject_cause_label`**.
+- **OpenAPI / page header**: **v4.3**.
 
 **Changes in v4.2**
 
