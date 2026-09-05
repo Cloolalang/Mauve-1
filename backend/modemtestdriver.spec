@@ -22,7 +22,7 @@ try:
 except Exception:
     pass
 
-for pkg in ("uvicorn", "starlette", "pydantic", "anyio"):
+for pkg in ("uvicorn", "starlette", "pydantic", "anyio", "websockets"):
     try:
         hiddenimports.extend(collect_submodules(pkg))
     except Exception:

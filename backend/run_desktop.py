@@ -43,6 +43,8 @@ def main() -> None:
     # Load ASGI app by object — uvicorn's string import ("app.main:app") often fails in PyInstaller bundles.
     from app.main import app as asgi_app
 
+    import websockets  # noqa: F401 — uvicorn WebSocket ASGI (must be bundled in PyInstaller builds)
+    import uvicorn.protocols.websockets.websockets_impl  # noqa: F401
     import uvicorn
 
     uvicorn.run(

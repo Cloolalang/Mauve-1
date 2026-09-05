@@ -1,6 +1,11 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 4.4** — see root [`README.md`](../README.md) for the full feature overview. **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1). FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **4.4**).
+**Version 4.4.1** — see root [`README.md`](../README.md) for the full feature overview. **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1). FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **4.4.1**).
+
+Notes for **v4.4.1**:
+
+- **`requirements.txt`**, **`modemtestdriver.spec`**, **`run_desktop.py`**: bundle **`websockets`** for PyInstaller so the prebuilt exe supports KPI WebSocket (**`/ws/kpi`**).
+- OpenAPI / page header: **v4.4.1**.
 
 Notes for **v4.4**:
 
