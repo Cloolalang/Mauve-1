@@ -1,10 +1,10 @@
 # 5G ModemTestDriver
 
-**Version 4.4.1** (this git tree / OpenAPI on `main`) — **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1)
+**Version 4.5** (this git tree / OpenAPI on `main`) — **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1)
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (the **page header** version matches whatever build you run—**v4.4.1** when built from **`main`**, or the release tag when using a **prebuilt** zip).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (the **page header** version matches whatever build you run—**v4.5** when built from **`main`**, or the release tag when using a **prebuilt** zip).
 
-**Prebuilt vs source:** The **Latest** [GitHub Release](https://github.com/Cloolalang/Mauve-1/releases/latest) ships **`5GModemTestDriver-windows-amd64.zip`** for its **tag only**; that tag can lag **`main`** until maintainers cut a new release. For **v4.4.1** behaviour, run from source (see **Quick start**) or **`build_exe.ps1`**, or wait for a GitHub Release **≥ v4.4.1**.
+**Prebuilt vs source:** The **Latest** [GitHub Release](https://github.com/Cloolalang/Mauve-1/releases/latest) ships **`5GModemTestDriver-windows-amd64.zip`** for its **tag only**; that tag can lag **`main`** until maintainers cut a new release. For **v4.5** behaviour, run from source (see **Quick start**) or **`build_exe.ps1`**, or wait for a GitHub Release **≥ v4.5**.
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -140,6 +140,11 @@ If you used **`start.cmd`**, **`start.ps1`**, or **`uvicorn`**, focus that windo
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v4.5**
+
+- **Fix — serial port switch could get stuck on the previous COM port**: `POST /api/serial/reopen` (dashboard **Reconnect**) closed the previous serial handle without first waiting for the reader/writer background tasks to fully unwind. On Windows, closing a `pyserial` handle while another thread is still mid read/write on it is a thread-safety violation that can raise (e.g. a `WinError` from `CloseHandle`/`CancelIoEx` racing an in-flight `ReadFile`); if that happened, the whole reconnect aborted **before** the new port was recorded, so the UI kept showing the old COM port no matter which port you selected — most reliably reproduced when the previously-selected port was unresponsive (e.g. connected to a non-AT Quectel interface) and commands were still queued/timing out against it. `serial_engine.py` now awaits the reader/writer tasks before closing the handle and never lets a close-time error block the switch, so selecting a new port and clicking **Reconnect** reliably takes effect.
+- **OpenAPI / page header**: **v4.5**.
 
 **Changes in v4.4.1**
 

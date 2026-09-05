@@ -1,6 +1,11 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 4.4.1** — see root [`README.md`](../README.md) for the full feature overview. **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1). FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **4.4.1**).
+**Version 4.5** — see root [`README.md`](../README.md) for the full feature overview. **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1). FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **4.5**).
+
+Notes for **v4.5**:
+
+- **`serial_engine.py` — fix stuck COM port switch**: `SerialEngine.stop()` cancelled the reader/writer tasks and immediately closed the underlying `pyserial` handle without waiting for those tasks to actually finish. Since the reader loop performs its blocking read via `asyncio.to_thread`, `Task.cancel()` cannot interrupt that OS-level call, so `close()` could race a still-in-flight read/write on the same handle — a `pyserial` thread-safety violation on Windows that can raise (e.g. `WinError` from `CloseHandle`/`CancelIoEx` vs. an in-flight `ReadFile`). If `stop()` raised, `reopen()` aborted before `self.port` was updated, so the dashboard kept showing the previously-selected COM port after **Reconnect**. `stop()` now awaits the reader/writer tasks before touching `self._serial`, and swallows close-time errors so they can never block a port switch.
+- OpenAPI / page header: **v4.5**.
 
 Notes for **v4.4.1**:
 

@@ -93,18 +93,50 @@ class SerialEngine:
                 return
             self._running = False
 
-            if self._writer_task:
-                self._writer_task.cancel()
-            if self._reader_task:
-                self._reader_task.cancel()
+            writer_task, self._writer_task = self._writer_task, None
+            reader_task, self._reader_task = self._reader_task, None
+            if writer_task:
+                writer_task.cancel()
+            if reader_task:
+                reader_task.cancel()
+            # Wait for the reader/writer tasks to actually unwind before
+            # touching self._serial. Each of them may currently be blocked
+            # inside a background thread (asyncio.to_thread) doing a raw
+            # serial read/write/flush; Task.cancel() only cancels the
+            # *awaiting* coroutine, it cannot interrupt that OS thread.
+            # Closing the handle while another thread is mid read/write on
+            # it is a pyserial thread-safety violation on Windows and can
+            # raise (e.g. WinError from CancelIoEx/CloseHandle racing an
+            # in-flight ReadFile). If that exception escapes stop(), the
+            # caller (reopen()) aborts *before* self.port is updated, which
+            # is exactly what makes the UI look "stuck" on the old COM port
+            # after selecting a new one.
+            for task in (writer_task, reader_task):
+                if task is None:
+                    continue
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
 
             if self._serial:
-                await asyncio.to_thread(self._serial.close)
+                try:
+                    await asyncio.to_thread(self._serial.close)
+                except Exception:  # noqa: BLE001
+                    # Best-effort close; never let a close-time error block
+                    # a port switch.
+                    pass
                 self._serial = None
             self._last_open_error = None
 
     async def reopen(self, port: str, baudrate: int) -> None:
-        await self.stop()
+        try:
+            await self.stop()
+        except Exception:  # noqa: BLE001
+            # Defensive: stop() should no longer raise, but if it somehow
+            # does, we still want the requested port/baudrate to take
+            # effect rather than silently reverting to the old one.
+            pass
         self.port = port
         self.baudrate = baudrate
         await self.start()
