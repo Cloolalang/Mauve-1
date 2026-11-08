@@ -732,8 +732,8 @@
       </div>
       <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; margin-top:8px;">
         <div>
-          <div class="label" title="Default 5300–5400: one random port per run. Or a single port (e.g. 5361). Inclusive min-max when two numbers are given.">Port (or range):</div>
-          <input id="iperf-port" type="text" inputmode="text" autocomplete="off" placeholder="5300-5400" value="5300-5400" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+          <div class="label" title="Default 5350 (single port). Or a range like 5300-5400 for one random port per run. Inclusive min-max when two numbers are given.">Port (or range):</div>
+          <input id="iperf-port" type="text" inputmode="text" autocomplete="off" placeholder="5350" value="5350" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
         </div>
         <div>
           <div class="label">Duration (s):</div>
@@ -799,14 +799,18 @@
           <input type="checkbox" id="iperf-sweep-enable" style="width:15px; height:15px; accent-color:#00e5ff;" />
           <span class="label" style="margin:0;">Continuous sweep</span>
         </label>
+        <label style="display:flex; align-items:center; gap:6px;" title="Minimum gap between the end of one iperf3 test and the start of the next during a continuous sweep.">
+          <span class="label" style="margin:0; font-size:11px;">Gap (s):</span>
+          <input id="iperf-sweep-gap-sec" type="number" min="10" max="60" step="1" value="15" style="width:62px; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:4px 6px;" />
+        </label>
         <span id="iperf-sweep-stopwatch" style="display:none; font-family:Consolas,monospace; font-size:12px; color:#00e5ff; min-width:54px;">00:00</span>
-        <span id="iperf-sweep-limit-note" style="display:none; font-size:10px; color:#888;">auto-stops at 5 min</span>
+        <span id="iperf-sweep-limit-note" style="display:none; font-size:10px; color:#888;">auto-stops at 30 min</span>
       </div>
       <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
         <button id="btn-iperf-test">Run Iperf3 Test</button>
         <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:#9aa0a6; cursor:pointer;"
                title="When PDP context is lost, automatically attempt AT+CGATT=1 + AT+QIACT=1 using the Allow Data password, then retry the test once.">
-          <input id="iperf-auto-recover-pdp" type="checkbox" style="accent-color:#50fa7b;" />
+          <input id="iperf-auto-recover-pdp" type="checkbox" checked style="accent-color:#50fa7b;" />
           Auto-recover PDP on fail
         </label>
       </div>
@@ -934,12 +938,14 @@
           <input id="ph-repeat-toggle" type="checkbox" />
           <span id="ph-repeat-state">OFF</span>
         </label>
+        <span id="ph-repeat-stopwatch" style="display:none; font-family:Consolas,monospace; font-size:12px; color:#00e5ff; min-width:54px; margin-left:8px;">00:00</span>
+        <span id="ph-repeat-limit-note" style="display:none; font-size:10px; color:#888; margin-left:4px;">auto-stops at 30 min</span>
       </div>
       <div class="row" style="margin-top:6px;" title="When PDP context is lost, automatically attempt AT+CGATT=1 + AT+QIACT=1 using the Allow Data password before the next sweep. Requires Allow Data password to be set in the Data Gate card.">
         <span class="label">Auto-recover PDP on fail</span>
         <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
-          <input id="ph-auto-recover-pdp" type="checkbox" style="accent-color:#50fa7b;" />
-          <span id="ph-auto-recover-state" style="font-size:11px; color:#666;">OFF</span>
+          <input id="ph-auto-recover-pdp" type="checkbox" checked style="accent-color:#50fa7b;" />
+          <span id="ph-auto-recover-state" style="font-size:11px; color:#50fa7b;">ON</span>
         </label>
       </div>
       <div id="ph-msg" class="label" style="margin-top:8px;">-</div>
@@ -1161,8 +1167,18 @@
     let iperfSweepTimer = null;
     let iperfSweepStopwatch = null;
     let iperfSweepElapsedMs = 0;
-    const IPERF_SWEEP_INTERVAL_MS = 5000;
-    const IPERF_SWEEP_MAX_MS = 5 * 60 * 1000; // 5 minutes data-cap
+    const IPERF_SWEEP_GAP_MIN_SEC = 10;
+    const IPERF_SWEEP_GAP_MAX_SEC = 60;
+    const IPERF_SWEEP_GAP_DEFAULT_SEC = 15;
+    function getIperfSweepGapMs() {
+      const inp = el("iperf-sweep-gap-sec");
+      let v = Number(inp?.value);
+      if (!Number.isFinite(v)) v = IPERF_SWEEP_GAP_DEFAULT_SEC;
+      v = Math.max(IPERF_SWEEP_GAP_MIN_SEC, Math.min(IPERF_SWEEP_GAP_MAX_SEC, Math.round(v)));
+      if (inp && Number(inp.value) !== v) inp.value = String(v);
+      return v * 1000;
+    }
+    const IPERF_SWEEP_MAX_MS = 30 * 60 * 1000; // 30 minutes data-cap
     let serialBaud = 115200;
     let serialPorts = [];
     let currentServingEarfcn = null;
@@ -1185,6 +1201,9 @@
     let volteBusy = false;
     let phRepeatTimer = null;
     const PH_REPEAT_INTERVAL_MS = 15000;
+    let phSweepStopwatch = null;
+    let phSweepElapsedMs = 0;
+    const PH_SWEEP_MAX_MS = 30 * 60 * 1000; // 30 minutes data-cap, mirrors iperf continuous sweep
     let modemTcpBusy = false;
     let mtcpSweepActive = false;
     let mtcpSweepTimer = null;
@@ -2310,8 +2329,8 @@
       }
     }
 
-    let pingAutoRecoverPdp = false;
-    let iperfAutoRecoverPdp = false;
+    let pingAutoRecoverPdp = true;
+    let iperfAutoRecoverPdp = true;
 
     /**
      * Attempt PDP context re-establishment (AT+CGATT=1 + AT+QIACT=1) using
@@ -3382,7 +3401,7 @@
 
     function parseIperfPortField(raw) {
       const s = String(raw ?? "").trim();
-      const spec = s.length ? s : "5300-5400";
+      const spec = s.length ? s : "5350";
       const m = /^(\d+)\s*-\s*(\d+)$/.exec(spec.replace(/\s+/g, ""));
       if (m) {
         const a = Number(m[1]);
@@ -3696,12 +3715,14 @@
     async function _iperfSweepTick() {
       if (!iperfSweepActive) return;
       if (iperfSweepElapsedMs >= IPERF_SWEEP_MAX_MS) {
-        stopIperfSweep("Continuous sweep stopped — 5-minute data cap reached.");
+        stopIperfSweep("Continuous sweep stopped — 30-minute data cap reached.");
         return;
       }
       await runIperfTest();
       if (!iperfSweepActive) return;
-      iperfSweepTimer = setTimeout(_iperfSweepTick, IPERF_SWEEP_INTERVAL_MS);
+      // Gap is measured from the end of this test (not a fixed-period timer), so a slow
+      // test (e.g. a long duration_sec) never shrinks the actual rest period between runs.
+      iperfSweepTimer = setTimeout(_iperfSweepTick, getIperfSweepGapMs());
     }
 
     function startIperfSweep() {
@@ -3714,7 +3735,7 @@
         iperfSweepElapsedMs += 1000;
         _iperfSweepUpdateStopwatch();
         if (iperfSweepElapsedMs >= IPERF_SWEEP_MAX_MS) {
-          stopIperfSweep("Continuous sweep stopped — 5-minute data cap reached.");
+          stopIperfSweep("Continuous sweep stopped — 30-minute data cap reached.");
         }
       }, 1000);
       _iperfSweepTick();
@@ -3734,6 +3755,15 @@
       drawPhGauges();
     }
 
+    function _phRepeatUpdateStopwatch() {
+      const el_sw = el("ph-repeat-stopwatch");
+      if (!el_sw) return;
+      const totalSec = Math.floor(phSweepElapsedMs / 1000);
+      const mm = String(Math.floor(totalSec / 60)).padStart(2, "0");
+      const ss = String(totalSec % 60).padStart(2, "0");
+      el_sw.textContent = `${mm}:${ss}`;
+    }
+
     function setPhRepeatPing(enabled) {
       const state = el("ph-repeat-state");
       const toggle = el("ph-repeat-toggle");
@@ -3741,17 +3771,40 @@
         clearInterval(phRepeatTimer);
         phRepeatTimer = null;
       }
+      if (phSweepStopwatch) {
+        clearInterval(phSweepStopwatch);
+        phSweepStopwatch = null;
+      }
       if (toggle) toggle.checked = !!enabled;
       if (enabled) {
         if (state) {
           state.textContent = "ON";
           state.className = "ok";
         }
+        phSweepElapsedMs = 0;
+        _phRepeatUpdateStopwatch();
+        const sw = el("ph-repeat-stopwatch");
+        const note = el("ph-repeat-limit-note");
+        if (sw) sw.style.display = "";
+        if (note) note.style.display = "";
+        phSweepStopwatch = setInterval(() => {
+          phSweepElapsedMs += 1000;
+          _phRepeatUpdateStopwatch();
+          if (phSweepElapsedMs >= PH_SWEEP_MAX_MS) {
+            setPhRepeatPing(false);
+            if (state) { state.textContent = "OFF"; state.className = ""; }
+            el("ph-msg").textContent = "Repeat sweep stopped — 30-minute data cap reached.";
+          }
+        }, 1000);
         runPingSweepTest();
         phRepeatTimer = setInterval(() => runPingSweepTest(), PH_REPEAT_INTERVAL_MS);
       } else if (state) {
         state.textContent = "OFF";
         state.className = "";
+        const sw = el("ph-repeat-stopwatch");
+        const note = el("ph-repeat-limit-note");
+        if (sw) sw.style.display = "none";
+        if (note) note.style.display = "none";
       }
     }
 

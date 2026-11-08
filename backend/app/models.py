@@ -121,7 +121,7 @@ class HostAutoAnswerBody(BaseModel):
 
 class IperfTestBody(BaseModel):
     host: str = Field(default="iperf.as42831.net", min_length=1)
-    port: int = Field(default=5361, ge=1, le=65535)
+    port: int = Field(default=5350, ge=1, le=65535)
     port_range_max: int | None = Field(
         default=None,
         ge=1,
