@@ -15,13 +15,14 @@ import socket
 import subprocess
 import tempfile
 import time
+import traceback
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from typing import Any, Literal
 
-from fastapi import Body, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import Body, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 from app.modem_tcp_connect import run_modem_tcp_connect
 from app.kpi_service import (
@@ -1670,6 +1671,34 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(serial_routes.router)
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Turn any unhandled route exception into JSON instead of Starlette's default
+    ``PlainTextResponse("Internal Server Error", status_code=500)``.
+
+    The dashboard always does ``await r.json()`` on API responses (including on
+    non-OK status), so that plain-text body surfaced in the browser as a cryptic
+    ``SyntaxError: Unexpected token 'I', "Internal S"... is not valid JSON`` instead
+    of a readable error. The real exception is still logged server-side (with full
+    traceback) for diagnosis; the client now gets a structured error it can display.
+    """
+    logger.error(
+        "Unhandled exception on %s %s:\n%s",
+        request.method,
+        request.url.path,
+        traceback.format_exc(),
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "detail": f"Internal server error in {request.url.path}: {type(exc).__name__}: {exc}",
+            "path": str(request.url.path),
+        },
+    )
 
 
 @app.get("/", response_class=HTMLResponse)
