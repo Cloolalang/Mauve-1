@@ -43,7 +43,14 @@ mocn_datas = [(str(p), str(pathlib.Path("app") / "mocn")) for p in sorted(mocn_d
 static_dir = BACKEND / "app" / "static"
 static_datas = [(str(p), str(pathlib.Path("app") / "static")) for p in sorted(static_dir.glob("*.html"))]
 
-all_datas = mocn_datas + static_datas
+# Bundled iperf3 (Cygwin build) + its runtime DLLs. ``_discover_iperf_binary()`` in
+# app/main.py looks for this exact relative path first (``<app dir>/../vendor/iperf/iperf3.exe``),
+# which resolves correctly both from source and from this frozen onedir layout. Without this,
+# the packaged .exe has no iperf3 at all and every iperf test fails with "binary not found".
+iperf_dir = BACKEND / "vendor" / "iperf"
+iperf_datas = [(str(p), str(pathlib.Path("vendor") / "iperf")) for p in sorted(iperf_dir.glob("*")) if p.is_file()]
+
+all_datas = mocn_datas + static_datas + iperf_datas
 
 a = Analysis(
     [str(BACKEND / "run_desktop.py")],

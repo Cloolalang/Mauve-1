@@ -1,10 +1,10 @@
 # 5G ModemTestDriver
 
-**Version 4.5** (this git tree / OpenAPI on `main`) — **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1)
+**Version 4.6** (this git tree / OpenAPI on `main`) — **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1)
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (the **page header** version matches whatever build you run—**v4.5** when built from **`main`**, or the release tag when using a **prebuilt** zip).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (the **page header** version matches whatever build you run—**v4.6** when built from **`main`**, or the release tag when using a **prebuilt** zip).
 
-**Prebuilt vs source:** The **Latest** [GitHub Release](https://github.com/Cloolalang/Mauve-1/releases/latest) ships **`5GModemTestDriver-windows-amd64.zip`** for its **tag only**; that tag can lag **`main`** until maintainers cut a new release. For **v4.5** behaviour, run from source (see **Quick start**) or **`build_exe.ps1`**, or wait for a GitHub Release **≥ v4.5**.
+**Prebuilt vs source:** The **Latest** [GitHub Release](https://github.com/Cloolalang/Mauve-1/releases/latest) ships **`5GModemTestDriver-windows-amd64.zip`** for its **tag only**; that tag can lag **`main`** until maintainers cut a new release. For **v4.6** behaviour, run from source (see **Quick start**) or **`build_exe.ps1`**, or wait for a GitHub Release **≥ v4.6**.
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -140,6 +140,12 @@ If you used **`start.cmd`**, **`start.ps1`**, or **`uvicorn`**, focus that windo
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v4.6**
+
+- **Fix — iperf3 missing from the packaged Windows `.exe`**: `modemtestdriver.spec` (PyInstaller) now bundles `backend/vendor/iperf/` (the Cygwin-built `iperf3.exe` plus its `cygwin1.dll` / `cyggcc_s-1.dll` runtime DLLs) into the frozen app at the exact relative path `_discover_iperf_binary()` checks first. Previously the prebuilt `.exe` shipped with **no** iperf3 at all, so every iperf test failed with *"iperf3 binary not found"* — this only worked when running from source, where `backend/vendor/iperf/iperf3.exe` sits next to the code.
+- **Fix — unhandled backend exceptions returned plain-text 500 instead of JSON**: any uncaught exception in an API route previously fell through to Starlette's default `PlainTextResponse("Internal Server Error", status_code=500)`. Since the dashboard always calls `await r.json()` on tool/API responses, that plain-text body surfaced in the browser as a cryptic `SyntaxError: Unexpected token 'I', "Internal S"... is not valid JSON` instead of a readable error (seen when running an iperf test). A global exception handler now logs the full traceback server-side and returns structured `{"ok": false, "error": ...}` JSON instead, so failures are diagnosable from the UI and never break response parsing.
+- **OpenAPI / page header**: **v4.6**.
 
 **Changes in v4.5**
 

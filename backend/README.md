@@ -1,6 +1,12 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 4.5** — see root [`README.md`](../README.md) for the full feature overview. **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1). FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **4.5**).
+**Version 4.6** — see root [`README.md`](../README.md) for the full feature overview. **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1). FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **4.6**).
+
+Notes for **v4.6**:
+
+- **`modemtestdriver.spec`**: bundles `vendor/iperf/*` (iperf3.exe + Cygwin DLLs) into the frozen app so the packaged `.exe` has a working iperf3 out of the box (previously only worked running from source).
+- **`main.py`**: global `@app.exception_handler(Exception)` returns JSON (`{"ok": false, "error", "detail", "path"}`) instead of Starlette's default plain-text 500, and logs the full traceback server-side.
+- OpenAPI / page header: **v4.6**.
 
 Notes for **v4.5**:
 
