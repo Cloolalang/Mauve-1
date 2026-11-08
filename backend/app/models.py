@@ -145,6 +145,16 @@ class IperfTestBody(BaseModel):
             "dropdown was last populated."
         ),
     )
+    test_timeout_sec: float = Field(
+        default=20.0,
+        ge=5.0,
+        le=600.0,
+        description=(
+            "Overall wall-clock budget for the whole iperf3 subprocess call (connect + test "
+            "duration + JSON/teardown). Must be greater than duration_sec + connect_timeout_sec, "
+            "or the request is rejected before running iperf3."
+        ),
+    )
     bitrate_limit_mbps: float | None = Field(
         default=None,
         ge=0,

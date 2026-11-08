@@ -751,14 +751,18 @@
           <div id="iperf-parallel-note" class="label" style="margin-top:4px; color:#888; font-size:10px;"></div>
         </div>
       </div>
-      <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:8px;">
+      <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:8px; margin-top:8px;">
         <div>
-          <div class="label" title="Control-path TCP budget before iperf runs. Newer iperf3: --connect-timeout in ms. Bundled 3.1.1: same seconds used for a Python IPv4 TCP pre-connect (fail-fast) so the UI does not wait on OS SYN retries. Subprocess wall-clock still adds duration/stream slack after connect.">Connect timeout (s)</div>
+          <div class="label" title="Control-path TCP budget before iperf runs. Newer iperf3: --connect-timeout in ms. Bundled 3.1.1: same seconds used for a Python IPv4 TCP pre-connect (fail-fast) so the UI does not wait on OS SYN retries.">Connect timeout (s)</div>
           <input id="iperf-connect-timeout" type="number" min="1" max="120" step="1" value="10" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
         </div>
         <div>
           <div class="label" title="iperf3 -O/--omit: exclude the first N seconds from the throughput summary (warmup). 0 disables. Must be less than test duration.">Omit / warmup (s, -O)</div>
           <input id="iperf-omit-sec" type="number" min="0" max="299" step="1" value="0" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
+        </div>
+        <div>
+          <div class="label" title="Overall wall-clock budget for the whole iperf3 subprocess call (connect + test duration + JSON/teardown). Must be greater than Duration + Connect timeout, or the test is rejected before running. Increase this if you raise Duration or use many parallel streams.">Test timeout (s)</div>
+          <input id="iperf-test-timeout" type="number" min="5" max="600" step="1" value="20" style="width:100%; background:#111; color:#f3f3f3; border:1px solid #333; border-radius:6px; padding:6px; margin-top:4px;" />
         </div>
       </div>
       <div style="display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:8px;">
@@ -3507,6 +3511,18 @@
         iperfBusy = false;
         return;
       }
+      const testTimeoutRaw = String(el("iperf-test-timeout")?.value || "").trim();
+      const testTimeoutSec = Number(testTimeoutRaw || 20);
+      if (!Number.isFinite(testTimeoutSec) || testTimeoutSec < 5 || testTimeoutSec > 600) {
+        el("iperf-msg").textContent = "Test timeout must be 5..600 seconds.";
+        iperfBusy = false;
+        return;
+      }
+      if (testTimeoutSec <= Math.trunc(durationSec) + connectTimeoutSec) {
+        el("iperf-msg").textContent = "Test timeout must be greater than Duration + Connect timeout.";
+        iperfBusy = false;
+        return;
+      }
       try {
         el("iperf-msg").textContent = `Running iperf ${direction} test...`;
         el("iperf-trace").textContent = "Running...";
@@ -3527,6 +3543,7 @@
           if (speedLimit !== null) body.bitrate_limit_mbps = speedLimit;
           body.connect_timeout_sec = connectTimeoutSec;
           body.omit_sec = omitSec;
+          body.test_timeout_sec = testTimeoutSec;
           const r = await fetch("/api/tools/iperf-test", {
             method: "POST",
             headers: { "Content-Type": "application/json" },

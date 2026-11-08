@@ -5,7 +5,6 @@ import functools
 import ipaddress
 import json
 import logging
-import math
 import os
 import random
 import sys
@@ -417,6 +416,27 @@ def _iperf_connect_timeout_for_profile(cfg: dict[str, Any]) -> float:
         return 10.0
     c = _iperf_connect_timeout_sec_clamped(cfg.get("connect_timeout_sec"))
     return 10.0 if c is None else float(c)
+
+
+def _iperf_test_timeout_sec_clamped(raw: Any) -> float | None:
+    """Return 5..600 seconds or None when unset / invalid / non-positive."""
+    if raw is None or raw == "":
+        return None
+    try:
+        f = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if f <= 0:
+        return None
+    return max(5.0, min(600.0, f))
+
+
+def _iperf_test_timeout_for_profile(cfg: dict[str, Any]) -> float:
+    """Default 20 s when profile omits ``test_timeout_sec``; otherwise clamp or fall back to 20 if unset/null."""
+    if "test_timeout_sec" not in cfg:
+        return 20.0
+    c = _iperf_test_timeout_sec_clamped(cfg.get("test_timeout_sec"))
+    return 20.0 if c is None else float(c)
 
 
 def _discover_iperf_binary(explicit: str | None = None) -> str | None:
@@ -2745,12 +2765,22 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
     reverse = direction == "download"
     parallel_streams = int(body.parallel_streams)
     ct_sec = max(1.0, min(120.0, float(body.connect_timeout_sec)))
+    test_timeout_sec = max(5.0, min(600.0, float(body.test_timeout_sec)))
     dur = int(body.duration_sec)
     omit_sec = max(0, int(body.omit_sec or 0))
     if omit_sec >= dur:
         raise HTTPException(
             status_code=400,
             detail=f"omit_sec ({omit_sec}) must be less than duration_sec ({dur}).",
+        )
+    if test_timeout_sec <= dur + ct_sec:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"test_timeout_sec ({test_timeout_sec:g}) must be greater than "
+                f"duration_sec + connect_timeout_sec ({dur + ct_sec:g}). Raise test_timeout_sec, "
+                "or lower duration_sec / connect_timeout_sec."
+            ),
         )
     effective_port, port_range_requested = _iperf_resolve_port(body)
     limit_mbps = body.bitrate_limit_mbps
@@ -2808,6 +2838,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
                 "bitrate_limit_mbps": limit_mbps,
                 "parallel_streams": parallel_streams,
                 "connect_timeout_sec": ct_sec,
+                "test_timeout_sec": test_timeout_sec,
                 "omit_sec": omit_sec,
             }
     if bind_ip and os.name == "nt" and not _windows_ipv4_assignable_for_bind(bind_ip):
@@ -2831,6 +2862,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
             "bitrate_limit_mbps": limit_mbps,
             "parallel_streams": parallel_streams,
             "connect_timeout_sec": ct_sec,
+            "test_timeout_sec": test_timeout_sec,
             "omit_sec": omit_sec,
         }
     binary = _discover_iperf_binary()
@@ -2849,6 +2881,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
             "bitrate_limit_mbps": limit_mbps,
             "parallel_streams": parallel_streams,
             "connect_timeout_sec": ct_sec,
+            "test_timeout_sec": test_timeout_sec,
             "omit_sec": omit_sec,
         }
     if omit_sec > 0 and not _iperf_supports_omit(binary):
@@ -2867,6 +2900,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
             "bitrate_limit_mbps": limit_mbps,
             "parallel_streams": parallel_streams,
             "connect_timeout_sec": ct_sec,
+            "test_timeout_sec": test_timeout_sec,
             "omit_sec": omit_sec,
         }
     cmd = [
@@ -2931,6 +2965,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
                 "bitrate_limit_mbps": limit_mbps,
                 "parallel_streams": parallel_streams,
                 "connect_timeout_sec": ct_sec,
+                "test_timeout_sec": test_timeout_sec,
                 "omit_sec": omit_sec,
                 "throughput_mbps": None,
                 "throughput_source": None,
@@ -2941,13 +2976,10 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
                 "stdout_head": "",
                 "raw": None,
             }
-    # Wall-clock often exceeds iperf -t: TCP slow-start, JSON flush, cellular UL teardown.
-    # Upload (no -R) is slower and needs more headroom than download (-R).
-    slack_dl = 40
-    slack_ul = max(75, dur // 2 + 60)
-    stream_slack = min(120, max(0, parallel_streams - 1) * 10)
-    connect_slack = int(math.ceil(float(ct_sec)))
-    timeout_sec = dur + (slack_dl if reverse else slack_ul) + stream_slack + connect_slack
+    # User-controlled overall wall-clock budget for the subprocess call (validated above to
+    # exceed duration_sec + connect_timeout_sec). Replaces the old hidden slack-formula with
+    # an explicit, visible knob (UI: "Test timeout (s)", default 20s).
+    timeout_sec = test_timeout_sec
     try:
         proc = await asyncio.to_thread(
             subprocess.run,
@@ -2973,6 +3005,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
             "bitrate_limit_mbps": limit_mbps,
             "parallel_streams": parallel_streams,
             "connect_timeout_sec": ct_sec,
+            "test_timeout_sec": test_timeout_sec,
             "omit_sec": omit_sec,
         }
     stdout = str(proc.stdout or "")
@@ -3003,6 +3036,7 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
         "bitrate_limit_mbps": limit_mbps,
         "parallel_streams": parallel_streams,
         "connect_timeout_sec": ct_sec,
+        "test_timeout_sec": test_timeout_sec,
         "omit_sec": omit_sec,
         "throughput_mbps": round(float(mbps), 3) if mbps is not None else None,
         "throughput_source": source,
@@ -3761,6 +3795,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                         parallel_streams=int(cfg.get("parallel_streams_dl") or cfg["parallel_streams"]),
                         connect_timeout_sec=_iperf_connect_timeout_for_profile(cfg),
                         omit_sec=_iperf_omit_sec_for_profile(cfg),
+                        test_timeout_sec=_iperf_test_timeout_for_profile(cfg),
                     )
                 )
             elif test_type == "iperf_upload":
@@ -3784,6 +3819,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                         parallel_streams=int(cfg.get("parallel_streams_ul") or cfg["parallel_streams"]),
                         connect_timeout_sec=_iperf_connect_timeout_for_profile(cfg),
                         omit_sec=_iperf_omit_sec_for_profile(cfg),
+                        test_timeout_sec=_iperf_test_timeout_for_profile(cfg),
                     )
                 )
             elif test_type == "iperf_download_upload":
@@ -3795,6 +3831,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                 prm_i = None if prm_raw is None or prm_raw == "" else int(prm_raw)
                 conn_to = _iperf_connect_timeout_for_profile(cfg)
                 omit_o = _iperf_omit_sec_for_profile(cfg)
+                test_to = _iperf_test_timeout_for_profile(cfg)
                 ps_dl = int(cfg.get("parallel_streams_dl") or cfg["parallel_streams"])
                 ps_ul = int(cfg.get("parallel_streams_ul") or cfg["parallel_streams"])
                 j_dl = await tools_iperf_test(
@@ -3811,6 +3848,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                         parallel_streams=ps_dl,
                         connect_timeout_sec=conn_to,
                         omit_sec=omit_o,
+                        test_timeout_sec=test_to,
                     )
                 )
                 if not j_dl.get("ok"):
@@ -3829,6 +3867,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                         "mobile_only": bool(cfg["mobile_only"]),
                         "connect_timeout_sec": conn_to,
                         "omit_sec": omit_o,
+                        "test_timeout_sec": test_to,
                         "direction": "download_upload",
                         "throughput_mbps_dl": j_dl.get("throughput_mbps"),
                         "throughput_mbps_ul": None,
@@ -3850,6 +3889,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                             parallel_streams=ps_ul,
                             connect_timeout_sec=conn_to,
                             omit_sec=omit_o,
+                            test_timeout_sec=test_to,
                         )
                     )
                     ul_err = ""
@@ -3868,6 +3908,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                         "mobile_only": bool(cfg["mobile_only"]),
                         "connect_timeout_sec": conn_to,
                         "omit_sec": omit_o,
+                        "test_timeout_sec": test_to,
                         "direction": "download_upload",
                         "throughput_mbps_dl": j_dl.get("throughput_mbps"),
                         "throughput_mbps_ul": j_ul.get("throughput_mbps"),

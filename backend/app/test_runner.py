@@ -333,6 +333,20 @@ def validate_profile(p: dict[str, Any]) -> list[str]:
                     errs.append("iperf.test_config.omit_sec must be less than duration_sec when set")
             except (TypeError, ValueError):
                 errs.append("iperf.test_config.omit_sec must be an integer when set")
+        ttsec = cfg.get("test_timeout_sec")
+        if ttsec is not None and ttsec != "":
+            try:
+                tt_f = float(ttsec)
+                dur_i = int(cfg.get("duration_sec"))
+                ct_f = float(cto) if (cto is not None and cto != "") else 10.0
+                if tt_f < 5 or tt_f > 600:
+                    errs.append("iperf.test_config.test_timeout_sec must be between 5 and 600 when set")
+                elif tt_f <= dur_i + ct_f:
+                    errs.append(
+                        "iperf.test_config.test_timeout_sec must be greater than duration_sec + connect_timeout_sec"
+                    )
+            except (TypeError, ValueError):
+                errs.append("iperf.test_config.test_timeout_sec must be a number when set")
     elif tt == "volte_call_outbound":
         for k in ("phone_number", "call_duration_sec", "answer_wait_sec", "auto_hangup"):
             if k not in cfg:
@@ -768,6 +782,7 @@ def _empty_iperf_tool_cols() -> dict[str, str]:
             "iperf_parallel_streams_dl",
             "iperf_connect_timeout_sec",
             "iperf_omit_sec",
+            "iperf_test_timeout_sec",
             "iperf_protocol",
             "iperf_bitrate_limit_mbps",
             "iperf_mobile_only",
@@ -930,6 +945,14 @@ def iperf_tool_csv_columns(cfg: dict[str, Any], tool_result: dict[str, Any], tes
             ct_s = str(int(ctf)) if ctf == int(ctf) else str(round(ctf, 3)).rstrip("0").rstrip(".")
         except (TypeError, ValueError):
             ct_s = str(ct)
+    tt = tool_result.get("test_timeout_sec")
+    tt_s = ""
+    if tt is not None and str(tt).strip() != "":
+        try:
+            ttf = float(tt)
+            tt_s = str(int(ttf)) if ttf == int(ttf) else str(round(ttf, 3)).rstrip("0").rstrip(".")
+        except (TypeError, ValueError):
+            tt_s = str(tt)
     return {
         "iperf_host": str(tool_result.get("host") or ""),
         "iperf_port": str(tool_result.get("port") or ""),
@@ -938,6 +961,7 @@ def iperf_tool_csv_columns(cfg: dict[str, Any], tool_result: dict[str, Any], tes
         "iperf_parallel_streams_dl": ps_dl,
         "iperf_connect_timeout_sec": ct_s,
         "iperf_omit_sec": "" if cfg.get("omit_sec") is None else str(cfg.get("omit_sec")),
+        "iperf_test_timeout_sec": tt_s,
         "iperf_protocol": str(tool_result.get("protocol") or ""),
         "iperf_bitrate_limit_mbps": "" if cfg.get("bitrate_limit_mbps") is None else str(cfg.get("bitrate_limit_mbps")),
         "iperf_mobile_only": str(bool(tool_result.get("mobile_only"))).lower(),
@@ -1046,6 +1070,7 @@ def build_csv_row(
         iperf_cols.get("iperf_parallel_streams_dl", ""),
         iperf_cols.get("iperf_connect_timeout_sec", ""),
         iperf_cols.get("iperf_omit_sec", ""),
+        iperf_cols.get("iperf_test_timeout_sec", ""),
         iperf_cols.get("iperf_protocol", ""),
         iperf_cols.get("iperf_bitrate_limit_mbps", ""),
         iperf_cols.get("iperf_mobile_only", ""),
@@ -1131,6 +1156,7 @@ CSV_HEADER = [
     "iperf_parallel_streams_dl",
     "iperf_connect_timeout_sec",
     "iperf_omit_sec",
+    "iperf_test_timeout_sec",
     "iperf_protocol",
     "iperf_bitrate_limit_mbps",
     "iperf_mobile_only",
