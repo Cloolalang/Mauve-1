@@ -106,12 +106,27 @@ async def run_modem_tcp_connect(
             use_cached_pdp = True
             pdp_active = True
     if not use_cached_pdp:
-        qiact = await engine.send_command("AT+QIACT?", timeout_sec=4.0)
-        contexts = _parse_qiact(qiact.get("lines") or [])
-        pdp_active = bool(
-            qiact.get("ok")
-            and next((c for c in contexts if c.get("cid") == cid and c.get("active")), None)
-        )
+
+        async def _read_qiact_active() -> tuple[bool, bool, dict[str, Any]]:
+            res = await engine.send_command("AT+QIACT?", timeout_sec=4.0)
+            ctxs = _parse_qiact(res.get("lines") or [])
+            ok = bool(res.get("ok"))
+            active = bool(ok and next((c for c in ctxs if c.get("cid") == cid and c.get("active")), None))
+            return ok, active, res
+
+        ok1, pdp_active, qiact = await _read_qiact_active()
+        if ok1 and not pdp_active:
+            # A single read reporting "no active context" can be a transient blip on a busy
+            # AT port (this check shares the half-duplex queue with the background KPI poll).
+            # Confirm with a second read ~1s later before failing, so a one-off glitch does
+            # not force an unnecessary re-Allow-Data for what is still a healthy connection.
+            await asyncio.sleep(1.0)
+            ok2, pdp_active2, qiact2 = await _read_qiact_active()
+            qiact = qiact2
+            if ok2:
+                pdp_active = pdp_active2
+            # else: second read itself failed (busy modem) — keep the first read's (negative)
+            # result rather than trusting an unreadable state.
     actions.append(
         {
             "cmd": "AT+QIACT?" if not use_cached_pdp else "AT+QIACT? (KPI cache)",
