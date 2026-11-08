@@ -12,3 +12,6 @@ backend/_modem_check_out.txt
 # Automated test run output (bundled profiles stay in test_cases/)
 backend/automated_tests/test_results/*
 !backend/automated_tests/test_results/.gitkeep
+
+backend/uv_out.log
+backend/uv_err.log

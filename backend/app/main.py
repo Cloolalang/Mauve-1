@@ -2654,8 +2654,29 @@ async def network_locks_set(body: LockSetBody) -> dict:
 async def tools_bind_interfaces() -> dict:
     if os.name != "nt":
         return {"ok": True, "interfaces": [], "platform": "non-windows"}
-    interfaces = _enumerate_windows_ipv4_adapters()
-    return {"ok": True, "interfaces": interfaces, "platform": "windows"}
+    all_interfaces = _enumerate_windows_ipv4_adapters()
+
+    def _check() -> list[dict[str, str | bool]]:
+        out: list[dict[str, str | bool]] = []
+        for row in all_interfaces:
+            ip = str(row.get("ipv4") or "").strip()
+            bindable = _windows_ipv4_assignable_for_bind(ip)
+            out.append({**row, "bindable": bindable})
+        return out
+
+    checked = await asyncio.to_thread(_check)
+    # Manual selection should only ever offer addresses that actually work right now -
+    # a stale/disconnected adapter's leftover IPv4 (still reported by `ipconfig` for a
+    # few minutes after link-down) otherwise looks selectable but fails with an opaque
+    # "General failure" from ping/iperf once chosen.
+    live = [row for row in checked if row.get("bindable")]
+    dropped = [row for row in checked if not row.get("bindable")]
+    return {
+        "ok": True,
+        "interfaces": live,
+        "unavailable": dropped,
+        "platform": "windows",
+    }
 
 
 @app.post("/api/tools/modem-reset")
@@ -2720,6 +2741,15 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
             ipaddress.IPv4Address(bind_ip)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"Invalid bind_ip: {bind_ip}") from exc
+        if os.name == "nt" and not await asyncio.to_thread(_windows_ipv4_assignable_for_bind, bind_ip):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"bind_ip {bind_ip} is not currently assignable on this PC (adapter likely "
+                    "disconnected or the address is stale). Pick a different interface, refresh "
+                    "ifaces, or use Mobile-only/Auto-detect."
+                ),
+            )
     detected_adapter = None
     if body.mobile_only and not bind_ip:
         bind_ip, detected_adapter = _detect_mobile_bind_ip_windows()
@@ -2985,6 +3015,15 @@ async def tools_icmp_ping(body: IcmpPingSweepBody) -> dict:
             ipaddress.IPv4Address(bind)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=400, detail=f"Invalid bind_ipv4: {bind}") from exc
+        if os.name == "nt" and not await asyncio.to_thread(_windows_ipv4_assignable_for_bind, bind):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"bind_ipv4 {bind} is not currently assignable on this PC (adapter likely "
+                    "disconnected or the address is stale). Pick a different interface, or use "
+                    "Auto-detect."
+                ),
+            )
 
     ping_timeout_ms: int | None = None
     if os.name == "nt":
