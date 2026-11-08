@@ -653,6 +653,25 @@ def _iter_mobile_bind_candidates_windows() -> list[tuple[str, str]]:
     return [(ip, lab) for _, _, ip, lab in tagged]
 
 
+def _resolve_adapter_current_ip(adapter_label: str) -> str | None:
+    """Current IPv4 for a named Windows adapter (fresh ``ipconfig`` read, bindability-checked).
+
+    Used so a client can pin a specific adapter by *name* instead of a point-in-time IPv4
+    snapshot; the address is re-resolved atomically within the same request that uses it,
+    closing the staleness window a client-cached IP would otherwise have (e.g. the mobile
+    broadband adapter renewing its DHCP lease after a PDP reconnect).
+    """
+    label = str(adapter_label or "").strip()
+    if not label or os.name != "nt":
+        return None
+    for row in _enumerate_windows_ipv4_adapters():
+        if str(row.get("adapter") or "").strip() == label:
+            ip = str(row.get("ipv4") or "").strip()
+            if ip and _windows_ipv4_assignable_for_bind(ip):
+                return ip
+    return None
+
+
 def _detect_mobile_bind_ip_windows() -> tuple[str | None, str | None]:
     """Pick first mobile-related IPv4 that actually binds locally (avoids WinError 10049 on ``-B``)."""
     if os.name != "nt":
@@ -2735,8 +2754,23 @@ async def tools_iperf_test(body: IperfTestBody) -> dict:
         )
     effective_port, port_range_requested = _iperf_resolve_port(body)
     limit_mbps = body.bitrate_limit_mbps
+    bind_adapter = str(body.bind_adapter or "").strip() or None
     bind_ip = str(body.bind_ip or "").strip() or None
-    if bind_ip:
+    if bind_adapter:
+        # Resolve by adapter name atomically in this request, closing the race window a
+        # client-cached IP snapshot would otherwise have against a rotating DHCP lease.
+        resolved = await asyncio.to_thread(_resolve_adapter_current_ip, bind_adapter)
+        if not resolved:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Adapter '{bind_adapter}' has no currently assignable IPv4 (disconnected, "
+                    "renegotiating, or no longer present). Refresh ifaces, pick a different "
+                    "interface, or use Mobile-only/Auto-detect."
+                ),
+            )
+        bind_ip = resolved
+    elif bind_ip:
         try:
             ipaddress.IPv4Address(bind_ip)
         except Exception as exc:  # noqa: BLE001
@@ -3009,8 +3043,23 @@ async def tools_icmp_ping(body: IcmpPingSweepBody) -> dict:
     await _require_packet_data_for_host_traffic_tests()
     host = body.host.strip() or "8.8.8.8"
     count = int(body.count)
+    bind_adapter = str(body.bind_adapter or "").strip() or None
     bind = str(body.bind_ipv4 or "").strip() or None
-    if bind:
+    if bind_adapter:
+        # Resolve by adapter name atomically in this request, closing the race window a
+        # client-cached IP snapshot would otherwise have against a rotating DHCP lease.
+        resolved = await asyncio.to_thread(_resolve_adapter_current_ip, bind_adapter)
+        if not resolved:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Adapter '{bind_adapter}' has no currently assignable IPv4 (disconnected, "
+                    "renegotiating, or no longer present). Refresh ifaces, pick a different "
+                    "interface, or use Auto-detect."
+                ),
+            )
+        bind = resolved
+    elif bind:
         try:
             ipaddress.IPv4Address(bind)
         except Exception as exc:  # noqa: BLE001
@@ -3673,6 +3722,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
             t_iter0 = time.time()
             if test_type == "ping":
                 bind_ip: str | None
+                bind_adapter = str(body.ping_bind_adapter_override or "").strip() or None
                 if body.ping_bind_ipv4_override is not None:
                     bind_ip = str(body.ping_bind_ipv4_override).strip() or None
                 else:
@@ -3682,6 +3732,7 @@ async def api_test_run(body: TestRunBody) -> dict[str, Any]:
                         host=str(cfg["host"]),
                         count=int(cfg["count"]),
                         bind_ipv4=bind_ip,
+                        bind_adapter=bind_adapter,
                         timeout_ms=int(cfg["timeout_ms"]),
                     )
                 )

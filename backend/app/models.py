@@ -136,6 +136,15 @@ class IperfTestBody(BaseModel):
     protocol: str = Field(default="tcp", description="Traffic mode: 'tcp' or 'udp'.")
     mobile_only: bool = Field(default=True, description="Bind iperf to mobile data interface/IP only.")
     bind_ip: str | None = Field(default=None, description="Optional local IPv4 to bind using iperf -B.")
+    bind_adapter: str | None = Field(
+        default=None,
+        description=(
+            "Optional Windows adapter label (from /api/tools/bind-interfaces). When set, the "
+            "server resolves this adapter's current IPv4 at request time (instead of trusting a "
+            "client-cached IP), avoiding staleness if the adapter's address rotated since the "
+            "dropdown was last populated."
+        ),
+    )
     bitrate_limit_mbps: float | None = Field(
         default=None,
         ge=0,
@@ -201,6 +210,15 @@ class IcmpPingSweepBody(BaseModel):
     host: str = Field(default="8.8.8.8", min_length=1, max_length=253)
     count: int = Field(default=10, ge=1, le=100)
     bind_ipv4: str | None = Field(default=None, description="Windows: ping -S source IPv4 (optional).")
+    bind_adapter: str | None = Field(
+        default=None,
+        description=(
+            "Optional Windows adapter label (from /api/tools/bind-interfaces). When set, the "
+            "server resolves this adapter's current IPv4 at request time (instead of trusting a "
+            "client-cached IP), avoiding staleness if the adapter's address rotated since the "
+            "dropdown was last populated."
+        ),
+    )
     timeout_ms: int | None = Field(
         default=None,
         ge=500,
@@ -218,6 +236,15 @@ class TestRunBody(BaseModel):
     ping_bind_ipv4_override: str | None = Field(
         default=None,
         description="ping profiles only: set to force bind (-S on Windows). Empty string = OS default route (no bind). Omit to use profile test_config.bind_ipv4.",
+    )
+    ping_bind_adapter_override: str | None = Field(
+        default=None,
+        description=(
+            "ping profiles only: Windows adapter label (from /api/tools/bind-interfaces). "
+            "Re-resolved to that adapter's current IPv4 fresh on every iteration, instead of "
+            "trusting a single IP snapshot across the whole multi-iteration run. Takes priority "
+            "over ping_bind_ipv4_override when set."
+        ),
     )
     include_ui_snapshot: bool = True
     ui_controls: dict[str, Any] | None = Field(
