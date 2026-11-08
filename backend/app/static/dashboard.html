@@ -3237,14 +3237,48 @@
       }
     }
 
-    function resolveIperfBindIp() {
+    // A manually-picked adapter's IPv4 can rotate (e.g. the mobile broadband adapter gets a
+    // new DHCP lease after a PDP reconnect) without the dropdown's frozen snapshot knowing.
+    // Before actually using a specific-adapter selection, re-check the live interface list by
+    // *adapter name* (not the possibly-stale IP) and self-heal the dropdown if it changed.
+    // Falls back to "auto" (empty bind) if that adapter has disappeared entirely, rather than
+    // handing a dead IP to ping/iperf and failing the whole sweep.
+    async function resolveLiveBindIp(selId) {
+      const sel = el(selId);
+      if (!sel) return "";
+      const v = sel.value;
+      if (v === "auto" || v === "manual" || v === "__profile__" || !v) return v;
+      const opt = sel.options[sel.selectedIndex];
+      const adapterName = opt?.dataset?.adapter || "";
+      if (!adapterName) return v;
+      try {
+        const r = await fetch("/api/tools/bind-interfaces");
+        const j = await r.json();
+        const rows = Array.isArray(j.interfaces) ? j.interfaces : [];
+        const match = rows.find((x) => String(x.adapter || "") === adapterName);
+        if (match && match.ipv4) {
+          if (match.ipv4 !== v) {
+            opt.value = match.ipv4;
+            opt.textContent = `${adapterName} — ${match.ipv4}`;
+            sel.value = match.ipv4;
+          }
+          return String(match.ipv4);
+        }
+      } catch (e) {
+        // Network hiccup fetching the interface list — fall through to the stale value;
+        // the backend's own pre-flight check will still catch it with a clear error.
+      }
+      return v;
+    }
+
+    async function resolveIperfBindIp() {
       const sel = el("iperf-bind-select");
       const inp = el("iperf-bind-ip");
       if (!sel) return "";
       const v = sel.value;
       if (v === "manual") return String(inp?.value || "").trim();
       if (v === "auto") return "";
-      return String(v || "").trim();
+      return String((await resolveLiveBindIp("iperf-bind-select")) || "").trim();
     }
 
     function syncPhBindUi() {
@@ -3260,14 +3294,14 @@
       }
     }
 
-    function resolvePhBindIp() {
+    async function resolvePhBindIp() {
       const sel = el("ph-bind-select");
       const inp = el("ph-bind-ip");
       if (!sel) return "";
       const v = sel.value;
       if (v === "manual") return String(inp?.value || "").trim();
       if (v === "auto") return "";
-      return String(v || "").trim();
+      return String((await resolveLiveBindIp("ph-bind-select")) || "").trim();
     }
 
     function syncTestRunnerBindUi() {
@@ -3283,7 +3317,7 @@
       }
     }
 
-    function resolveTestRunnerBindIp() {
+    async function resolveTestRunnerBindIp() {
       const sel = el("test-runner-bind-select");
       const inp = el("test-runner-bind-ip");
       if (!sel) return "";
@@ -3291,7 +3325,7 @@
       if (v === "__profile__") return "";
       if (v === "manual") return String(inp?.value || "").trim();
       if (v === "auto") return "";
-      return String(v || "").trim();
+      return String((await resolveLiveBindIp("test-runner-bind-select")) || "").trim();
     }
 
     async function loadBindInterfaces() {
@@ -3319,6 +3353,7 @@
             if (!ip || !okIp) continue;
             const o = document.createElement("option");
             o.value = ip;
+            o.dataset.adapter = ad;
             o.textContent = ad ? `${ad} — ${ip}` : ip;
             sel.appendChild(o);
           }
@@ -3409,7 +3444,7 @@
       const parallelStreamsDl = Number(el("iperf-parallel-dl")?.value || 1);
       const direction = String(el("iperf-direction")?.value || "both").trim().toLowerCase();
       const protocol = String(el("iperf-protocol")?.value || "tcp").trim().toLowerCase();
-      const bindIp = resolveIperfBindIp();
+      const bindIp = await resolveIperfBindIp();
       const speedLimitRaw = String(el("iperf-speed-limit")?.value || "").trim();
       const speedLimit = speedLimitRaw === "" ? null : Number(speedLimitRaw);
       if (!host) {
@@ -3739,7 +3774,7 @@
       const hostRaw = String(el("ph-host")?.value || "").trim();
       const host = hostRaw || "8.8.8.8";
       const count = Number(el("ph-count")?.value ?? 10);
-      const bindIp = resolvePhBindIp();
+      const bindIp = await resolvePhBindIp();
       if (!Number.isFinite(count) || count < 1 || count > 100) {
         el("ph-msg").textContent = "Count must be 1..100.";
         pingSweepBusy = false;
@@ -7670,7 +7705,9 @@
           } else if (trBind.value === "auto") {
             body.ping_bind_ipv4_override = "";
           } else {
-            body.ping_bind_ipv4_override = String(trBind.value || "").trim();
+            // Specific-adapter selection: re-check by adapter name in case its IPv4 rotated
+            // since the dropdown was last populated (e.g. a PDP reconnect renewed the lease).
+            body.ping_bind_ipv4_override = String((await resolveTestRunnerBindIp()) || "").trim();
           }
         }
         startTestRunnerProgressPoll();
