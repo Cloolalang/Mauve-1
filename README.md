@@ -1,10 +1,10 @@
 # 5G ModemTestDriver
 
-**Version 4.6** (this git tree / OpenAPI on `main`) — **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1)
+**Version 4.7** (this git tree / OpenAPI on `main`) — **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1)
 
-Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (the **page header** version matches whatever build you run—**v4.6** when built from **`main`**, or the release tag when using a **prebuilt** zip).
+Local web app and backend for Quectel modem control and live LTE/NSA KPI monitoring over serial AT commands. The browser UI and OpenAPI docs use the product name **5G ModemTestDriver** (the **page header** version matches whatever build you run—**v4.7** when built from **`main`**, or the release tag when using a **prebuilt** zip).
 
-**Prebuilt vs source:** The **Latest** [GitHub Release](https://github.com/Cloolalang/Mauve-1/releases/latest) ships **`5GModemTestDriver-windows-amd64.zip`** for its **tag only**; that tag can lag **`main`** until maintainers cut a new release. For **v4.6** behaviour, run from source (see **Quick start**) or **`build_exe.ps1`**, or wait for a GitHub Release **≥ v4.6**.
+**Prebuilt vs source:** The **Latest** [GitHub Release](https://github.com/Cloolalang/Mauve-1/releases/latest) ships **`5GModemTestDriver-windows-amd64.zip`** for its **tag only**; that tag can lag **`main`** until maintainers cut a new release. For **v4.7** behaviour, run from source (see **Quick start**) or **`build_exe.ps1`**, or wait for a GitHub Release **≥ v4.7**.
 
 License: [GNU General Public License v2.0](LICENSE).
 
@@ -140,6 +140,16 @@ If you used **`start.cmd`**, **`start.ps1`**, or **`uvicorn`**, focus that windo
 - **USB:** PC connected to the router’s **USB** port with a **data-capable** cable (see **Quick start**, step **1**)
 - Access to modem AT port (`COM49` by default)
 - Modem not locked by another serial terminal app
+
+**Changes in v4.7**
+
+- **Fix — manual Bind interface selection could fail with a stale-IP error**: the Quectel mobile broadband adapter's IPv4 renews (new DHCP lease) on every PDP reconnect, sometimes within minutes. Manually selecting an adapter in ping/iperf's **Bind interface** control previously sent a literal IP address captured at selection time, which could go stale by the time the request ran, failing with *"bind_ip is not currently assignable on this PC"*. The dashboard now sends the adapter **name** instead, and the backend resolves that adapter's **current** IP atomically inside the same request that uses it (`_resolve_adapter_current_ip`), eliminating the race entirely. **Auto-detect** was already reliable and is unaffected.
+- **Fix — Modem TCP connect test worked once then failed until "Allow data" was pressed again**: `modem_tcp_connect.py` had its own independent, non-retried PDP-active check (`AT+QIACT?`) that could read a momentarily-empty context list right after a reconnect and incorrectly conclude the context was down. It now retries once after a 1s pause before giving up, matching the hardened check already used by ping/iperf.
+- **Fix — Correlator chart: a disabled/stale trace visually "tracked forward" with a still-live trace**: in the default index-spaced x-axis mode, every trace's last sample was always pinned to the right edge of the chart ("now"), regardless of how long ago it actually happened. So turning off e.g. ping while iperf kept running made the frozen ping trace appear to keep pace with the live iperf trace. Each trace's rightmost point is now anchored to where its own last real sample falls in the time window, so a trace that stops updating correctly freezes at its last data point and scrolls out of view over time instead of being artificially stretched to match a still-live trace.
+- **New — iperf3 "Test timeout (s)" control** (default **20s**): replaces the old internal, non-configurable slack-based subprocess timeout formula with an explicit, user-visible overall wall-clock budget for the iperf3 subprocess call (5–600s, must exceed Duration + Connect timeout). Available in the manual iperf tool, the Test Runner profile schema, and logged as a new `iperf_test_timeout_sec` CSV column.
+- **New — iperf continuous-sweep gap control** (10–60s, default 15s): continuous iperf sweeps no longer re-fire back-to-back; a configurable minimum gap between tests is enforced.
+- **Defaults changed**: **Auto-recover PDP** is now **on** by default for both ping and iperf; default iperf **port** is now **5350**; the continuous-sweep data cap for both **ping** and **iperf** is now **30 minutes** (was 5 minutes for iperf, unlimited for ping — ping now also auto-stops at the cap).
+- **OpenAPI / page header**: **v4.7**.
 
 **Changes in v4.6**
 

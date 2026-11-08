@@ -1,6 +1,15 @@
 # 5G ModemTestDriver — backend (serial AT engine)
 
-**Version 4.6** — see root [`README.md`](../README.md) for the full feature overview. **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1). FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **4.6**).
+**Version 4.7** — see root [`README.md`](../README.md) for the full feature overview. **GitHub:** [Cloolalang/Mauve-1](https://github.com/Cloolalang/Mauve-1). FastAPI/Swagger title: **5G ModemTestDriver** (OpenAPI version **4.7**).
+
+Notes for **v4.7**:
+
+- **`main.py` — atomic bind-adapter resolution**: `_resolve_adapter_current_ip()` resolves an adapter's current IPv4 fresh inside the same request that uses it; `bind_adapter` (adapter name) added to `IcmpPingSweepBody`/`IperfTestBody`, `ping_bind_adapter_override` added to `TestRunBody`. Fixes a client/server race where a manually-selected adapter's cached IP could go stale between selection and use (the Quectel adapter renews its DHCP lease on every PDP reconnect).
+- **`modem_tcp_connect.py`**: PDP-active (`AT+QIACT?`) check now retries once after 1s before concluding the context is down, matching the pattern already used for ping/iperf. Fixes TCP-connect tests failing on the second run after "Allow data" until data was re-allowed.
+- **`static/dashboard.html` — Correlator chart**: `drawCorrChart()`'s index-mode `xFor()` now anchors each trace's rightmost point to its own last real sample's position in the time window instead of always to the live edge, so a trace that stops updating freezes at its true last data point instead of visually tracking forward with a still-live trace. Hover-tooltip hit-testing updated to match.
+- **`models.py` / `main.py` — iperf `test_timeout_sec`**: new explicit, user-controlled overall wall-clock timeout for the iperf3 subprocess call (5–600s, default 20s), replacing the old internal slack-based formula (`slack_dl`/`slack_ul`/`stream_slack`/`connect_slack`). Validated to exceed `duration_sec + connect_timeout_sec`. Wired into the Test Runner profile path and a new `iperf_test_timeout_sec` CSV column.
+- **Defaults**: `auto_recover_pdp` on by default (ping + iperf); iperf default port `5350`; continuous-sweep cap `30min` for both ping and iperf; new iperf sweep-gap control (10–60s, default 15s).
+- OpenAPI / page header: **v4.7**.
 
 Notes for **v4.6**:
 
