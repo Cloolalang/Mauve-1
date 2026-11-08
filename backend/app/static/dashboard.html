@@ -8208,11 +8208,26 @@
         }
 
         const n = samples.length;
-        const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
+        // Anchor this trace's rightmost point to where its OWN last real sample
+        // actually falls in the time window, instead of always stretching to x1
+        // ("now"). Without this, a trace that stops receiving new samples (e.g.
+        // ping turned off) gets its remaining stale points re-stretched to the
+        // live edge every redraw as the window advances and old points age out
+        // of `windowedRaw` — making it look like it's still tracking forward in
+        // lock-step with a still-live trace. By freezing the trace's end at its
+        // true last-sample time, it correctly stays put and then scrolls left
+        // (and eventually disappears) as time passes, just like a live trace's
+        // most-recent point would if it, too, stopped updating.
+        const lastT = Number(samples[n - 1]?.t);
+        const lastFrac = Number.isFinite(lastT)
+          ? Math.max(0, Math.min(1, (lastT - windowStartMs) / corrChartWindowMs))
+          : 1;
+        const xEnd = x0 + lastFrac * (x1 - x0);
+        const xStep = n > 1 ? (xEnd - x0) / (n - 1) : 0;
         const xFor = (p, i) => {
-          if (!corrGapModeEnabled) return x0 + i * xStep;
+          if (!corrGapModeEnabled) return n > 1 ? x0 + i * xStep : xEnd;
           const t = Number(p?.t);
-          if (!Number.isFinite(t)) return x0 + i * xStep;
+          if (!Number.isFinite(t)) return n > 1 ? x0 + i * xStep : xEnd;
           return x0 + Math.max(0, Math.min(1, (t - windowStartMs) / corrChartWindowMs)) * (x1 - x0);
         };
         // invertY: high value = bottom of chart (e.g. ping RTT — worse = lower, matching RF KPIs)
@@ -8336,7 +8351,16 @@
           const { kpiDef, samples } = td;
           if (!samples.length) return;
           const n = samples.length;
-          const xStep = n > 1 ? (x1 - x0) / (n - 1) : 0;
+          // Mirror drawCorrChart()'s xFor: in index mode, anchor this trace's
+          // last point to where its own last real sample falls in the window
+          // (not always to x1) so hover hit-testing matches what is drawn for
+          // a stale (no-longer-updating) trace.
+          const lastT = Number(samples[n - 1]?.t);
+          const lastFrac = Number.isFinite(lastT)
+            ? Math.max(0, Math.min(1, (lastT - windowStartMs) / windowMs))
+            : 1;
+          const xEnd = x0 + lastFrac * (x1 - x0);
+          const xStep = n > 1 ? (xEnd - x0) / (n - 1) : 0;
           let nearest = null;
           if (gapMode) {
             const tAtX = windowStartMs + ((hx - x0) / (x1 - x0)) * windowMs;
