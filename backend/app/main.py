@@ -2234,18 +2234,37 @@ async def network_data_gate_get() -> dict:
 
 
 async def _require_packet_data_for_host_traffic_tests() -> None:
-    """Reject ping/iperf when PDP is down. Uses AT+QIACT? (same parsing as KPI)."""
-    qiact_res = await engine.send_command("AT+QIACT?", timeout_sec=4.0)
-    contexts = _parse_qiact(qiact_res.get("lines", []))
-    active = [c for c in contexts if c.get("active")]
+    """Reject ping/iperf when PDP is down. Uses AT+QIACT? (same parsing as KPI).
 
-    if qiact_res.get("ok") and len(active) > 0:
+    A single read is not trusted on its own: on a busy AT port (continuous ping/iperf
+    sweeps add their own QIACT? check here on top of the background KPI data-service
+    poll, and the Quectel AT port can briefly lag while the module pushes real
+    throughput) one QIACT? call can time out or transiently echo "no active context"
+    even though the PDP context never actually went down. Retry once after a short
+    pause before concluding data is really inhibited, so continuous sweeps don't get
+    spuriously killed by a one-off blip.
+    """
+
+    async def _read_qiact_active() -> tuple[bool, list[dict[str, Any]]]:
+        res = await engine.send_command("AT+QIACT?", timeout_sec=4.0)
+        ctxs = _parse_qiact(res.get("lines", []))
+        return bool(res.get("ok")), [c for c in ctxs if c.get("active")]
+
+    ok1, active1 = await _read_qiact_active()
+    if ok1 and len(active1) > 0:
         return
-    if qiact_res.get("ok") and len(active) == 0:
-        raise HTTPException(
-            status_code=409,
-            detail="Packet data is inhibited (no active PDP context). Use Allow Data before running ping or iperf.",
-        )
+    if ok1 and len(active1) == 0:
+        # Confirm with a second read before failing a continuous sweep on one blip.
+        await asyncio.sleep(1.0)
+        ok2, active2 = await _read_qiact_active()
+        if ok2 and len(active2) > 0:
+            return
+        if ok2 and len(active2) == 0:
+            raise HTTPException(
+                status_code=409,
+                detail="Packet data is inhibited (no active PDP context). Use Allow Data before running ping or iperf.",
+            )
+        # ok2 is False here (second read also failed) — fall through to the KPI-snapshot check below.
 
     # QIACT? failed (busy modem, timeout) — avoid false "inhibited" using recent KPI snapshot.
     async with kpi_runtime.lock:

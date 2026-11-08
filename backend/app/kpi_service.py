@@ -1473,6 +1473,24 @@ async def refresh_data_service_snapshot(engine: SerialEngine, runtime: KpiRuntim
     active_by_cid = {x.get("cid"): x for x in active if isinstance(x.get("cid"), int)}
     primary_ctx = primary_ctx_ds
     cid1 = active_by_cid.get(1) or {}
+    # AT+QIACT? can legitimately time out when the AT port is busy/congested (continuous
+    # ping/iperf sweeps add their own QIACT? gate check on top of this background poll,
+    # and the Quectel AT port can also lag while the module is pushing real throughput).
+    # A failed/empty read here must NOT be treated as "0 active contexts": that reading
+    # gets timestamped as "fresh" below and then trusted by
+    # ``_require_packet_data_for_host_traffic_tests()``'s fallback path, producing a
+    # false "Packet data is inhibited" 409 against ping/iperf even though the PDP
+    # context never actually went down. Keep the previous known-good values instead.
+    qiact_ok = bool(qiact.get("ok"))
+    if not qiact_ok:
+        prev_ds = dict(runtime.data_service or {})
+        active_pdp_contexts_val: int | None = prev_ds.get("active_pdp_contexts")
+        cid1_active_val = prev_ds.get("cid1_active")
+        cid1_ip_val = prev_ds.get("cid1_ip")
+    else:
+        active_pdp_contexts_val = sum(1 for x in active if x.get("active"))
+        cid1_active_val = cid1.get("active")
+        cid1_ip_val = cid1.get("ip")
     primary_cid = primary_cid_ds
     ca_one = next((r for r in auth_rows if r.get("cid") == primary_cid), None)
     qi_one = next((r for r in qicsgp_rows if r.get("cid") == primary_cid), None)
@@ -1531,7 +1549,7 @@ async def refresh_data_service_snapshot(engine: SerialEngine, runtime: KpiRuntim
         "pdp_username": pdp_user,
         "pdp_password_reported": pwd_hint,
         "pdp_contexts": len(contexts),
-        "active_pdp_contexts": sum(1 for x in active if x.get("active")),
+        "active_pdp_contexts": active_pdp_contexts_val,
         "packet_attached": cgatt_v == 1 if cgatt_v is not None else None,
         "eps_reg_stat": _creg_stat,
         "eps_registered": _creg_stat in (1, 5) if _creg_stat is not None else None,
@@ -1544,8 +1562,9 @@ async def refresh_data_service_snapshot(engine: SerialEngine, runtime: KpiRuntim
         "nr5g_reject_cause_type": _nr5g_reject_cause_type,
         "nr5g_reject_cause": _nr5g_reject_cause,
         "nr5g_reject_cause_label": _nr5g_reject_cause_label,
-        "cid1_active": cid1.get("active"),
-        "cid1_ip": cid1.get("ip"),
+        "cid1_active": cid1_active_val,
+        "cid1_ip": cid1_ip_val,
+        "qiact_query_ok": qiact_ok,
         "usbnet_mode": usbnet_mode,
         "usbnet_mode_label": _usbnet_mode_label(usbnet_mode),
         "qnetdev_status": qnetdev_status,
